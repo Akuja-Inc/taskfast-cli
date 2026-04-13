@@ -6,5 +6,6 @@ export {
   ValidationError,
   RateLimited,
   ServerError,
+  responseToError,
 } from "./errors.js";
 export type { RetryOptions } from "./retry.js";

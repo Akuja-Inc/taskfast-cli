@@ -37,6 +37,17 @@ export class RateLimited extends TaskFastError {
   }
 }
 
+export function responseToError(response: Response, body: unknown): TaskFastError | null {
+  const { status } = response;
+  if (status === 401 || status === 403) return new AuthError(status, body);
+  if (status === 422 || status === 409) return new ValidationError(status, body);
+  if (status === 429) {
+    return new RateLimited(status, body, parseRetryAfter(response.headers.get("retry-after")));
+  }
+  if (status >= 500) return new ServerError(status, body);
+  return null;
+}
+
 export function parseRetryAfter(header: string | null): number | undefined {
   if (!header) return undefined;
   const seconds = Number(header);

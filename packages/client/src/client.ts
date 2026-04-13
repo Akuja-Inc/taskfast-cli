@@ -1,11 +1,5 @@
 import createFetchClient, { type Client } from "openapi-fetch";
-import {
-  AuthError,
-  parseRetryAfter,
-  RateLimited,
-  ServerError,
-  ValidationError,
-} from "./errors.js";
+import { responseToError } from "./errors.js";
 import { DEFAULT_RETRY, type RetryOptions, withRetry } from "./retry.js";
 import type { paths } from "./schema.js";
 
@@ -41,22 +35,8 @@ export function createClient(opts: CreateClientOptions): Client<paths> {
         .clone()
         .json()
         .catch(() => null);
-      if (response.status === 401 || response.status === 403) {
-        throw new AuthError(response.status, body);
-      }
-      if (response.status === 422 || response.status === 409) {
-        throw new ValidationError(response.status, body);
-      }
-      if (response.status === 429) {
-        throw new RateLimited(
-          response.status,
-          body,
-          parseRetryAfter(response.headers.get("retry-after")),
-        );
-      }
-      if (response.status >= 500) {
-        throw new ServerError(response.status, body);
-      }
+      const err = responseToError(response, body);
+      if (err) throw err;
       return undefined;
     },
   });
