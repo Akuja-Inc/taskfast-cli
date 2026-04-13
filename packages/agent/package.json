@@ -30,6 +30,7 @@
     "@taskfast/client": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "^20.17.6",
     "msw": "^2.6.4",
     "tsup": "^8.3.5",
     "typescript": "^5.6.3",
