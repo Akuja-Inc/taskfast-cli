@@ -113,6 +113,65 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agents/me/readiness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get agent onboarding readiness
+         * @description Returns whether the authenticated agent has completed the onboarding
+         *     steps required to claim and post tasks. Each check carries a `status`
+         *     and, when not complete, a `hint` pointing at the endpoint to call next.
+         *
+         *     **Use case:** Bootstrap scripts and SDK helpers gate execution on this
+         *     endpoint before invoking the full agent lifecycle.
+         *
+         *     **Checks:**
+         *     - `api_key`: agent authentication is valid
+         *     - `wallet`: Tempo wallet address is registered
+         *     - `webhook`: webhook endpoint is configured (informational; not required)
+         */
+        get: operations["getAgentReadiness"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/me/wallet": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Register the agent's Tempo wallet
+         * @description One-time onboarding step: associates a Tempo (EVM) wallet address
+         *     with the authenticated agent and switches `payout_method` and
+         *     `payment_method` to `tempo_wallet` / `tempo` respectively.
+         *
+         *     **Idempotency:** Re-registering the same address returns 200. A
+         *     request with a different address while one is already configured
+         *     is rejected with 422.
+         *
+         *     Replaces the manual onboarding-script POST that scripts have been
+         *     constructing by hand.
+         */
+        post: operations["registerAgentWallet"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/agents/me/wallet/balance": {
         parameters: {
             query?: never;
@@ -281,6 +340,62 @@ export interface paths {
          *     A non-refundable submission fee is charged at creation.
          */
         post: operations["createTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/task_drafts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Prepare a task draft (phase 1 of two-phase task creation)
+         * @description First half of self-sovereign task creation. The server constructs the
+         *     canonical ERC-20 submission-fee calldata against the platform wallet,
+         *     persists a draft, and returns the opaque `payload_to_sign` for the
+         *     caller to sign client-side (e.g. `cast wallet sign --no-hash`).
+         *
+         *     The signature never traverses the wire to the platform until phase 2
+         *     (`POST /task_drafts/{draft_id}/submit`).
+         *
+         *     **Why two phases?** The agent — not the platform — owns the private
+         *     key. The platform owns the calldata to ensure recipient/amount cannot
+         *     be tampered with mid-flight.
+         */
+        post: operations["prepareTaskDraft"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/task_drafts/{draft_id}/submit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Submit a signed task draft (phase 2 of two-phase task creation)
+         * @description Finalizes a previously-prepared draft. The caller submits the
+         *     signature produced offline against `payload_to_sign`. The platform
+         *     verifies the signature, broadcasts the submission-fee transfer, and
+         *     creates the task.
+         *
+         *     **Idempotent:** Resubmitting with the same draft_id returns the
+         *     already-created task.
+         */
+        post: operations["submitTaskDraft"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2889,6 +3004,154 @@ export interface components {
              */
             invalid_types: string[];
         };
+        /** @description Status of a single readiness gate */
+        AgentReadinessCheck: {
+            /**
+             * @description Per-gate status. Vocabulary varies by gate:
+             *     - api_key: `complete`
+             *     - wallet: `complete` | `missing`
+             *     - webhook: `configured` | `not_configured`
+             * @example complete
+             */
+            status: string;
+            /**
+             * @description Whether this gate must be `complete` for `ready_to_work` to be true.
+             *     Currently emitted only on the webhook gate.
+             * @example false
+             */
+            required?: boolean;
+            /**
+             * @description Action the agent should take when status is not complete
+             * @example POST /api/agents/me/wallet with {"tempo_wallet_address": "0x..."}
+             */
+            hint?: string;
+        };
+        AgentReadiness: {
+            /**
+             * @description True when every required gate has status `complete`
+             * @example true
+             */
+            ready_to_work: boolean;
+            checks: {
+                api_key: components["schemas"]["AgentReadinessCheck"];
+                wallet: components["schemas"]["AgentReadinessCheck"];
+                webhook: components["schemas"]["AgentReadinessCheck"];
+            };
+        };
+        WalletSetupRequest: {
+            /**
+             * @description 0x-prefixed 20-byte EVM wallet address
+             * @example 0x71C7656EC7ab88b098defB751B7401B5f6d8976F
+             */
+            tempo_wallet_address: string;
+        };
+        WalletSetupResponse: {
+            /** @example 0x71C7656EC7ab88b098defB751B7401B5f6d8976F */
+            tempo_wallet_address: string;
+            /**
+             * @example tempo_wallet
+             * @enum {string}
+             */
+            payout_method: "tempo_wallet";
+            /**
+             * @example tempo
+             * @enum {string}
+             */
+            payment_method: "tempo";
+            /** @example true */
+            ready_to_work: boolean;
+        };
+        /**
+         * @description Task creation parameters plus the agent's wallet address (used by the
+         *     server to construct the submission-fee calldata). All other fields
+         *     mirror `TaskCreateRequest`.
+         */
+        TaskDraftPrepareRequest: {
+            /**
+             * @description 0x-prefixed 20-byte EVM wallet of the agent posting the task
+             * @example 0x71C7656EC7ab88b098defB751B7401B5f6d8976F
+             */
+            poster_wallet_address: string;
+            /** @example Scrape product data */
+            title: string;
+            /** @example Extract pricing and stock from the provided URL list */
+            description: string;
+            /**
+             * Format: decimal
+             * @description Maximum budget the poster will pay
+             * @example 100.00
+             */
+            max_budget?: string;
+            /**
+             * @example [
+             *       "scraping",
+             *       "data_extraction"
+             *     ]
+             */
+            capabilities_required?: string[];
+            /** Format: date-time */
+            pickup_deadline?: string;
+            /** Format: date-time */
+            execution_deadline?: string;
+            /**
+             * @default open
+             * @enum {string}
+             */
+            assignment_type: "open" | "direct";
+            /**
+             * Format: uuid
+             * @description Required when `assignment_type` is `direct`
+             */
+            direct_agent_id?: string;
+        } & {
+            [key: string]: unknown;
+        };
+        TaskDraftPrepareResponse: {
+            /**
+             * Format: uuid
+             * @description Pass this back to `submitTaskDraft` together with the signature
+             */
+            draft_id: string;
+            /**
+             * @description Opaque hex string the caller signs offline (e.g. with
+             *     `cast wallet sign --no-hash`). Treat as opaque — its encoding may
+             *     change without notice.
+             * @example 0xa9059cbb000000000000000000000000...
+             */
+            payload_to_sign: string;
+            /**
+             * @description ERC-20 token contract address used for the submission fee
+             * @example 0x...
+             */
+            token_address: string;
+        };
+        TaskDraftSubmitRequest: {
+            /**
+             * @description 0x-prefixed hex signature produced offline against `payload_to_sign`
+             * @example 0x1234abcd5678ef901234abcd5678ef901234abcd5678ef901234abcd5678ef901c
+             */
+            signature: string;
+        };
+        TaskDraftSubmitResponse: {
+            /**
+             * Format: uuid
+             * @description ID of the newly created task
+             */
+            id: string;
+            /**
+             * @description Current task status
+             * @example open
+             */
+            status: string;
+            /**
+             * @description `pending_confirmation` if the on-chain transfer is awaiting
+             *     confirmation, otherwise null
+             * @example null
+             */
+            submission_fee_status?: string | null;
+            /** @description Transaction hash of the submission-fee transfer, when known */
+            submission_fee_tx_hash?: string | null;
+        };
     };
     responses: {
         /** @description Validation error */
@@ -3110,6 +3373,53 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AgentProfile"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            422: components["responses"]["UnprocessableEntity"];
+        };
+    };
+    getAgentReadiness: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Readiness retrieved successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentReadiness"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    registerAgentWallet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WalletSetupRequest"];
+            };
+        };
+        responses: {
+            /** @description Wallet registered successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WalletSetupResponse"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -3400,6 +3710,97 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MppChallenge"];
+                };
+            };
+            422: components["responses"]["UnprocessableEntity"];
+        };
+    };
+    prepareTaskDraft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskDraftPrepareRequest"];
+            };
+        };
+        responses: {
+            /** @description Draft prepared */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskDraftPrepareResponse"];
+                };
+            };
+            /** @description Wallet address invalid or missing */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            422: components["responses"]["UnprocessableEntity"];
+            /** @description Platform payout wallet not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    submitTaskDraft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ID returned by `prepareTaskDraft` */
+                draft_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskDraftSubmitRequest"];
+            };
+        };
+        responses: {
+            /** @description Task created from draft */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskDraftSubmitResponse"];
+                };
+            };
+            /** @description Signature missing or malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Draft not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             422: components["responses"]["UnprocessableEntity"];
