@@ -47,7 +47,7 @@ fn envelope_value(env: &Envelope) -> serde_json::Value {
 
 async fn mount_profile_active(server: &MockServer) {
     Mock::given(method("GET"))
-        .and(path("/agents/me"))
+        .and(path("/api/agents/me"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "00000000-0000-0000-0000-000000000042",
             "name": "alice",
@@ -64,7 +64,7 @@ async fn mount_readiness(
     ready_to_work: bool,
 ) {
     Mock::given(method("GET"))
-        .and(path("/agents/me/readiness"))
+        .and(path("/api/agents/me/readiness"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "ready_to_work": ready_to_work,
             "checks": {
@@ -84,7 +84,7 @@ async fn byow_happy_path_registers_wallet_and_writes_env_file() {
     mount_readiness(&server, "missing", false).await;
 
     Mock::given(method("POST"))
-        .and(path("/agents/me/wallet"))
+        .and(path("/api/agents/me/wallet"))
         .and(body_partial_json(json!({
             "tempo_wallet_address": BYOW_ADDRESS,
         })))
@@ -186,7 +186,7 @@ async fn dry_run_byow_skips_registration_and_env_write() {
 async fn inactive_agent_status_surfaces_validation_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/agents/me"))
+        .and(path("/api/agents/me"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "name": "alice",
             "status": "suspended",
@@ -287,7 +287,7 @@ async fn generate_wallet_with_password_file_persists_keystore_and_registers() {
     // Accept any POST /agents/me/wallet (address is dynamic — freshly
     // generated signer) and echo it back.
     Mock::given(method("POST"))
-        .and(path("/agents/me/wallet"))
+        .and(path("/api/agents/me/wallet"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "tempo_wallet_address": "0x0000000000000000000000000000000000000000",
             "payout_method": "tempo_wallet",

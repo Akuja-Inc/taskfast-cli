@@ -45,6 +45,12 @@ impl TaskFastClient {
     /// Construct a client from an API key. The key is sent as `X-API-Key`
     /// on every request; the underlying reqwest::Client marks the header
     /// sensitive so it won't appear in debug traces.
+    ///
+    /// `base_url` is the API host (e.g. `https://api.taskfast.app`). The
+    /// spec's server prefix (`/api`) is appended here — progenitor bakes
+    /// the unprefixed path keys from the spec into generated code, so the
+    /// prefix must be carried on the baseurl or every endpoint is off by one.
+    /// Callers pass hosts, not versioned paths; a trailing `/` is tolerated.
     pub fn from_api_key(base_url: &str, api_key: &str) -> Result<Self> {
         let mut value = HeaderValue::from_str(api_key)
             .map_err(|_| Error::Auth("api key contains invalid header bytes".into()))?;
@@ -58,8 +64,10 @@ impl TaskFastClient {
             .timeout(DEFAULT_REQUEST_TIMEOUT)
             .build()?;
 
+        let resolved = format!("{}/api", base_url.trim_end_matches('/'));
+
         Ok(Self {
-            inner: api::Client::new_with_client(base_url, http),
+            inner: api::Client::new_with_client(&resolved, http),
             policy: RetryPolicy::default(),
         })
     }

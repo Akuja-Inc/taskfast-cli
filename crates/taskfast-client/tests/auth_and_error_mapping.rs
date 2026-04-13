@@ -30,7 +30,7 @@ fn fixture_client(base_url: &str) -> TaskFastClient {
 async fn x_api_key_header_is_injected() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/platform/config"))
+        .and(path("/api/platform/config"))
         .and(header("x-api-key", "test-key-123"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
         .mount(&server)
@@ -48,7 +48,7 @@ async fn x_api_key_header_is_injected() {
 async fn status_401_maps_to_auth_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/platform/config"))
+        .and(path("/api/platform/config"))
         .respond_with(
             ResponseTemplate::new(401)
                 .set_body_json(serde_json::json!({
@@ -71,7 +71,7 @@ async fn status_401_maps_to_auth_error() {
 async fn status_422_maps_to_validation_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/platform/config"))
+        .and(path("/api/platform/config"))
         .respond_with(
             ResponseTemplate::new(422)
                 .set_body_json(serde_json::json!({
@@ -97,7 +97,7 @@ async fn status_422_maps_to_validation_error() {
 async fn status_429_maps_to_rate_limited_with_retry_after() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/platform/config"))
+        .and(path("/api/platform/config"))
         .respond_with(
             ResponseTemplate::new(429)
                 .insert_header("retry-after", "7")
@@ -120,7 +120,7 @@ async fn status_429_maps_to_rate_limited_with_retry_after() {
 async fn status_429_without_retry_after_defaults_to_one_second() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/platform/config"))
+        .and(path("/api/platform/config"))
         .respond_with(ResponseTemplate::new(429))
         .mount(&server)
         .await;
@@ -155,7 +155,7 @@ async fn retry_503_exhausts_max_attempts_then_returns_server_error() {
     let server = MockServer::start().await;
     let counter = CountingRespond::default();
     Mock::given(method("GET"))
-        .and(path("/platform/config"))
+        .and(path("/api/platform/config"))
         .respond_with(counter.clone())
         .mount(&server)
         .await;
@@ -214,7 +214,7 @@ async fn retry_recovers_when_upstream_heals() {
         fail_until_attempt: 2,
     };
     Mock::given(method("GET"))
-        .and(path("/platform/config"))
+        .and(path("/api/platform/config"))
         .respond_with(responder.clone())
         .mount(&server)
         .await;

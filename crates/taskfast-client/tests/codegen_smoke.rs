@@ -8,6 +8,11 @@
 //!
 //! We deliberately pick `GET /platform/config` — no auth, no request body,
 //! no path params — so the test exercises codegen wiring without fixture churn.
+//!
+//! Note: this test uses the **raw** `api::Client` (not `TaskFastClient`), so
+//! the `/api` server prefix is NOT applied here — the wiremock path matches
+//! the unprefixed spec path exactly as progenitor emits it. `TaskFastClient`-
+//! based tests (e.g. `auth_and_error_mapping.rs`) register `/api/...` paths.
 
 use taskfast_client::api::{Client, Error};
 use wiremock::matchers::{method, path};

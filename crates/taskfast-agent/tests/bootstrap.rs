@@ -37,7 +37,7 @@ fn sample_create_request() -> AgentCreateRequest {
 async fn validate_auth_returns_profile_on_200() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/agents/me"))
+        .and(path("/api/agents/me"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id": "00000000-0000-0000-0000-000000000042",
             "name": "alice",
@@ -55,7 +55,7 @@ async fn validate_auth_returns_profile_on_200() {
 async fn validate_auth_401_surfaces_auth_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/agents/me"))
+        .and(path("/api/agents/me"))
         .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
             "error": "invalid_api_key", "message": "bad key",
         })))
@@ -72,7 +72,7 @@ async fn validate_auth_401_surfaces_auth_error() {
 async fn create_agent_headless_returns_response_with_api_key() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/agents"))
+        .and(path("/api/agents"))
         .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
             "id": "00000000-0000-0000-0000-000000000099",
             "name": "alice",
@@ -92,7 +92,7 @@ async fn create_agent_headless_returns_response_with_api_key() {
 async fn create_agent_headless_fails_when_response_omits_api_key() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/agents"))
+        .and(path("/api/agents"))
         // 201 but no api_key — server contract violation.
         .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
             "id": "00000000-0000-0000-0000-000000000099",
@@ -115,7 +115,7 @@ async fn create_agent_headless_fails_when_response_omits_api_key() {
 async fn create_agent_headless_fails_when_api_key_empty_string() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/agents"))
+        .and(path("/api/agents"))
         .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
             "id": "00000000-0000-0000-0000-000000000099",
             "api_key": "",
@@ -134,7 +134,7 @@ async fn create_agent_headless_fails_when_api_key_empty_string() {
 async fn get_readiness_returns_checks() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/agents/me/readiness"))
+        .and(path("/api/agents/me/readiness"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "ready_to_work": false,
             "checks": {

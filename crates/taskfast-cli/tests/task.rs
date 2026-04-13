@@ -38,7 +38,7 @@ fn paginated(cursor: Option<&str>) -> serde_json::Value {
 async fn list_mine_forwards_status_and_cursor_and_returns_tasks() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/agents/me/tasks"))
+        .and(path("/api/agents/me/tasks"))
         .and(query_param("status", "in_progress"))
         .and(query_param("cursor", "abc"))
         .and(query_param("limit", "5"))
@@ -70,7 +70,7 @@ async fn list_mine_forwards_status_and_cursor_and_returns_tasks() {
 async fn list_queue_hits_queue_endpoint() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/agents/me/queue"))
+        .and(path("/api/agents/me/queue"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [],
             "meta": paginated(None),
@@ -96,7 +96,7 @@ async fn list_queue_hits_queue_endpoint() {
 async fn list_posted_hits_posted_endpoint() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/agents/me/posted_tasks"))
+        .and(path("/api/agents/me/posted_tasks"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [],
             "meta": paginated(None),
@@ -141,7 +141,7 @@ async fn list_status_with_non_mine_kind_is_usage_error() {
 async fn get_returns_task_detail() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path(format!("/tasks/{TASK_ID}")))
+        .and(path(format!("/api/tasks/{TASK_ID}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": TASK_ID,
             "title": "test task",
@@ -188,7 +188,7 @@ async fn get_bad_uuid_is_usage_error_without_hitting_server() {
 async fn get_404_surfaces_as_validation_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path(format!("/tasks/{TASK_ID}")))
+        .and(path(format!("/api/tasks/{TASK_ID}")))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({
             "error": "task_not_found",
             "message": "no task with that id",
@@ -214,7 +214,7 @@ async fn get_404_surfaces_as_validation_error() {
 async fn list_401_surfaces_as_auth_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/agents/me/tasks"))
+        .and(path("/api/agents/me/tasks"))
         .respond_with(ResponseTemplate::new(401).set_body_json(json!({
             "error": "invalid_api_key",
             "message": "bad key",
