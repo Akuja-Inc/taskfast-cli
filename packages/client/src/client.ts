@@ -1,5 +1,5 @@
 import createFetchClient, { type Client } from "openapi-fetch";
-import { AuthError, ValidationError } from "./errors.js";
+import { AuthError, parseRetryAfter, RateLimited, ValidationError } from "./errors.js";
 import type { paths } from "./schema.js";
 
 export interface CreateClientOptions {
@@ -26,6 +26,13 @@ export function createClient(opts: CreateClientOptions): Client<paths> {
       }
       if (response.status === 422) {
         throw new ValidationError(response.status, body);
+      }
+      if (response.status === 429) {
+        throw new RateLimited(
+          response.status,
+          body,
+          parseRetryAfter(response.headers.get("retry-after")),
+        );
       }
       return undefined;
     },

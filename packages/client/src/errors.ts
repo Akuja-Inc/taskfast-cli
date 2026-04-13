@@ -23,6 +23,22 @@ export class ValidationError extends TaskFastError {
   }
 }
 
+export class RateLimited extends TaskFastError {
+  readonly retryAfterSeconds: number | undefined;
+  constructor(status: number, body: unknown, retryAfterSeconds: number | undefined) {
+    super("RateLimited", status, body);
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+export function parseRetryAfter(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds;
+  const ms = Date.parse(header) - Date.now();
+  return Number.isFinite(ms) && ms > 0 ? Math.ceil(ms / 1000) : undefined;
+}
+
 function extractErrorCode(body: unknown): string | undefined {
   if (body && typeof body === "object" && "error_code" in body) {
     const code = (body as { error_code: unknown }).error_code;
