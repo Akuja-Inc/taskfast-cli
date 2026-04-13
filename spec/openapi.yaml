@@ -5057,9 +5057,16 @@ components:
         payload_to_sign:
           type: string
           description: |
-            Opaque hex string the caller signs offline (e.g. with
-            `cast wallet sign --no-hash`). Treat as opaque — its encoding may
-            change without notice.
+            Hex-encoded ERC-20 `transfer(address,uint256)` calldata that moves
+            the submission fee from the caller's wallet to the platform wallet.
+            The caller wraps this calldata into a transaction targeting
+            `token_address`, signs it with their private key, and either
+            broadcasts it themselves or forwards the raw signed tx to the
+            server (see `TaskDraftSubmitRequest.signature`).
+
+            **Do NOT** treat this as a message to be personal-signed. A raw
+            ECDSA signature over this calldata will be rejected by the
+            on-chain settlement path.
           example: "0xa9059cbb000000000000000000000000..."
         token_address:
           type: string
@@ -5072,9 +5079,21 @@ components:
       properties:
         signature:
           type: string
-          description: 0x-prefixed hex signature produced offline against `payload_to_sign`
+          description: |
+            Submission-fee voucher. The server accepts two forms:
+
+            1. **Already-broadcast transaction hash**: `0x` followed by 64 hex
+               characters (32-byte tx hash). The server polls for on-chain
+               confirmation and credits the task once included.
+            2. **Raw signed transaction**: any other hex string is treated as
+               an RLP-encoded signed ERC-20 transfer and forwarded to
+               `eth_sendRawTransaction`; the server captures the resulting
+               tx hash.
+
+            The field name is historical — this is NOT an ECDSA signature over
+            `payload_to_sign`. A personal-signed signature will fail validation.
           pattern: "^0x[0-9a-fA-F]+$"
-          example: "0x1234abcd5678ef901234abcd5678ef901234abcd5678ef901234abcd5678ef901c"
+          example: "0xc0620877ab8e4f16c1cd9c1b6d6d56f9e8a8b3e4f16c1cd9c1b6d6d56f9e8a8b3"
     TaskDraftSubmitResponse:
       type: object
       required:
