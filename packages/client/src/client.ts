@@ -14,12 +14,14 @@ export interface CreateClientOptions {
   apiKey: string;
   fetch?: typeof globalThis.fetch;
   retry?: RetryOptions;
+  treat409AsSuccess?: boolean;
 }
 
 export function createClient(opts: CreateClientOptions): Client<paths> {
   const retry = opts.retry ?? DEFAULT_RETRY;
   const baseFetch = opts.fetch ?? globalThis.fetch;
   const wrappedFetch = withRetry(baseFetch, retry);
+  const treat409AsSuccess = opts.treat409AsSuccess ?? false;
   const client = createFetchClient<paths>({
     baseUrl: opts.baseUrl,
     headers: { "X-API-Key": opts.apiKey },
@@ -28,6 +30,13 @@ export function createClient(opts: CreateClientOptions): Client<paths> {
   client.use({
     async onResponse({ response }) {
       if (response.ok) return undefined;
+      if (treat409AsSuccess && response.status === 409) {
+        const text = await response.clone().text();
+        return new Response(text, {
+          status: 200,
+          headers: { "content-type": response.headers.get("content-type") ?? "application/json" },
+        });
+      }
       const body = await response
         .clone()
         .json()
@@ -35,7 +44,7 @@ export function createClient(opts: CreateClientOptions): Client<paths> {
       if (response.status === 401 || response.status === 403) {
         throw new AuthError(response.status, body);
       }
-      if (response.status === 422) {
+      if (response.status === 422 || response.status === 409) {
         throw new ValidationError(response.status, body);
       }
       if (response.status === 429) {

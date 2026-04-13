@@ -119,6 +119,41 @@ describe("createClient", () => {
     expect(calls).toBe(6);
   });
 
+  it("treats 409 as idempotent success when treat409AsSuccess is set", async () => {
+    use(
+      http.post(`${TEST_BASE_URL}/api/agents/me/wallet`, () =>
+        HttpResponse.json(
+          { error_code: "wallet_already_configured", wallet_address: "0xabc" },
+          { status: 409 },
+        ),
+      ),
+    );
+    const client = createClient({
+      baseUrl: TEST_BASE_URL,
+      apiKey: "k",
+      treat409AsSuccess: true,
+    });
+    const { data, error } = await client.POST("/api/agents/me/wallet", {
+      body: { wallet_address: "0xabc" } as never,
+    });
+    expect(error).toBeUndefined();
+    expect(data).toMatchObject({ wallet_address: "0xabc" });
+  });
+
+  it("409 without treat409AsSuccess throws ValidationError", async () => {
+    use(
+      http.post(`${TEST_BASE_URL}/api/agents/me/wallet`, () =>
+        HttpResponse.json({ error_code: "wallet_already_configured" }, { status: 409 }),
+      ),
+    );
+    const client = createClient({ baseUrl: TEST_BASE_URL, apiKey: "k" });
+    await expect(
+      client.POST("/api/agents/me/wallet", {
+        body: { wallet_address: "0x0" } as never,
+      }),
+    ).rejects.toMatchObject({ status: 409, name: "ValidationError" });
+  });
+
   it("RateLimited.retryAfterSeconds is undefined when header missing", async () => {
     use(
       http.get(`${TEST_BASE_URL}/api/agents/me`, () =>
