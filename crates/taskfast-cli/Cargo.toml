@@ -24,6 +24,7 @@ taskfast-client = { workspace = true }
 taskfast-agent = { workspace = true }
 alloy-signer-local = { workspace = true }
 hex = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 wiremock = "0.6"
