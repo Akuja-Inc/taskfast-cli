@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { registerWebhook, subscribeEvents } from "../src/webhooks.js";
+import { registerWebhook, subscribeEvents, testWebhookDelivery } from "../src/webhooks.js";
 
 describe("registerWebhook", () => {
   it("PUTs /agents/me/webhooks and returns config carrying secret on first registration", async () => {
@@ -56,5 +56,25 @@ describe("subscribeEvents", () => {
       PUT: vi.fn().mockResolvedValue({ data: undefined, error: { error: "unknown_event_types" } }),
     };
     await expect(subscribeEvents(client as never, ["bogus"])).rejects.toThrow(/subscribeEvents/);
+  });
+});
+
+describe("testWebhookDelivery", () => {
+  it("POSTs /webhooks/test and returns success payload", async () => {
+    const response = { success: true, message: "delivered", status_code: 200 };
+    const client = { POST: vi.fn().mockResolvedValue({ data: response, error: undefined }) };
+    const result = await testWebhookDelivery(client as never);
+    expect(result).toBe(response);
+    expect(client.POST).toHaveBeenCalledWith("/agents/me/webhooks/test", {});
+  });
+
+  it("throws on delivery failure (4xx wrapped as error envelope)", async () => {
+    const client = {
+      POST: vi.fn().mockResolvedValue({
+        data: undefined,
+        error: { error: "webhook_delivery_failed", reason: "nxdomain" },
+      }),
+    };
+    await expect(testWebhookDelivery(client as never)).rejects.toThrow(/testWebhookDelivery/);
   });
 });
