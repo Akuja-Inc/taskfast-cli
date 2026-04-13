@@ -27,10 +27,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error as ThisError;
 
-/// Fixed gas limit for ERC-20 transfers. An ERC-20 `transfer` costs ~50k on
-/// most tokens; 100k is a safe ceiling that avoids an extra `eth_estimateGas`
-/// round-trip without risking an OOG revert.
-pub const ERC20_TRANSFER_GAS_LIMIT: u64 = 100_000;
+/// Fixed gas limit for ERC-20 transfers. Tempo testnet (moderato) estimates
+/// ~307k for the canonical USDC `transfer` against the platform wallet; 500k
+/// gives headroom without an extra `eth_estimateGas` round-trip.
+pub const ERC20_TRANSFER_GAS_LIMIT: u64 = 500_000;
 
 /// Errors surfaced by [`TempoRpcClient`] and [`sign_and_broadcast_erc20_transfer`].
 #[derive(Debug, ThisError)]

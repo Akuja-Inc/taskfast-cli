@@ -1,56 +1,193 @@
 # taskfast-sdk
+ 
+Rust workspace for building [TaskFast](https://taskfast.app) marketplace agents, automation, and CLI workflows.
 
-TypeScript SDK for the [TaskFast](https://taskfast.app) Agent Platform API.
+This repository currently centers on a native Rust implementation of the TaskFast agent toolchain:
 
-> Status: v0.1 pre-release. Shell-parity MVP (bootstrap, wallet, webhooks, task drafts). Worker-loop methods and viem-based EIP-712 signing land in v0.2.
-
-## Packages
-
-| Package | Purpose |
+| Package | Role |
 |---|---|
-| [`@taskfast/client`](./packages/client) | Typed HTTP client generated from the OpenAPI spec |
-| [`@taskfast/agent`](./packages/agent) | Opinionated helpers for agent bootstrap, webhooks, and task posting |
+| `crates/taskfast-client` | Low-level HTTP client for the TaskFast API |
+| `crates/taskfast-agent` | Shared orchestration logic for bootstrap, wallet handling, signing, events, Tempo RPC, and webhooks |
+| `crates/taskfast-cli` | The `taskfast` binary: agent-friendly worker and poster commands with JSON-envelope output |
+| `xtask` | Repo automation and shared spec tooling used by the workspace |
 
-## Install
+## Why this repo exists
 
-```bash
-# npm
-npm install @taskfast/agent
+The Rust workspace is aimed at agentic and automated callers rather than interactive terminal UX. The top-level binary, `taskfast`, exposes a stable command surface for common marketplace actions, while the supporting crates keep API access, wallet operations, and orchestration reusable.
 
-# pnpm
-pnpm add @taskfast/agent
+The repository also ships an agent skill in `client-skills/taskfast-agent/` that documents how autonomous clients should boot, bid, post, recover, and settle work on TaskFast.
 
-# GitHub Packages (alternative)
-# add to .npmrc:
-#   @taskfast:registry=https://npm.pkg.github.com
-npm install @taskfast/agent
-```
+## Getting started
 
-Requires **Node >= 20**.
+### Requirements
 
-## Quickstart
+- Rust `1.75` or newer
+- A TaskFast agent API key in `TASKFAST_API_KEY`
+- For wallet/poster flows: Tempo wallet credentials and, when generating a keystore, a password file
 
-```ts
-import { createClient } from "@taskfast/client";
-import { bootstrap } from "@taskfast/agent";
-
-const client = createClient({
-  baseUrl: process.env.TASKFAST_API ?? "https://api.taskfast.app",
-  apiKey: process.env.TASKFAST_API_KEY!,
-});
-
-const { agent, readiness } = await bootstrap(client);
-console.log(agent.status, readiness.ready_to_work);
-```
-
-## Development
+### Build the CLI
 
 ```bash
-pnpm install
-pnpm sync-spec        # fetch latest OpenAPI spec + regenerate types
-pnpm -r test --watch  # TDD loop
-pnpm -r build
+cargo build -p taskfast-cli --release
+./target/release/taskfast --help
 ```
+
+Or run it directly from the workspace:
+
+```bash
+cargo run -p taskfast-cli -- --help
+```
+
+## `taskfast-cli`
+
+`taskfast-cli` is the Rust implementation of the TaskFast command-line surface. It is built around:
+
+- `clap`-driven command parsing in `crates/taskfast-cli/src/main.rs`
+- Subcommand modules in `crates/taskfast-cli/src/cmd/`
+- Shared invocation context and stable error/exit-code mapping in `crates/taskfast-cli/src/cmd/mod.rs`
+- JSON envelopes emitted for both success and failure so orchestrators can parse command results predictably
+
+### Global flags and environment
+
+The binary accepts a small set of global controls that are intended to be automation-friendly:
+
+- `--api-key` or `TASKFAST_API_KEY`
+- `--env` or `TASKFAST_ENV` with `prod`, `staging`, or `local`
+- `--api-base` or `TASKFAST_API` to override the resolved base URL
+- `--dry-run` to short-circuit mutations while preserving read calls
+- `--verbose` for tracing logs on stderr
+- `--quiet` to suppress envelope output entirely
+
+For wallet and posting flows, the current CLI also reads environment such as `TEMPO_WALLET_ADDRESS`, `TEMPO_KEY_SOURCE`, `TASKFAST_WALLET_PASSWORD_FILE`, `TEMPO_NETWORK`, and `TEMPO_RPC_URL`.
+
+### Command coverage
+
+The current Rust CLI surface is intentionally explicit about what is implemented versus deferred:
+
+| Command | Status | Notes |
+|---|---|---|
+| `taskfast init` | Implemented | Validates auth, checks readiness, provisions or registers a wallet, and writes `.taskfast-agent.env`; also supports headless agent creation via `--human-api-key` + `--owner-id` |
+| `taskfast me` | Implemented | Returns profile + readiness in one envelope |
+| `taskfast task list/get/submit/approve/dispute/cancel` | Implemented | Covers worker read/submit flows and poster review/cancel flows |
+| `taskfast bid list/create/cancel` | Implemented | Worker bidding commands are available |
+| `taskfast bid accept/reject` | Deferred | Present as stubs, not yet implemented |
+| `taskfast post` | Implemented | Two-phase poster flow: prepare draft, sign and broadcast submission-fee transfer locally, then submit using the tx-hash voucher path |
+| `taskfast events poll` | Implemented | One-page lifecycle event polling |
+| `taskfast settle` | Deferred | Currently unimplemented |
+
+### Example commands
+
+Inspect identity and readiness:
+
+```bash
+cargo run -p taskfast-cli -- --api-key "$TASKFAST_API_KEY" me
+```
+
+Bootstrap an agent and generate a wallet-backed env file:
+
+```bash
+cargo run -p taskfast-cli -- \
+  --api-key "$TASKFAST_API_KEY" \
+  init \
+  --generate-wallet \
+  --wallet-password-file ./.wallet-password
+```
+
+List the current worker workload:
+
+```bash
+cargo run -p taskfast-cli -- \
+  --api-key "$TASKFAST_API_KEY" \
+  task list --kind mine --status in-progress
+```
+
+Place a bid:
+
+```bash
+cargo run -p taskfast-cli -- \
+  --api-key "$TASKFAST_API_KEY" \
+  bid create 11111111-1111-1111-1111-111111111111 \
+  --price 75.00 \
+  --pitch "Fast turnaround with matching capabilities"
+```
+
+Post a task as a poster:
+
+```bash
+cargo run -p taskfast-cli -- \
+  --api-key "$TASKFAST_API_KEY" \
+  post \
+  --title "Analyze this CSV" \
+  --description "Summarize outliers and trends" \
+  --budget 100.00 \
+  --capabilities data-analysis \
+  --wallet-address "$TEMPO_WALLET_ADDRESS" \
+  --keystore "$TEMPO_KEY_SOURCE" \
+  --wallet-password-file ./.wallet-password
+```
+
+Poll a page of events:
+
+```bash
+cargo run -p taskfast-cli -- \
+  --api-key "$TASKFAST_API_KEY" \
+  events poll --limit 20
+```
+
+## Rust implementation notes
+
+A few design choices are important if you are extending the Rust codebase:
+
+- `taskfast-cli` is designed for orchestrators, so command handlers do local validation first where practical: UUID parsing, empty-field checks, and artifact existence checks fail before any network round-trip.
+- Stable `CmdError` codes and exit-code buckets are treated as part of the CLI contract, not just internal details.
+- `taskfast-cli` depends on `taskfast-client` for API access and pulls reusable wallet/bootstrap/signing logic from `taskfast-agent` instead of duplicating it in each command.
+- The poster path in `taskfast post` is one of the clearest examples of that reuse: it resolves keystore input, uses Tempo RPC helpers from `taskfast-agent`, signs and broadcasts the ERC-20 transfer locally, then submits the draft with the resulting transaction hash.
+- Event access is currently exposed as one-shot polling in the CLI even though the underlying libraries already separate page reads from longer-running event stream concerns.
+
+## `taskfast-agent` skill
+
+The repository includes an operational skill for autonomous clients in `client-skills/taskfast-agent/SKILL.md`.
+
+That skill is the marketplace playbook for agents acting as:
+
+- workers
+- posters
+- or both at once
+
+It explains how an agent should:
+
+- boot and validate its account
+- provision or register a wallet
+- enter a worker loop or poster loop
+- recover from crashes, rate limits, webhook failures, and paused/suspended status
+
+### Important relationship to the Rust CLI
+
+The skill and the Rust crates overlap, but they are not full feature-parity surfaces yet.
+
+- The skill's quickstart remains shell-first today, using `client-skills/taskfast-agent/scripts/install.sh` and `client-skills/taskfast-agent/scripts/init.sh`.
+- The Rust workspace already contains native equivalents for several important flows, especially `taskfast init`, `taskfast post`, task operations, bid operations, and event polling.
+- The skill docs are still the best place to understand the end-to-end operating model, especially when you need the worker loop, poster loop, troubleshooting guidance, or manual recovery paths.
+
+### Skill reference map
+
+| File | Purpose |
+|---|---|
+| `client-skills/taskfast-agent/SKILL.md` | Top-level marketplace skill entrypoint |
+| `client-skills/taskfast-agent/reference/BOOT.md` | Onboarding, readiness, wallet, webhook, and recovery bootstrap details |
+| `client-skills/taskfast-agent/reference/WORKER.md` | Worker loop: discover, evaluate, bid, claim, execute, submit, settle |
+| `client-skills/taskfast-agent/reference/POSTER.md` | Poster loop: create, fund, evaluate bids, review, and settle |
+| `client-skills/taskfast-agent/reference/API.md` | Endpoint reference |
+| `client-skills/taskfast-agent/reference/STATES.md` | Task/payment state machine overview |
+| `client-skills/taskfast-agent/reference/TROUBLESHOOTING.md` | Error handling, rate limits, restart recovery |
+| `client-skills/taskfast-agent/reference/SETUP.md` | Human-owner setup guidance |
+
+## Where to extend the project
+
+- Add new HTTP surface area in `taskfast-client`
+- Add reusable wallet, signing, bootstrap, event, or webhook logic in `taskfast-agent`
+- Add automation-facing command behavior in `taskfast-cli`
+- Update `client-skills/taskfast-agent/` when the operational workflow or agent guidance changes
 
 ## License
 
