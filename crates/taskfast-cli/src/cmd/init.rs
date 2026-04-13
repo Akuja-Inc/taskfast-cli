@@ -15,8 +15,16 @@
 //! * env file: load + write at `.taskfast-agent.env` (chmod 600 on unix).
 //! * final readiness assert.
 //!
+//! # Scope (am-z58 extension)
+//!
+//! * `--human-api-key` + `--owner-id` (+ optional agent-* fields): when no
+//!   agent key is available, POST /agents with the user PAT to mint one.
+//!   The minted `api_key` is then used for the rest of the flow and written
+//!   to the env file. Under `--dry-run` the mint is skipped and the envelope
+//!   reports `agent.action = "would_mint"` — the rest of the flow is also
+//!   skipped because the real agent key never materialized.
+//!
 //! Deferred to separate beads so this slice stays reviewable:
-//! * `am-z58` — `--human-api-key` headless agent creation (needs `--owner-id`).
 //! * `am-iit` — webhook configuration.
 //! * `am-c74` — testnet faucet + balance polling.
 //!
@@ -37,10 +45,10 @@ use crate::dotenv::{DEFAULT_ENV_FILENAME, EnvFile};
 use crate::envelope::Envelope;
 
 use alloy_signer_local::PrivateKeySigner;
-use taskfast_agent::bootstrap::{get_readiness, validate_auth};
+use taskfast_agent::bootstrap::{create_agent_headless, get_readiness, validate_auth};
 use taskfast_agent::keystore;
 use taskfast_agent::wallet;
-use taskfast_client::api::types::AgentReadiness;
+use taskfast_client::api::types::{AgentCreateRequest, AgentReadiness};
 use taskfast_client::TaskFastClient;
 
 /// Wallet status string emitted by the server when the agent hasn't
@@ -86,6 +94,33 @@ pub struct Args {
     /// settle (rare) or for redoing env-file state without touching chain.
     #[arg(long)]
     pub skip_wallet: bool,
+
+    /// User PAT (`tf_user_*`) used to headlessly mint a fresh agent via
+    /// `POST /agents` when no agent API key is available. Requires
+    /// `--owner-id`. Ignored if an agent key is already resolvable
+    /// (direct flag / env var / env file).
+    #[arg(long, env = "TASKFAST_HUMAN_API_KEY")]
+    pub human_api_key: Option<String>,
+
+    /// UUID of the human user who will own the minted agent. Mandated by
+    /// the `AgentCreateRequest.owner_id` schema. Required alongside
+    /// `--human-api-key`.
+    #[arg(long)]
+    pub owner_id: Option<String>,
+
+    /// Display name for the minted agent.
+    #[arg(long, default_value = "taskfast-agent")]
+    pub agent_name: String,
+
+    /// Description for the minted agent.
+    #[arg(long, default_value = "Headless agent registered via taskfast init")]
+    pub agent_description: String,
+
+    /// Capability tag for the minted agent (repeat to pass multiple). If
+    /// none are provided, defaults to `["general"]` so the request still
+    /// satisfies the non-empty-array convention most consumers expect.
+    #[arg(long = "agent-capability", value_name = "CAP")]
+    pub agent_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -114,7 +149,30 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     //    Ctx already resolved (flag > env var > file).
     let mut env_file = EnvFile::load(&env_path).map_err(|e| CmdError::Usage(e.to_string()))?;
 
-    let api_key = resolve_api_key(ctx, &env_file)?;
+    // 1a. Resolve the agent API key. If none is available but the caller
+    //     supplied a user PAT, mint a fresh agent headlessly and use the
+    //     returned key. Under --dry-run we short-circuit before the POST
+    //     and return early — the rest of the flow depends on a real key.
+    let (api_key, agent_outcome) = match resolve_api_key(ctx, &env_file) {
+        Ok(k) => (k, AgentOutcome::PreExisting),
+        Err(CmdError::MissingApiKey) if args.human_api_key.is_some() => {
+            let minted = mint_agent(ctx, &args).await?;
+            match minted {
+                MintedAgent::DryRun { ref intent } => {
+                    return Ok(Envelope::success(
+                        ctx.environment,
+                        ctx.dry_run,
+                        build_dry_run_mint_envelope(&env_path, intent),
+                    ));
+                }
+                MintedAgent::Live { ref api_key, .. } => {
+                    (api_key.clone(), AgentOutcome::Minted(minted))
+                }
+            }
+        }
+        Err(e) => return Err(e),
+    };
+
     let effective_ctx = Ctx {
         api_key: Some(api_key.clone()),
         environment: ctx.environment,
@@ -171,10 +229,121 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         &env_path,
         env_file_written,
         &wallet_outcome,
+        &agent_outcome,
         &final_readiness,
         ctx.dry_run,
     );
     Ok(Envelope::success(ctx.environment, ctx.dry_run, data))
+}
+
+/// Result of the agent-key resolution step. When the caller already had
+/// a key (flag / env var / env file), this is `PreExisting` and the
+/// envelope stays quiet about it. When a key was minted via
+/// `--human-api-key`, the envelope surfaces the minted agent's id/name.
+enum AgentOutcome {
+    PreExisting,
+    Minted(MintedAgent),
+}
+
+/// Live vs dry-run distinction for minting. Live carries the full
+/// response; dry-run carries just the would-have-called payload so the
+/// envelope can echo it back without touching the network.
+enum MintedAgent {
+    Live {
+        api_key: String,
+        id: Option<String>,
+        name: Option<String>,
+    },
+    DryRun {
+        intent: MintIntent,
+    },
+}
+
+struct MintIntent {
+    owner_id: String,
+    name: String,
+    description: String,
+    capabilities: Vec<String>,
+}
+
+async fn mint_agent(ctx: &Ctx, args: &Args) -> Result<MintedAgent, CmdError> {
+    let pat = args
+        .human_api_key
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| CmdError::Usage("--human-api-key is empty".into()))?;
+    let owner_id = args
+        .owner_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            CmdError::Usage(
+                "--human-api-key requires --owner-id (UUID of the human user owner)".into(),
+            )
+        })?;
+
+    let capabilities = if args.agent_capabilities.is_empty() {
+        vec!["general".to_string()]
+    } else {
+        args.agent_capabilities.clone()
+    };
+
+    if ctx.dry_run {
+        return Ok(MintedAgent::DryRun {
+            intent: MintIntent {
+                owner_id: owner_id.to_string(),
+                name: args.agent_name.clone(),
+                description: args.agent_description.clone(),
+                capabilities,
+            },
+        });
+    }
+
+    let owner_uuid = uuid::Uuid::parse_str(owner_id)
+        .map_err(|e| CmdError::Usage(format!("--owner-id is not a valid UUID: {e}")))?;
+
+    let pat_client = TaskFastClient::from_api_key(ctx.base_url(), pat).map_err(CmdError::from)?;
+    let body = AgentCreateRequest {
+        owner_id: owner_uuid,
+        name: args.agent_name.clone(),
+        description: args.agent_description.clone(),
+        capabilities,
+        rate: None,
+        max_task_budget: None,
+        daily_spend_limit: None,
+        payout_method: None,
+        payment_method: None,
+        tempo_wallet_address: None,
+    };
+    let resp = create_agent_headless(&pat_client, &body)
+        .await
+        .map_err(CmdError::from)?;
+    let api_key = resp.api_key.clone().ok_or_else(|| {
+        CmdError::Server("POST /agents returned no api_key despite 201".into())
+    })?;
+    Ok(MintedAgent::Live {
+        api_key,
+        id: resp.id.map(|u| u.to_string()),
+        name: resp.name.clone(),
+    })
+}
+
+fn build_dry_run_mint_envelope(env_path: &Path, intent: &MintIntent) -> serde_json::Value {
+    json!({
+        "agent": {
+            "action": "would_mint",
+            "owner_id": intent.owner_id,
+            "name": intent.name,
+            "description": intent.description,
+            "capabilities": intent.capabilities,
+        },
+        "env_file": {
+            "path": env_path.display().to_string(),
+            "written": false,
+            "would_write": true,
+        },
+        "ready_to_work": false,
+    })
 }
 
 /// Layered api_key resolution: Ctx (flag / env var) wins, then env file,
@@ -340,6 +509,7 @@ fn build_envelope_data(
     env_path: &Path,
     env_file_written: bool,
     wallet: &WalletOutcome,
+    agent: &AgentOutcome,
     readiness: &AgentReadiness,
     dry_run: bool,
 ) -> serde_json::Value {
@@ -361,12 +531,23 @@ fn build_envelope_data(
         env_obj["would_write"] = json!(true);
     }
 
-    json!({
+    let mut out = json!({
         "wallet": wallet_obj,
         "env_file": env_obj,
         "readiness": readiness,
         "ready_to_work": readiness.ready_to_work,
-    })
+    });
+    if let AgentOutcome::Minted(MintedAgent::Live { id, name, .. }) = agent {
+        let mut a = json!({ "action": "minted" });
+        if let Some(id) = id {
+            a["id"] = json!(id);
+        }
+        if let Some(name) = name {
+            a["name"] = json!(name);
+        }
+        out["agent"] = a;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -383,6 +564,11 @@ mod tests {
             network: Network::Mainnet,
             env_file: None,
             skip_wallet: false,
+            human_api_key: None,
+            owner_id: None,
+            agent_name: "taskfast-agent".into(),
+            agent_description: "Headless agent registered via taskfast init".into(),
+            agent_capabilities: Vec::new(),
         }
     }
 
