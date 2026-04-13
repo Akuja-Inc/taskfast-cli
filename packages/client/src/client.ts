@@ -1,5 +1,5 @@
 import createFetchClient, { type Client } from "openapi-fetch";
-import { AuthError } from "./errors.js";
+import { AuthError, ValidationError } from "./errors.js";
 import type { paths } from "./schema.js";
 
 export interface CreateClientOptions {
@@ -23,6 +23,9 @@ export function createClient(opts: CreateClientOptions): Client<paths> {
         .catch(() => null);
       if (response.status === 401 || response.status === 403) {
         throw new AuthError(response.status, body);
+      }
+      if (response.status === 422) {
+        throw new ValidationError(response.status, body);
       }
       return undefined;
     },

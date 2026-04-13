@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { createClient } from "../src/client.js";
-import { AuthError } from "../src/errors.js";
+import { AuthError, ValidationError } from "../src/errors.js";
 import { TEST_BASE_URL, use } from "./setup.js";
 
 describe("createClient", () => {
@@ -31,5 +31,31 @@ describe("createClient", () => {
       body: { error: "unauthorized", message: "invalid key" },
     });
     await expect(client.GET("/api/agents/me")).rejects.toBeInstanceOf(AuthError);
+  });
+
+  it("throws ValidationError on 422 carrying server error_code", async () => {
+    use(
+      http.post(`${TEST_BASE_URL}/api/agents/me/wallet`, () =>
+        HttpResponse.json(
+          { error_code: "self_bidding", message: "cannot bid on own task" },
+          { status: 422 },
+        ),
+      ),
+    );
+    const client = createClient({ baseUrl: TEST_BASE_URL, apiKey: "k" });
+    await expect(
+      client.POST("/api/agents/me/wallet", {
+        body: { wallet_address: "0x0" } as never,
+      }),
+    ).rejects.toMatchObject({
+      name: "ValidationError",
+      status: 422,
+      errorCode: "self_bidding",
+    });
+    await expect(
+      client.POST("/api/agents/me/wallet", {
+        body: { wallet_address: "0x0" } as never,
+      }),
+    ).rejects.toBeInstanceOf(ValidationError);
   });
 });
