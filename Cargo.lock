@@ -3452,12 +3452,15 @@ dependencies = [
 name = "taskfast-cli"
 version = "0.2.0"
 dependencies = [
+ "alloy-signer-local",
  "anyhow",
  "clap",
+ "hex",
  "serde",
  "serde_json",
  "taskfast-agent",
  "taskfast-client",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

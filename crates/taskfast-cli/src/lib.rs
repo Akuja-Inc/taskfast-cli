@@ -6,6 +6,7 @@
 //! callers) can drive the pipeline without spawning a process.
 
 pub mod cmd;
+pub mod dotenv;
 pub mod envelope;
 pub mod exit;
 
