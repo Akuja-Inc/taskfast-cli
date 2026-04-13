@@ -29,5 +29,5 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 wiremock = "0.6"
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 tempfile = "3"
