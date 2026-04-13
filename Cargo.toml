@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/taskfast-client",
+    "crates/taskfast-agent",
+    "crates/taskfast-cli",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Akuja-Inc/taskfast-sdk"
+rust-version = "1.75"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
+
+taskfast-client = { path = "crates/taskfast-client", version = "0.2.0" }
+taskfast-agent = { path = "crates/taskfast-agent", version = "0.2.0" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
