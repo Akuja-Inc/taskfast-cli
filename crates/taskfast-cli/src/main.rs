@@ -6,11 +6,7 @@
 
 use clap::{Parser, Subcommand};
 
-mod cmd;
-mod envelope;
-mod exit;
-
-use envelope::Envelope;
+use taskfast_cli::{Environment, Envelope, cmd, exit};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -47,35 +43,6 @@ struct Cli {
 
     #[command(subcommand)]
     command: Command,
-}
-
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum Environment {
-    Prod,
-    Staging,
-    Local,
-}
-
-impl Environment {
-    /// Label used in the `environment` field of the JSON envelope.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Prod => "production",
-            Self::Staging => "staging",
-            Self::Local => "local",
-        }
-    }
-
-    /// Default API base URL for this environment. Overridable via
-    /// `--api-base` / `TASKFAST_API` so one-off dev targets don't require
-    /// shipping a new binary.
-    pub fn default_base_url(self) -> &'static str {
-        match self {
-            Self::Prod => "https://api.taskfast.app",
-            Self::Staging => "https://staging.api.taskfast.app",
-            Self::Local => "http://localhost:4000",
-        }
-    }
 }
 
 #[derive(Debug, Subcommand)]

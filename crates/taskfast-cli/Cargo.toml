@@ -22,3 +22,7 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 taskfast-client = { workspace = true }
 taskfast-agent = { workspace = true }
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
