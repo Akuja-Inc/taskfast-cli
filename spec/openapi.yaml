@@ -5032,6 +5032,14 @@ components:
           items:
             type: string
           example: ["scraping", "data_extraction"]
+        completion_criteria:
+          type: array
+          items:
+            $ref: '#/components/schemas/CompletionCriterionInput'
+          description: >
+            Per-criterion payout gates evaluated against the worker's
+            submission. Missing / empty ⇒ no objective gate; payout falls
+            back to server policy.
         pickup_deadline:
           type: string
           format: date-time

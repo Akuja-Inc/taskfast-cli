@@ -34,7 +34,7 @@ use crate::envelope::Envelope;
 use taskfast_agent::keystore::{self, KeySource};
 use taskfast_agent::tempo_rpc::{TempoRpcClient, sign_and_broadcast_erc20_transfer};
 use taskfast_client::api::types::{
-    TaskDraftPrepareRequest, TaskDraftPrepareRequestAssignmentType,
+    CompletionCriterionInput, TaskDraftPrepareRequest, TaskDraftPrepareRequestAssignmentType,
     TaskDraftPrepareRequestPosterWalletAddress, TaskDraftSubmitRequest,
     TaskDraftSubmitRequestSignature,
 };
@@ -66,6 +66,21 @@ pub struct Args {
     /// Capability tags required from the assignee. Comma-separated.
     #[arg(long, value_delimiter = ',')]
     pub capabilities: Vec<String>,
+
+    /// Completion-criterion payout gate as a JSON object. Repeat `--criterion`
+    /// for multiple gates. Shape matches `CompletionCriterionInput`:
+    /// `{"description":"…","check_type":"json_schema|regex|count|http_status|file_exists",`
+    /// `"check_expression":"…","expected_value":"…","target_artifact_pattern":null}`.
+    /// Missing ⇒ no objective gate; server policy decides payout.
+    #[arg(long = "criterion")]
+    pub criteria: Vec<String>,
+
+    /// Path to a JSON file containing an array of `CompletionCriterionInput`
+    /// objects. Merged before any `--criterion` flags (file entries first).
+    /// Use this when you have many gates or want to keep them in version
+    /// control alongside the task.
+    #[arg(long)]
+    pub criteria_file: Option<PathBuf>,
 
     /// Pickup deadline (RFC3339 timestamp, e.g. `2026-05-01T00:00:00Z`).
     #[arg(long)]
@@ -181,9 +196,12 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         .parse()
         .map_err(|e| CmdError::Usage(format!("--wallet-address rejected by schema: {e}")))?;
 
+    let completion_criteria = resolve_criteria(args.criteria_file.as_deref(), &args.criteria)?;
+
     let prep_body = TaskDraftPrepareRequest {
         assignment_type: args.assignment_type.into(),
         budget_max: args.budget.clone(),
+        completion_criteria,
         description: args.description.clone(),
         direct_agent_id,
         execution_deadline,
@@ -209,6 +227,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
                 "assignment_type": args.assignment_type.as_str(),
                 "budget_max": args.budget,
                 "required_capabilities": args.capabilities,
+                "completion_criteria_count": prep_body.completion_criteria.len(),
                 "rpc_url": rpc_url,
                 "wallet_address": wallet_address,
             }),
@@ -280,6 +299,38 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
             "submission_fee_status": submitted.submission_fee_status,
         }),
     ))
+}
+
+/// Merge file-sourced and inline `--criterion` payloads into one validated
+/// list of `CompletionCriterionInput`. File entries are prepended so a
+/// shared base file can be augmented with one-off overrides on the command
+/// line. Any shape/parse failure is a `Usage` error — the CLI catches it
+/// before the request ever reaches the server, so the exit-code contract
+/// (Auth=re-credential, Validation=server-rejected payload) stays clean.
+fn resolve_criteria(
+    file: Option<&std::path::Path>,
+    inline: &[String],
+) -> Result<Vec<CompletionCriterionInput>, CmdError> {
+    let mut out = Vec::with_capacity(inline.len());
+    if let Some(path) = file {
+        let raw = std::fs::read_to_string(path).map_err(|e| {
+            CmdError::Usage(format!("read --criteria-file {}: {e}", path.display()))
+        })?;
+        let parsed: Vec<CompletionCriterionInput> =
+            serde_json::from_str(&raw).map_err(|e| {
+                CmdError::Usage(format!(
+                    "--criteria-file {} is not a JSON array of CompletionCriterionInput: {e}",
+                    path.display()
+                ))
+            })?;
+        out.extend(parsed);
+    }
+    for (i, raw) in inline.iter().enumerate() {
+        let one: CompletionCriterionInput = serde_json::from_str(raw)
+            .map_err(|e| CmdError::Usage(format!("--criterion[{i}] not valid JSON: {e}")))?;
+        out.push(one);
+    }
+    Ok(out)
 }
 
 fn parse_iso_opt(

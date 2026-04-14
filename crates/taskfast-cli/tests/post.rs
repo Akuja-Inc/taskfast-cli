@@ -36,6 +36,8 @@ fn base_args(wallet_address: Option<String>, keystore: Option<String>) -> Args {
         description: "a test".into(),
         budget: Some("1.00".into()),
         capabilities: vec!["testing".into()],
+        criteria: vec![],
+        criteria_file: None,
         pickup_deadline: None,
         execution_deadline: None,
         assignment_type: AssignmentType::Open,
@@ -297,4 +299,184 @@ async fn post_missing_api_key_errors_before_any_http() {
         .await
         .expect_err("no key → MissingApiKey");
     assert!(matches!(err, CmdError::MissingApiKey), "got {err:?}");
+}
+
+/// Regression guard for am-en56: `--criterion` payloads must land on the wire
+/// in the `POST /task_drafts` body. Empty criteria previously reached the
+/// server silently and disarmed worker-payout evaluation.
+#[tokio::test]
+async fn post_forwards_completion_criteria() {
+    let api_server = MockServer::start().await;
+    let rpc_server = MockServer::start().await;
+
+    let signer = PrivateKeySigner::random();
+    let wallet_addr = format!("{:#x}", signer.address());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let keystore_path = tmp.path().join("wallet.json");
+    taskfast_agent::keystore::save_signer(&signer, &keystore_path, "pw").expect("keystore");
+    let password_path = tmp.path().join("pw");
+    std::fs::write(&password_path, b"pw").unwrap();
+
+    let draft_id = uuid::Uuid::new_v4();
+    let task_id = uuid::Uuid::new_v4();
+    let calldata_hex = {
+        let mut buf = vec![0xa9u8, 0x05, 0x9c, 0xbb];
+        buf.extend([0u8; 32]);
+        buf.extend([0u8; 32]);
+        format!("0x{}", hex::encode(buf))
+    };
+    let token_addr = "0x00000000000000000000000000000000000000aa";
+    let tx_hash_hex = format!("0x{}", "aa".repeat(32));
+
+    // body_partial_json matches on a subset — this asserts the field is
+    // present with the expected check_type without over-constraining order.
+    Mock::given(method("POST"))
+        .and(path("/api/task_drafts"))
+        .and(body_partial_json(json!({
+            "completion_criteria": [{"check_type": "regex"}]
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "draft_id": draft_id,
+            "payload_to_sign": calldata_hex,
+            "token_address": token_addr,
+        })))
+        .mount(&api_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path(format!("/api/task_drafts/{draft_id}/submit")))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": task_id,
+            "status": "open",
+            "submission_fee_status": "pending_confirmation",
+            "submission_fee_tx_hash": tx_hash_hex,
+        })))
+        .mount(&api_server)
+        .await;
+
+    mount_rpc_mocks(&rpc_server, &tx_hash_hex).await;
+
+    let mut args = base_args(
+        Some(wallet_addr.clone()),
+        Some(keystore_path.display().to_string()),
+    );
+    args.wallet_password_file = Some(password_path);
+    args.rpc_url = Some(rpc_server.uri());
+    args.criteria = vec![serde_json::to_string(&json!({
+        "description": "matches anything",
+        "check_type": "regex",
+        "check_expression": ".*",
+        "expected_value": ".",
+    }))
+    .unwrap()];
+
+    let envelope = run(&ctx_for(&api_server, Some("test-key")), args)
+        .await
+        .expect("post with criteria should succeed");
+    let v = envelope_value(&envelope);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["task_id"], task_id.to_string());
+}
+
+#[tokio::test]
+async fn post_bad_criterion_json_is_usage_error() {
+    let api_server = MockServer::start().await;
+    let mut args = base_args(
+        Some("0x0000000000000000000000000000000000000001".into()),
+        Some("/tmp/unused".into()),
+    );
+    args.criteria = vec!["not-json".into()];
+    let err = run(&ctx_for(&api_server, Some("test-key")), args)
+        .await
+        .expect_err("malformed --criterion must fail locally");
+    match err {
+        CmdError::Usage(msg) => {
+            assert!(msg.contains("--criterion"), "unexpected message: {msg}")
+        }
+        other => panic!("expected Usage, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn post_criteria_file_merges_with_inline() {
+    let api_server = MockServer::start().await;
+    let rpc_server = MockServer::start().await;
+
+    let signer = PrivateKeySigner::random();
+    let wallet_addr = format!("{:#x}", signer.address());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let keystore_path = tmp.path().join("wallet.json");
+    taskfast_agent::keystore::save_signer(&signer, &keystore_path, "pw").expect("keystore");
+    let password_path = tmp.path().join("pw");
+    std::fs::write(&password_path, b"pw").unwrap();
+
+    let criteria_path = tmp.path().join("criteria.json");
+    std::fs::write(
+        &criteria_path,
+        serde_json::to_vec(&json!([{
+            "description": "from file",
+            "check_type": "file_exists",
+            "check_expression": "out.csv",
+            "expected_value": "true",
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let draft_id = uuid::Uuid::new_v4();
+    let task_id = uuid::Uuid::new_v4();
+    let calldata_hex = {
+        let mut buf = vec![0xa9u8, 0x05, 0x9c, 0xbb];
+        buf.extend([0u8; 32]);
+        buf.extend([0u8; 32]);
+        format!("0x{}", hex::encode(buf))
+    };
+    let tx_hash_hex = format!("0x{}", "aa".repeat(32));
+
+    // File entry goes first, inline second — assert both land in order.
+    Mock::given(method("POST"))
+        .and(path("/api/task_drafts"))
+        .and(body_partial_json(json!({
+            "completion_criteria": [
+                {"check_type": "file_exists", "description": "from file"},
+                {"check_type": "regex", "description": "inline"},
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "draft_id": draft_id,
+            "payload_to_sign": calldata_hex,
+            "token_address": "0x00000000000000000000000000000000000000aa",
+        })))
+        .mount(&api_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/task_drafts/{draft_id}/submit")))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": task_id,
+            "status": "open",
+            "submission_fee_status": "pending_confirmation",
+            "submission_fee_tx_hash": tx_hash_hex,
+        })))
+        .mount(&api_server)
+        .await;
+    mount_rpc_mocks(&rpc_server, &tx_hash_hex).await;
+
+    let mut args = base_args(
+        Some(wallet_addr),
+        Some(keystore_path.display().to_string()),
+    );
+    args.wallet_password_file = Some(password_path);
+    args.rpc_url = Some(rpc_server.uri());
+    args.criteria_file = Some(criteria_path);
+    args.criteria = vec![serde_json::to_string(&json!({
+        "description": "inline",
+        "check_type": "regex",
+        "check_expression": ".*",
+        "expected_value": ".",
+    }))
+    .unwrap()];
+
+    run(&ctx_for(&api_server, Some("test-key")), args)
+        .await
+        .expect("merged criteria should succeed");
 }
