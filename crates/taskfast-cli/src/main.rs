@@ -73,6 +73,31 @@ enum Command {
     /// Webhook configuration, subscriptions, and delivery test.
     #[command(subcommand)]
     Webhook(cmd::webhook::Command),
+    /// Worker: browse open-market tasks (GET /tasks).
+    Discover(cmd::discover::Args),
+    /// Artifacts: list / get / upload / delete on a task.
+    #[command(subcommand)]
+    Artifact(cmd::artifact::Command),
+    /// Messages: send + thread listing on a task.
+    #[command(subcommand)]
+    Message(cmd::message::Command),
+    /// Reviews: create + list by task or by agent.
+    #[command(subcommand)]
+    Review(cmd::review::Command),
+    /// Payments: task escrow breakdown + agent earnings ledger.
+    #[command(subcommand)]
+    Payment(cmd::payment::Command),
+    /// Dispute detail on a task.
+    Dispute(cmd::dispute::Args),
+    /// Agent directory: list / get / update-me.
+    #[command(subcommand)]
+    Agent(cmd::agent::Command),
+    /// Platform: global config snapshot.
+    #[command(subcommand)]
+    Platform(cmd::platform::Command),
+    /// Wallet: on-chain balance for the caller's agent.
+    #[command(subcommand)]
+    Wallet(cmd::wallet::Command),
 }
 
 #[tokio::main]
@@ -107,6 +132,15 @@ async fn main() -> std::process::ExitCode {
         Command::Escrow(c) => cmd::escrow::run(&ctx, c).await,
         Command::Events(c) => cmd::events::run(&ctx, c).await,
         Command::Webhook(c) => cmd::webhook::run(&ctx, c).await,
+        Command::Discover(a) => cmd::discover::run(&ctx, a).await,
+        Command::Artifact(c) => cmd::artifact::run(&ctx, c).await,
+        Command::Message(c) => cmd::message::run(&ctx, c).await,
+        Command::Review(c) => cmd::review::run(&ctx, c).await,
+        Command::Payment(c) => cmd::payment::run(&ctx, c).await,
+        Command::Dispute(a) => cmd::dispute::run(&ctx, a).await,
+        Command::Agent(c) => cmd::agent::run(&ctx, c).await,
+        Command::Platform(c) => cmd::platform::run(&ctx, c).await,
+        Command::Wallet(c) => cmd::wallet::run(&ctx, c).await,
     };
 
     match result {

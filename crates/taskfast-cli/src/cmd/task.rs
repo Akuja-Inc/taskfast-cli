@@ -31,7 +31,9 @@ use uuid::Uuid;
 use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
-use taskfast_client::api::types::{CompletionSubmission, DisputeRequest, ListMyTasksStatus};
+use taskfast_client::api::types::{
+    CompletionSubmission, DisputeRequest, ListMyTasksStatus, ReassignTaskBody, TaskEditRequest,
+};
 use taskfast_client::map_api_error;
 use taskfast_client::TaskFastClient;
 
@@ -49,6 +51,58 @@ pub enum Command {
     Dispute(DisputeArgs),
     /// Poster: cancel a task before the state machine locks it in.
     Cancel(CancelArgs),
+    /// Worker: claim an assigned task (moves `assigned` → `in_progress`).
+    Claim(IdOnlyArgs),
+    /// Worker: refuse an assigned task before claiming it.
+    Refuse(IdOnlyArgs),
+    /// Worker: resubmit completion against a disputed task (remedy flow).
+    Remedy(SubmitArgs),
+    /// Worker: concede a dispute (accepts the poster's position, no appeal).
+    Concede(IdOnlyArgs),
+    /// Worker: abort a claimed task before submission.
+    Abort(IdOnlyArgs),
+    /// Poster: list bids received on a task (paginated).
+    Bids(BidsArgs),
+    /// Poster: reassign a direct-assigned task to a different agent.
+    Reassign(ReassignArgs),
+    /// Poster: flip a direct-assigned task back to `assigned` state.
+    Reopen(IdOnlyArgs),
+    /// Poster: convert a direct-assigned task into an open bid auction.
+    Open(IdOnlyArgs),
+    /// Poster: edit task metadata (title/description/budget/windows).
+    Edit(EditArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct ReassignArgs {
+    /// Task UUID.
+    pub id: String,
+
+    /// New assignee UUID.
+    #[arg(long)]
+    pub agent_id: String,
+}
+
+#[derive(Debug, Parser)]
+pub struct EditArgs {
+    /// Task UUID.
+    pub id: String,
+
+    #[arg(long)]
+    pub title: Option<String>,
+
+    #[arg(long)]
+    pub description: Option<String>,
+
+    /// New max budget (decimal string, e.g. `100.00`).
+    #[arg(long)]
+    pub budget_max: Option<String>,
+
+    #[arg(long)]
+    pub review_window_hours: Option<i64>,
+
+    #[arg(long)]
+    pub remedy_window_hours: Option<i64>,
 }
 
 #[derive(Debug, Parser)]
@@ -75,6 +129,29 @@ pub struct ListArgs {
 pub struct GetArgs {
     /// Task ID (UUID).
     pub id: String,
+}
+
+/// Shared shape for subcommands that take only a task UUID and no body —
+/// claim / refuse / concede / abort. Named `IdOnlyArgs` rather than reusing
+/// `GetArgs` so the intent reads at the call site.
+#[derive(Debug, Parser)]
+pub struct IdOnlyArgs {
+    /// Task UUID.
+    pub id: String,
+}
+
+#[derive(Debug, Parser)]
+pub struct BidsArgs {
+    /// Task UUID. Must be posted by this agent; 403 otherwise.
+    pub id: String,
+
+    /// Opaque pagination cursor from a previous response's `next_cursor`.
+    #[arg(long)]
+    pub cursor: Option<String>,
+
+    /// Max items per page.
+    #[arg(long)]
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Parser)]
@@ -159,11 +236,30 @@ pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
     match cmd {
         Command::List(args) => list(ctx, args).await,
         Command::Get(args) => get(ctx, args).await,
-        Command::Submit(args) => submit(ctx, args).await,
+        Command::Submit(args) => submit(ctx, args, SubmitKind::Completion).await,
         Command::Approve(args) => approve(ctx, args).await,
         Command::Dispute(args) => dispute(ctx, args).await,
         Command::Cancel(args) => cancel(ctx, args).await,
+        Command::Claim(args) => claim(ctx, args).await,
+        Command::Refuse(args) => refuse(ctx, args).await,
+        Command::Remedy(args) => submit(ctx, args, SubmitKind::Remedy).await,
+        Command::Concede(args) => concede(ctx, args).await,
+        Command::Abort(args) => abort(ctx, args).await,
+        Command::Bids(args) => bids(ctx, args).await,
+        Command::Reassign(args) => reassign(ctx, args).await,
+        Command::Reopen(args) => reopen(ctx, args).await,
+        Command::Open(args) => open(ctx, args).await,
+        Command::Edit(args) => edit(ctx, args).await,
     }
+}
+
+/// Selects the server endpoint for a completion-shaped POST. Remedy hits
+/// `/tasks/:id/remedy` (dispute-only) while Completion hits the submission
+/// endpoint. The wire body is identical — only the verb + URL differ.
+#[derive(Debug, Clone, Copy)]
+enum SubmitKind {
+    Completion,
+    Remedy,
 }
 
 async fn approve(ctx: &Ctx, args: ApproveArgs) -> CmdResult {
@@ -261,7 +357,7 @@ async fn cancel(ctx: &Ctx, args: CancelArgs) -> CmdResult {
     ))
 }
 
-async fn submit(ctx: &Ctx, args: SubmitArgs) -> CmdResult {
+async fn submit(ctx: &Ctx, args: SubmitArgs, kind: SubmitKind) -> CmdResult {
     // Parse the task ID locally so bad input never costs a round-trip.
     let task_id = Uuid::parse_str(&args.id)
         .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
@@ -274,12 +370,17 @@ async fn submit(ctx: &Ctx, args: SubmitArgs) -> CmdResult {
         .map(|p| ResolvedArtifact::from_path(p))
         .collect::<Result<_, _>>()?;
 
+    let action = match kind {
+        SubmitKind::Completion => "would_submit",
+        SubmitKind::Remedy => "would_remedy",
+    };
+
     if ctx.dry_run {
         return Ok(Envelope::success(
             ctx.environment,
             ctx.dry_run,
             json!({
-                "action": "would_submit",
+                "action": action,
                 "task_id": task_id.to_string(),
                 "summary": args.summary,
                 "artifacts": resolved.iter().map(|r| r.display_path()).collect::<Vec<_>>(),
@@ -314,9 +415,17 @@ async fn submit(ctx: &Ctx, args: SubmitArgs) -> CmdResult {
         artifact_ids: artifact_ids.clone(),
         metadata: serde_json::Map::new(),
     };
-    let result = match client.inner().submit_completion(&task_id, &body).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
+    let result = match kind {
+        SubmitKind::Completion => match client.inner().submit_completion(&task_id, &body).await {
+            Ok(v) => serde_json::to_value(v.into_inner())
+                .map_err(|e| CmdError::Decode(e.to_string()))?,
+            Err(e) => return Err(map_api_error(e).await.into()),
+        },
+        SubmitKind::Remedy => match client.inner().submit_remedy(&task_id, &body).await {
+            Ok(v) => serde_json::to_value(v.into_inner())
+                .map_err(|e| CmdError::Decode(e.to_string()))?,
+            Err(e) => return Err(map_api_error(e).await.into()),
+        },
     };
 
     Ok(Envelope::success(
@@ -326,6 +435,235 @@ async fn submit(ctx: &Ctx, args: SubmitArgs) -> CmdResult {
             "task_id": task_id.to_string(),
             "artifacts": uploaded_meta,
             "submission": result,
+        }),
+    ))
+}
+
+async fn claim(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
+    let task_id = Uuid::parse_str(&args.id)
+        .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
+    if ctx.dry_run {
+        return Ok(Envelope::success(
+            ctx.environment,
+            ctx.dry_run,
+            json!({ "action": "would_claim", "task_id": task_id.to_string() }),
+        ));
+    }
+    let client = ctx.client()?;
+    let resp = match client.inner().claim_task(&task_id).await {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    Ok(Envelope::success(
+        ctx.environment,
+        ctx.dry_run,
+        json!({ "claim": resp }),
+    ))
+}
+
+async fn refuse(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
+    let task_id = Uuid::parse_str(&args.id)
+        .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
+    if ctx.dry_run {
+        return Ok(Envelope::success(
+            ctx.environment,
+            ctx.dry_run,
+            json!({ "action": "would_refuse", "task_id": task_id.to_string() }),
+        ));
+    }
+    let client = ctx.client()?;
+    let resp = match client.inner().refuse_task(&task_id).await {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    Ok(Envelope::success(
+        ctx.environment,
+        ctx.dry_run,
+        json!({ "refuse": resp }),
+    ))
+}
+
+async fn concede(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
+    let task_id = Uuid::parse_str(&args.id)
+        .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
+    if ctx.dry_run {
+        return Ok(Envelope::success(
+            ctx.environment,
+            ctx.dry_run,
+            json!({ "action": "would_concede", "task_id": task_id.to_string() }),
+        ));
+    }
+    let client = ctx.client()?;
+    let resp = match client.inner().concede_dispute(&task_id).await {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    Ok(Envelope::success(
+        ctx.environment,
+        ctx.dry_run,
+        json!({ "concede": resp }),
+    ))
+}
+
+async fn abort(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
+    let task_id = Uuid::parse_str(&args.id)
+        .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
+    if ctx.dry_run {
+        return Ok(Envelope::success(
+            ctx.environment,
+            ctx.dry_run,
+            json!({ "action": "would_abort", "task_id": task_id.to_string() }),
+        ));
+    }
+    let client = ctx.client()?;
+    let resp = match client.inner().abort_task(&task_id).await {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    Ok(Envelope::success(
+        ctx.environment,
+        ctx.dry_run,
+        json!({ "abort": resp }),
+    ))
+}
+
+async fn reassign(ctx: &Ctx, args: ReassignArgs) -> CmdResult {
+    let task_id = Uuid::parse_str(&args.id)
+        .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
+    let agent_id = Uuid::parse_str(&args.agent_id)
+        .map_err(|e| CmdError::Usage(format!("--agent-id must be a UUID: {e}")))?;
+    if ctx.dry_run {
+        return Ok(Envelope::success(
+            ctx.environment,
+            ctx.dry_run,
+            json!({
+                "action": "would_reassign",
+                "task_id": task_id.to_string(),
+                "agent_id": agent_id.to_string(),
+            }),
+        ));
+    }
+    let client = ctx.client()?;
+    let body = ReassignTaskBody { agent_id };
+    let resp = match client.inner().reassign_task(&task_id, &body).await {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    Ok(Envelope::success(
+        ctx.environment,
+        ctx.dry_run,
+        json!({ "reassign": resp }),
+    ))
+}
+
+async fn reopen(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
+    let task_id = Uuid::parse_str(&args.id)
+        .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
+    if ctx.dry_run {
+        return Ok(Envelope::success(
+            ctx.environment,
+            ctx.dry_run,
+            json!({ "action": "would_reopen", "task_id": task_id.to_string() }),
+        ));
+    }
+    let client = ctx.client()?;
+    let resp = match client.inner().reopen_task(&task_id).await {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    Ok(Envelope::success(
+        ctx.environment,
+        ctx.dry_run,
+        json!({ "reopen": resp }),
+    ))
+}
+
+async fn open(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
+    let task_id = Uuid::parse_str(&args.id)
+        .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
+    if ctx.dry_run {
+        return Ok(Envelope::success(
+            ctx.environment,
+            ctx.dry_run,
+            json!({ "action": "would_open", "task_id": task_id.to_string() }),
+        ));
+    }
+    let client = ctx.client()?;
+    let resp = match client.inner().open_task(&task_id).await {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    Ok(Envelope::success(
+        ctx.environment,
+        ctx.dry_run,
+        json!({ "open": resp }),
+    ))
+}
+
+async fn edit(ctx: &Ctx, args: EditArgs) -> CmdResult {
+    let task_id = Uuid::parse_str(&args.id)
+        .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
+    // Reject empty edits locally — server would 422 and we'd rather fail fast.
+    let any_change = args.title.is_some()
+        || args.description.is_some()
+        || args.budget_max.is_some()
+        || args.review_window_hours.is_some()
+        || args.remedy_window_hours.is_some();
+    if !any_change {
+        return Err(CmdError::Usage(
+            "edit requires at least one of --title/--description/--budget-max/--review-window-hours/--remedy-window-hours".into(),
+        ));
+    }
+    let body = TaskEditRequest {
+        title: args.title.clone(),
+        description: args.description.clone(),
+        budget_max: args.budget_max.clone(),
+        review_window_hours: args.review_window_hours,
+        remedy_window_hours: args.remedy_window_hours,
+        completion_criteria: Vec::new(),
+    };
+    if ctx.dry_run {
+        return Ok(Envelope::success(
+            ctx.environment,
+            ctx.dry_run,
+            json!({
+                "action": "would_edit",
+                "task_id": task_id.to_string(),
+                "patch": body,
+            }),
+        ));
+    }
+    let client = ctx.client()?;
+    let resp = match client.inner().edit_task(&task_id, &body).await {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    Ok(Envelope::success(
+        ctx.environment,
+        ctx.dry_run,
+        json!({ "task": resp }),
+    ))
+}
+
+async fn bids(ctx: &Ctx, args: BidsArgs) -> CmdResult {
+    let task_id = Uuid::parse_str(&args.id)
+        .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
+    let client = ctx.client()?;
+    let resp = match client
+        .inner()
+        .list_task_bids(&task_id, args.cursor.as_deref(), args.limit)
+        .await
+    {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    Ok(Envelope::success(
+        ctx.environment,
+        ctx.dry_run,
+        json!({
+            "task_id": task_id.to_string(),
+            "bids": resp.data,
+            "meta": resp.meta,
         }),
     ))
 }
@@ -375,7 +713,7 @@ impl ResolvedArtifact {
 /// unrecognized falls through to `application/octet-stream`; the server
 /// rejects unsupported types with 415 which our error mapping surfaces as
 /// `CmdError::Validation`.
-fn content_type_for_ext(ext: &str) -> &'static str {
+pub(super) fn content_type_for_ext(ext: &str) -> &'static str {
     match ext {
         "txt" => "text/plain",
         "csv" => "text/csv",

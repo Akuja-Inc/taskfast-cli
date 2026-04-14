@@ -8,14 +8,16 @@
 //! just locks the bid; the poster signs the on-chain escrow later via the
 //! web UI URL surfaced in the response.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::json;
 use uuid::Uuid;
 
 use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
-use taskfast_client::api::types::{BidRejectRequest, BidRejectRequestReason, BidRequest};
+use taskfast_client::api::types::{
+    BidDetailStatus, BidRejectRequest, BidRejectRequestReason, BidRequest,
+};
 use taskfast_client::map_api_error;
 use taskfast_client::TaskFastClient;
 
@@ -42,6 +44,36 @@ pub struct ListArgs {
     /// Max items per page. Server enforces its own ceiling; we pass through.
     #[arg(long)]
     pub limit: Option<i64>,
+
+    /// Filter results by bid status. Applied client-side — the
+    /// `getAgentBids` endpoint has no status query param, so filtering here
+    /// avoids a jq/grep fallback at call sites without forcing a spec change.
+    #[arg(long)]
+    pub status: Option<BidStatusFilter>,
+}
+
+/// clap-friendly mirror of the generated `BidDetailStatus` enum. Lives here
+/// rather than in the codegen because `ValueEnum` needs `Clone + PartialEq`
+/// (which the generated enum already has) plus kebab-case — it's cheaper to
+/// maintain a 4-variant mirror than to teach clap about foreign serde attrs.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum BidStatusFilter {
+    Pending,
+    Accepted,
+    Rejected,
+    Withdrawn,
+}
+
+impl BidStatusFilter {
+    fn matches(self, status: BidDetailStatus) -> bool {
+        matches!(
+            (self, status),
+            (Self::Pending, BidDetailStatus::Pending)
+                | (Self::Accepted, BidDetailStatus::Accepted)
+                | (Self::Rejected, BidDetailStatus::Rejected)
+                | (Self::Withdrawn, BidDetailStatus::Withdrawn)
+        )
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -108,8 +140,19 @@ async fn list_bids(
         Ok(v) => v.into_inner(),
         Err(e) => return Err(map_api_error(e).await.into()),
     };
+    // Client-side filter: server has no status query param on /agents/me/bids.
+    // Bids lacking a status field (shouldn't happen on real responses) are
+    // dropped when a filter is supplied so we don't silently pass them through.
+    let bids = match args.status {
+        Some(f) => resp
+            .data
+            .into_iter()
+            .filter(|b| b.status.is_some_and(|s| f.matches(s)))
+            .collect::<Vec<_>>(),
+        None => resp.data,
+    };
     Ok(json!({
-        "bids": resp.data,
+        "bids": bids,
         "meta": resp.meta,
     }))
 }

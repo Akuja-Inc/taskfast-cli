@@ -23,7 +23,6 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use alloy_primitives::{Address, Bytes, B256, U256};
-use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall;
 use clap::Parser;
 use serde_json::json;
@@ -34,7 +33,6 @@ use crate::envelope::Envelope;
 
 use taskfast_agent::bootstrap;
 use taskfast_agent::chain::{compute_escrow_id, IERC20, TaskEscrow};
-use taskfast_agent::keystore::{self, KeySource};
 use taskfast_agent::signing::{sign_distribution, DistributionDomain};
 use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
 use taskfast_client::api::types::{
@@ -213,7 +211,11 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         .transpose()?;
 
     // 6. Load signer + preflight address equality.
-    let signer = load_signer_from_args(&args)?;
+    let signer = super::wallet_args::load_signer(
+        args.keystore.as_deref(),
+        args.wallet_password_file.as_deref(),
+        "escrow approval",
+    )?;
     if let Some(expected) = args.wallet_address.as_deref() {
         let expected_addr: Address = expected.parse().map_err(|e| {
             CmdError::Usage(format!("--wallet-address is not a valid EVM address: {e}"))
@@ -305,21 +307,27 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     }
 
     // 10. Live RPC: allowance preflight + optional approve.
+    //     TaskEscrow.open transferFroms `deposit + platformFeeAmount` in a
+    //     single call, so balance/allowance/approve must cover the sum — not
+    //     just deposit.
+    let total_required = deposit
+        .checked_add(platform_fee)
+        .ok_or_else(|| CmdError::Decode("deposit + platform_fee overflow U256".into()))?;
     let rpc = TempoRpcClient::new(reqwest::Client::new(), rpc_url.clone());
     let mut approval_tx_hex: Option<String> = None;
     if !args.skip_allowance_check {
         let balance = erc20_balance_of(&rpc, token_address, signer.address()).await?;
-        if balance < deposit {
+        if balance < total_required {
             return Err(CmdError::Usage(format!(
-                "poster balance {balance} < required deposit {deposit} on token {token_address:#x}"
+                "poster balance {balance} < required {total_required} (deposit {deposit} + fee {platform_fee}) on token {token_address:#x}"
             )));
         }
         let current_allowance =
             erc20_allowance(&rpc, token_address, signer.address(), task_escrow).await?;
-        if current_allowance < deposit {
+        if current_allowance < total_required {
             let approve_calldata: Bytes = IERC20::approveCall {
                 spender: task_escrow,
-                amount: deposit,
+                amount: total_required,
             }
             .abi_encode()
             .into();
@@ -337,9 +345,9 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             }
             let new_allowance =
                 erc20_allowance(&rpc, token_address, signer.address(), task_escrow).await?;
-            if new_allowance < deposit {
+            if new_allowance < total_required {
                 return Err(CmdError::Server(format!(
-                    "allowance still {new_allowance} after approve tx {approve_hash:#x}"
+                    "allowance still {new_allowance} after approve tx {approve_hash:#x} (needed {total_required})"
                 )));
             }
             approval_tx_hex = Some(format!("{approve_hash:#x}"));
@@ -471,42 +479,6 @@ fn decimal_to_u256(s: &str, decimals: u8) -> Result<U256, CmdError> {
     let digits = if stripped.is_empty() { "0" } else { stripped };
     U256::from_str_radix(digits, 10)
         .map_err(|e| CmdError::Decode(format!("amount `{s}` not parseable as integer: {e}")))
-}
-
-fn load_signer_from_args(args: &SignArgs) -> Result<PrivateKeySigner, CmdError> {
-    let raw = args.keystore.as_deref().ok_or_else(|| {
-        CmdError::Usage(
-            "--keystore (or TEMPO_KEY_SOURCE) is required to sign the escrow approval".into(),
-        )
-    })?;
-    let path_str = raw.strip_prefix("file:").unwrap_or(raw);
-    let password = resolve_password(args)?;
-    let path = PathBuf::from(path_str);
-    keystore::load(&KeySource::File { path }, &password).map_err(CmdError::from)
-}
-
-fn resolve_password(args: &SignArgs) -> Result<String, CmdError> {
-    if let Ok(pw) = std::env::var("TASKFAST_WALLET_PASSWORD") {
-        if !pw.is_empty() {
-            return Ok(pw);
-        }
-    }
-    let path = args.wallet_password_file.as_deref().ok_or_else(|| {
-        CmdError::Usage(
-            "TASKFAST_WALLET_PASSWORD or --wallet-password-file required to unlock keystore".into(),
-        )
-    })?;
-    let raw = std::fs::read_to_string(path).map_err(|e| {
-        CmdError::Usage(format!("read wallet password file {}: {e}", path.display()))
-    })?;
-    let trimmed = raw.trim_end_matches(['\n', '\r']);
-    if trimmed.is_empty() {
-        return Err(CmdError::Usage(format!(
-            "wallet password file {} is empty",
-            path.display()
-        )));
-    }
-    Ok(trimmed.to_string())
 }
 
 #[cfg(test)]

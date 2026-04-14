@@ -80,6 +80,8 @@ struct RpcErrorBody {
     code: i64,
     #[serde(default)]
     message: String,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
 }
 
 impl TempoRpcClient {
@@ -180,9 +182,21 @@ impl TempoRpcClient {
         tx_hash: TxHash,
     ) -> Result<Option<bool>, RpcError> {
         let hash_hex = format!("{tx_hash:#x}");
-        let value: Value = self
+        let value: Value = match self
             .call("eth_getTransactionReceipt", json!([hash_hex]))
-            .await?;
+            .await
+        {
+            Ok(v) => v,
+            // Moderato public RPC occasionally returns {"jsonrpc":"2.0","id":1}
+            // with neither `result` nor `error`. Treat identically to
+            // `result: null` (pending) so `wait_for_receipt` keeps polling.
+            Err(RpcError::Decode(ref m))
+                if m.contains("missing both result and error") =>
+            {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
         if value.is_null() {
             return Ok(None);
         }
@@ -257,9 +271,13 @@ impl TempoRpcClient {
         }
         let parsed: RpcResponse = resp.json().await?;
         if let Some(err) = parsed.error {
+            let message = match err.data {
+                Some(d) => format!("{} (data: {})", err.message, d),
+                None => err.message,
+            };
             return Err(RpcError::Rpc {
                 code: err.code,
-                message: err.message,
+                message,
             });
         }
         let result = parsed

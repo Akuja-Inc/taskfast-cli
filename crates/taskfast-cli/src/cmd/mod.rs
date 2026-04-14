@@ -20,14 +20,24 @@ use taskfast_agent::keystore::KeystoreError;
 use taskfast_agent::signing::SigningError;
 use taskfast_client::{Error as ClientError, TaskFastClient};
 
+pub mod agent;
+pub mod artifact;
 pub mod bid;
+pub mod discover;
+pub mod dispute;
 pub mod escrow;
 pub mod events;
 pub mod init;
 pub mod me;
+pub mod message;
+pub mod payment;
+pub mod platform;
 pub mod post;
+pub mod review;
 pub mod settle;
 pub mod task;
+pub mod wallet;
+pub mod wallet_args;
 pub mod webhook;
 
 /// Shared invocation context threaded through every subcommand.
