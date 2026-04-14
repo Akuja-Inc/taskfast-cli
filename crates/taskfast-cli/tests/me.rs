@@ -17,6 +17,7 @@ fn ctx_for(server: &MockServer) -> Ctx {
         api_key: Some("test-key".into()),
         environment: Environment::Local,
         api_base: Some(server.uri()),
+        config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
     }
@@ -146,6 +147,7 @@ async fn me_without_api_key_errors_with_missing_api_key() {
         api_key: None,
         environment: Environment::Local,
         api_base: Some("http://unused".into()),
+        config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
     };

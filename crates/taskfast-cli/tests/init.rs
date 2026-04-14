@@ -14,29 +14,35 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use taskfast_cli::cmd::init::{run, Args, Network};
 use taskfast_cli::cmd::{CmdError, Ctx};
+use taskfast_cli::config::Config;
 use taskfast_cli::dotenv::EnvFile;
 use taskfast_cli::{Envelope, Environment};
 
 const BYOW_ADDRESS: &str = "0xdEaDbEeF00000000000000000000000000000001";
 
-fn ctx_for(server: &MockServer, key: Option<&str>, dry_run: bool) -> Ctx {
+fn ctx_for(
+    server: &MockServer,
+    key: Option<&str>,
+    config_path: PathBuf,
+    dry_run: bool,
+) -> Ctx {
     Ctx {
         api_key: key.map(String::from),
         environment: Environment::Local,
         api_base: Some(server.uri()),
+        config_path,
         dry_run,
         quiet: true,
     }
 }
 
-fn base_args(env_file: PathBuf) -> Args {
+fn base_args() -> Args {
     Args {
         wallet_address: None,
         generate_wallet: false,
         wallet_password_file: None,
         keystore_path: None,
         network: Network::Testnet,
-        env_file: Some(env_file),
         skip_wallet: false,
         skip_funding: true,
         human_api_key: None,
@@ -47,6 +53,10 @@ fn base_args(env_file: PathBuf) -> Args {
         webhook_secret_file: None,
         webhook_events: Vec::new(),
     }
+}
+
+fn config_path_in(dir: &std::path::Path) -> PathBuf {
+    dir.join(".taskfast").join("config.json")
 }
 
 fn envelope_value(env: &Envelope) -> serde_json::Value {
@@ -102,26 +112,35 @@ async fn byow_happy_path_registers_wallet_and_writes_env_file() {
         .await;
 
     let tmp = TempDir::new().unwrap();
-    let env_path = tmp.path().join(".taskfast-agent.env");
-    let mut args = base_args(env_path.clone());
+    let cfg_path = config_path_in(tmp.path());
+    let mut args = base_args();
     args.wallet_address = Some(BYOW_ADDRESS.to_string());
 
-    let envelope = run(&ctx_for(&server, Some("test-key"), false), args)
-        .await
-        .expect("init should succeed");
+    let envelope = run(
+        &ctx_for(&server, Some("test-key"), cfg_path.clone(), false),
+        args,
+    )
+    .await
+    .expect("init should succeed");
 
     let v = envelope_value(&envelope);
     assert_eq!(v["ok"], true);
     assert_eq!(v["data"]["wallet"]["status"], "byo_registered");
     assert_eq!(v["data"]["wallet"]["address"], BYOW_ADDRESS);
-    assert_eq!(v["data"]["env_file"]["written"], true);
+    assert_eq!(v["data"]["config_file"]["written"], true);
 
-    // Env file exists and carries the registered address + api key.
-    let loaded = EnvFile::load(&env_path).unwrap();
-    assert_eq!(loaded.get("TASKFAST_API_KEY"), Some("test-key"));
-    assert_eq!(loaded.get("TEMPO_WALLET_ADDRESS"), Some(BYOW_ADDRESS));
-    assert_eq!(loaded.get("TEMPO_NETWORK"), Some("testnet"));
-    assert_eq!(loaded.get("TASKFAST_API").unwrap(), &server.uri());
+    // Config exists and carries the registered address + api key.
+    let loaded = Config::load(&cfg_path).unwrap();
+    assert_eq!(loaded.api_key.as_deref(), Some("test-key"));
+    assert_eq!(loaded.wallet_address.as_deref(), Some(BYOW_ADDRESS));
+    assert_eq!(loaded.network.as_deref(), Some("testnet"));
+    assert_eq!(loaded.api_base.as_deref(), Some(server.uri().as_str()));
+
+    // No legacy dotenv should be created by the fresh-init path.
+    assert!(
+        !tmp.path().join(".taskfast-agent.env").exists(),
+        "init must not write the legacy dotenv",
+    );
 }
 
 #[tokio::test]
@@ -131,11 +150,14 @@ async fn skips_wallet_when_server_already_has_one() {
     mount_readiness(&server, "complete", true).await;
 
     let tmp = TempDir::new().unwrap();
-    let args = base_args(tmp.path().join(".env"));
+    let args = base_args();
 
-    let envelope = run(&ctx_for(&server, Some("test-key"), false), args)
-        .await
-        .expect("init should succeed without wallet flags");
+    let envelope = run(
+        &ctx_for(&server, Some("test-key"), config_path_in(tmp.path()), false),
+        args,
+    )
+    .await
+    .expect("init should succeed without wallet flags");
 
     let v = envelope_value(&envelope);
     assert_eq!(v["data"]["wallet"]["status"], "already_configured");
@@ -149,12 +171,15 @@ async fn skip_wallet_flag_bypasses_provisioning_even_when_missing() {
     mount_readiness(&server, "missing", false).await;
 
     let tmp = TempDir::new().unwrap();
-    let mut args = base_args(tmp.path().join(".env"));
+    let mut args = base_args();
     args.skip_wallet = true;
 
-    let envelope = run(&ctx_for(&server, Some("test-key"), false), args)
-        .await
-        .expect("--skip-wallet should succeed");
+    let envelope = run(
+        &ctx_for(&server, Some("test-key"), config_path_in(tmp.path()), false),
+        args,
+    )
+    .await
+    .expect("--skip-wallet should succeed");
 
     let v = envelope_value(&envelope);
     assert_eq!(v["data"]["wallet"]["status"], "skipped");
@@ -170,20 +195,23 @@ async fn dry_run_byow_skips_registration_and_env_write() {
     // Deliberately no /agents/me/wallet mock — a hit would 404 and fail the test.
 
     let tmp = TempDir::new().unwrap();
-    let env_path = tmp.path().join(".env");
-    let mut args = base_args(env_path.clone());
+    let cfg_path = config_path_in(tmp.path());
+    let mut args = base_args();
     args.wallet_address = Some(BYOW_ADDRESS.to_string());
 
-    let envelope = run(&ctx_for(&server, Some("test-key"), true), args)
-        .await
-        .expect("dry-run should succeed");
+    let envelope = run(
+        &ctx_for(&server, Some("test-key"), cfg_path.clone(), true),
+        args,
+    )
+    .await
+    .expect("dry-run should succeed");
 
     let v = envelope_value(&envelope);
     assert_eq!(v["dry_run"], true);
     assert_eq!(v["data"]["wallet"]["status"], "skipped");
-    assert_eq!(v["data"]["env_file"]["written"], false);
-    assert_eq!(v["data"]["env_file"]["would_write"], true);
-    assert!(!env_path.exists(), "dry-run must not write env file");
+    assert_eq!(v["data"]["config_file"]["written"], false);
+    assert_eq!(v["data"]["config_file"]["would_write"], true);
+    assert!(!cfg_path.exists(), "dry-run must not write config file");
 }
 
 #[tokio::test]
@@ -200,11 +228,14 @@ async fn inactive_agent_status_surfaces_validation_error() {
         .await;
 
     let tmp = TempDir::new().unwrap();
-    let args = base_args(tmp.path().join(".env"));
+    let args = base_args();
 
-    let err = run(&ctx_for(&server, Some("test-key"), false), args)
-        .await
-        .expect_err("suspended → Validation");
+    let err = run(
+        &ctx_for(&server, Some("test-key"), config_path_in(tmp.path()), false),
+        args,
+    )
+    .await
+    .expect_err("suspended → Validation");
 
     match err {
         CmdError::Validation { code, .. } => assert_eq!(code, "agent_not_active"),
@@ -213,37 +244,72 @@ async fn inactive_agent_status_surfaces_validation_error() {
 }
 
 #[tokio::test]
-async fn api_key_falls_back_to_env_file_when_ctx_is_empty() {
+async fn api_key_falls_back_to_config_when_ctx_is_empty() {
     let server = MockServer::start().await;
     mount_profile_active(&server).await;
     mount_readiness(&server, "complete", true).await;
 
     let tmp = TempDir::new().unwrap();
-    let env_path = tmp.path().join(".env");
-    let mut seed = EnvFile::new();
-    seed.set("TASKFAST_API_KEY", "from-env-file");
-    seed.save(&env_path).unwrap();
+    let cfg_path = config_path_in(tmp.path());
+    let seed = Config {
+        api_key: Some("from-config".into()),
+        ..Config::default()
+    };
+    seed.save(&cfg_path).unwrap();
 
-    let args = base_args(env_path.clone());
-    let envelope = run(&ctx_for(&server, None, false), args)
+    let args = base_args();
+    let envelope = run(&ctx_for(&server, None, cfg_path.clone(), false), args)
         .await
-        .expect("should pick up api_key from env file");
+        .expect("should pick up api_key from config");
 
     let v = envelope_value(&envelope);
     assert_eq!(v["ok"], true);
 
-    // Re-saved env file still carries that key.
-    let loaded = EnvFile::load(&env_path).unwrap();
-    assert_eq!(loaded.get("TASKFAST_API_KEY"), Some("from-env-file"));
+    // Re-saved config still carries that key.
+    let loaded = Config::load(&cfg_path).unwrap();
+    assert_eq!(loaded.api_key.as_deref(), Some("from-config"));
+}
+
+#[tokio::test]
+async fn migrates_legacy_dotenv_into_json_when_config_missing() {
+    let server = MockServer::start().await;
+    mount_profile_active(&server).await;
+    mount_readiness(&server, "complete", true).await;
+
+    let tmp = TempDir::new().unwrap();
+    let cfg_path = config_path_in(tmp.path());
+    // Seed a legacy dotenv as the project-root sibling of `.taskfast/`.
+    let legacy = tmp.path().join(".taskfast-agent.env");
+    let mut seed = EnvFile::new();
+    seed.set("TASKFAST_API_KEY", "from-legacy-dotenv");
+    seed.set("TEMPO_NETWORK", "testnet");
+    seed.set("TEMPO_WALLET_ADDRESS", BYOW_ADDRESS);
+    seed.save(&legacy).unwrap();
+
+    let args = base_args();
+    let envelope = run(&ctx_for(&server, None, cfg_path.clone(), false), args)
+        .await
+        .expect("migration should unblock the api-key lookup");
+
+    let v = envelope_value(&envelope);
+    assert_eq!(v["ok"], true);
+
+    // JSON was written (both by the migration and by the init step itself).
+    let loaded = Config::load(&cfg_path).unwrap();
+    assert_eq!(loaded.api_key.as_deref(), Some("from-legacy-dotenv"));
+    assert_eq!(loaded.network.as_deref(), Some("testnet"));
+
+    // Legacy file is left on disk so the user can audit + remove.
+    assert!(legacy.exists(), "legacy dotenv should be left untouched");
 }
 
 #[tokio::test]
 async fn missing_api_key_everywhere_errors_cleanly() {
     let server = MockServer::start().await;
     let tmp = TempDir::new().unwrap();
-    let args = base_args(tmp.path().join(".env"));
+    let args = base_args();
 
-    let err = run(&ctx_for(&server, None, false), args)
+    let err = run(&ctx_for(&server, None, config_path_in(tmp.path()), false), args)
         .await
         .expect_err("no key anywhere → MissingApiKey");
     assert!(matches!(err, CmdError::MissingApiKey), "got {err:?}");
@@ -256,7 +322,7 @@ async fn generate_wallet_without_password_errors_as_usage() {
     mount_readiness(&server, "missing", false).await;
 
     let tmp = TempDir::new().unwrap();
-    let mut args = base_args(tmp.path().join(".env"));
+    let mut args = base_args();
     args.generate_wallet = true;
     // No wallet_password_file; no TASKFAST_WALLET_PASSWORD env var.
     // (Tests run with whatever env the harness has; the env var is unset
@@ -268,9 +334,12 @@ async fn generate_wallet_without_password_errors_as_usage() {
         return;
     }
 
-    let err = run(&ctx_for(&server, Some("test-key"), false), args)
-        .await
-        .expect_err("missing password → Usage");
+    let err = run(
+        &ctx_for(&server, Some("test-key"), config_path_in(tmp.path()), false),
+        args,
+    )
+    .await
+    .expect_err("missing password → Usage");
     match err {
         CmdError::Usage(msg) => {
             assert!(
@@ -302,19 +371,22 @@ async fn generate_wallet_with_password_file_persists_keystore_and_registers() {
         .await;
 
     let tmp = TempDir::new().unwrap();
-    let env_path = tmp.path().join(".env");
+    let cfg_path = config_path_in(tmp.path());
     let pw_path = tmp.path().join("pw");
     fs::write(&pw_path, "s3kret\n").unwrap();
     let keystore_path = tmp.path().join("wallet.json");
 
-    let mut args = base_args(env_path.clone());
+    let mut args = base_args();
     args.generate_wallet = true;
     args.wallet_password_file = Some(pw_path);
     args.keystore_path = Some(keystore_path.clone());
 
-    let envelope = run(&ctx_for(&server, Some("test-key"), false), args)
-        .await
-        .expect("generate path should succeed");
+    let envelope = run(
+        &ctx_for(&server, Some("test-key"), cfg_path.clone(), false),
+        args,
+    )
+    .await
+    .expect("generate path should succeed");
 
     let v = envelope_value(&envelope);
     assert_eq!(v["data"]["wallet"]["status"], "generated");
@@ -329,13 +401,10 @@ async fn generate_wallet_with_password_file_persists_keystore_and_registers() {
 
     assert!(keystore_path.exists(), "keystore must be written");
 
-    let loaded = EnvFile::load(&env_path).unwrap();
+    let loaded = Config::load(&cfg_path).unwrap();
+    assert_eq!(loaded.keystore_path.as_deref(), Some(keystore_path.as_path()));
     assert_eq!(
-        loaded.get("TEMPO_KEY_SOURCE"),
-        Some(format!("file:{}", keystore_path.display()).as_str())
-    );
-    assert_eq!(
-        loaded.get("TEMPO_WALLET_ADDRESS").map(str::to_lowercase),
+        loaded.wallet_address.as_deref().map(str::to_lowercase),
         Some(addr.to_lowercase())
     );
 }
@@ -369,12 +438,12 @@ async fn human_api_key_mints_agent_then_continues_with_returned_key() {
     mount_readiness(&server, "complete", true).await;
 
     let tmp = TempDir::new().unwrap();
-    let env_path = tmp.path().join(".taskfast-agent.env");
-    let mut args = base_args(env_path.clone());
+    let cfg_path = config_path_in(tmp.path());
+    let mut args = base_args();
     args.human_api_key = Some("tf_user_test".into());
 
     // Ctx carries no agent key — forces the mint branch.
-    let envelope = run(&ctx_for(&server, None, false), args)
+    let envelope = run(&ctx_for(&server, None, cfg_path.clone(), false), args)
         .await
         .expect("mint path should succeed");
 
@@ -383,9 +452,10 @@ async fn human_api_key_mints_agent_then_continues_with_returned_key() {
     assert_eq!(v["data"]["agent"]["action"], "minted");
     assert_eq!(v["data"]["agent"]["id"], MINTED_AGENT_ID);
 
-    // Env file carries the minted agent key, not the PAT.
-    let loaded = EnvFile::load(&env_path).unwrap();
-    assert_eq!(loaded.get("TASKFAST_API_KEY"), Some(MINTED_KEY));
+    // Config carries the minted agent key, not the PAT.
+    let loaded = Config::load(&cfg_path).unwrap();
+    assert_eq!(loaded.api_key.as_deref(), Some(MINTED_KEY));
+    assert_eq!(loaded.agent_id.as_deref(), Some(MINTED_AGENT_ID));
 }
 
 #[tokio::test]
@@ -393,11 +463,11 @@ async fn dry_run_human_api_key_reports_would_mint_and_skips_post() {
     let server = MockServer::start().await;
     // Any HTTP hit would 404 and the envelope would be an error, not ok.
     let tmp = TempDir::new().unwrap();
-    let env_path = tmp.path().join(".env");
-    let mut args = base_args(env_path.clone());
+    let cfg_path = config_path_in(tmp.path());
+    let mut args = base_args();
     args.human_api_key = Some("tf_user_test".into());
 
-    let envelope = run(&ctx_for(&server, None, true), args)
+    let envelope = run(&ctx_for(&server, None, cfg_path.clone(), true), args)
         .await
         .expect("dry-run mint should succeed without HTTP");
 
@@ -408,30 +478,32 @@ async fn dry_run_human_api_key_reports_would_mint_and_skips_post() {
         v["data"]["agent"].get("owner_id").is_none(),
         "dry-run envelope should not carry owner_id — it is server-derived"
     );
-    assert_eq!(v["data"]["env_file"]["written"], false);
-    assert_eq!(v["data"]["env_file"]["would_write"], true);
-    assert!(!env_path.exists(), "dry-run must not write env file");
+    assert_eq!(v["data"]["config_file"]["written"], false);
+    assert_eq!(v["data"]["config_file"]["would_write"], true);
+    assert!(!cfg_path.exists(), "dry-run must not write config file");
 }
 
 #[tokio::test]
-async fn existing_env_file_key_takes_precedence_over_human_api_key() {
-    // Idempotency: re-running init with --human-api-key but an env-file key
-    // must NOT mint a second agent.
+async fn existing_config_key_takes_precedence_over_human_api_key() {
+    // Idempotency: re-running init with --human-api-key but a config-file
+    // key must NOT mint a second agent.
     let server = MockServer::start().await;
     mount_profile_active(&server).await;
     mount_readiness(&server, "complete", true).await;
     // Deliberately no POST /agents mock — a hit would 404.
 
     let tmp = TempDir::new().unwrap();
-    let env_path = tmp.path().join(".env");
-    let mut seed = EnvFile::new();
-    seed.set("TASKFAST_API_KEY", "am_live_already_have_one");
-    seed.save(&env_path).unwrap();
+    let cfg_path = config_path_in(tmp.path());
+    let seed = Config {
+        api_key: Some("am_live_already_have_one".into()),
+        ..Config::default()
+    };
+    seed.save(&cfg_path).unwrap();
 
-    let mut args = base_args(env_path.clone());
+    let mut args = base_args();
     args.human_api_key = Some("tf_user_should_be_ignored".into());
 
-    let envelope = run(&ctx_for(&server, None, false), args)
+    let envelope = run(&ctx_for(&server, None, cfg_path.clone(), false), args)
         .await
         .expect("idempotent path");
     let v = envelope_value(&envelope);

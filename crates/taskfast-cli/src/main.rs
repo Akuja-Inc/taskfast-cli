@@ -7,9 +7,11 @@
 // TODO: tighten doc coverage on public items + remove this allow.
 #![allow(missing_docs)]
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
-use taskfast_cli::{cmd, exit, Envelope, Environment};
+use taskfast_cli::{cmd, config::Config, exit, Envelope, Environment};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -22,14 +24,21 @@ struct Cli {
     #[arg(long, global = true, env = "TASKFAST_API_KEY")]
     api_key: Option<String>,
 
-    /// Target environment.
-    #[arg(long, global = true, default_value = "prod", env = "TASKFAST_ENV")]
-    env: Environment,
+    /// Target environment. When unset, falls back to the config file,
+    /// then to `prod`.
+    #[arg(long, global = true, env = "TASKFAST_ENV")]
+    env: Option<Environment>,
 
     /// Override the resolved base URL (bypasses env → URL mapping). Useful
     /// for pointing at a local dev server without touching prod defaults.
     #[arg(long, global = true, env = "TASKFAST_API")]
     api_base: Option<String>,
+
+    /// Path to the JSON config file. Default: `./.taskfast/config.json`.
+    /// Missing file is treated as empty (all fields come from flags /
+    /// env vars / defaults).
+    #[arg(long, global = true, env = "TASKFAST_CONFIG")]
+    config: Option<PathBuf>,
 
     /// Short-circuit mutations; reads pass through.
     #[arg(long, global = true)]
@@ -98,6 +107,9 @@ enum Command {
     /// Wallet: on-chain balance for the caller's agent.
     #[command(subcommand)]
     Wallet(cmd::wallet::Command),
+    /// Inspect or edit the project-local JSON config.
+    #[command(subcommand)]
+    Config(cmd::config::Command),
 }
 
 #[tokio::main]
@@ -114,13 +126,32 @@ async fn main() -> std::process::ExitCode {
             .try_init();
     }
 
-    let ctx = cmd::Ctx {
-        api_key: cli.api_key,
-        environment: cli.env,
-        api_base: cli.api_base,
-        dry_run: cli.dry_run,
-        quiet: cli.quiet,
+    let cfg_path = cli
+        .config
+        .clone()
+        .unwrap_or_else(Config::default_path);
+    let cfg = match Config::load_or_migrate(&cfg_path) {
+        Ok(c) => c,
+        Err(e) => {
+            // Config load failure is fatal and happens before we have
+            // a Ctx — fall back to defaults for the error envelope.
+            if !cli.quiet {
+                let err = cmd::CmdError::Usage(format!("config: {e}"));
+                Envelope::error(cmd::DEFAULT_ENVIRONMENT, cli.dry_run, &err).emit();
+            }
+            return exit::ExitCode::Usage.into();
+        }
     };
+
+    let ctx = cmd::Ctx::from_parts(
+        cli.api_key,
+        cli.env,
+        cli.api_base,
+        Some(cfg_path),
+        cli.dry_run,
+        cli.quiet,
+        &cfg,
+    );
 
     let result = match cli.command {
         Command::Init(a) => cmd::init::run(&ctx, a).await,
@@ -141,6 +172,7 @@ async fn main() -> std::process::ExitCode {
         Command::Agent(c) => cmd::agent::run(&ctx, c).await,
         Command::Platform(c) => cmd::platform::run(&ctx, c).await,
         Command::Wallet(c) => cmd::wallet::run(&ctx, c).await,
+        Command::Config(c) => cmd::config::run(&ctx, c).await,
     };
 
     match result {

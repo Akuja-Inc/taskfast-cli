@@ -23,6 +23,7 @@ fn ctx_for(server: &MockServer, key: Option<&str>) -> Ctx {
         api_key: key.map(String::from),
         environment: Environment::Local,
         api_base: Some(server.uri()),
+        config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
     }

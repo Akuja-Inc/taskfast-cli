@@ -54,6 +54,7 @@ The binary accepts a small set of global controls that are intended to be automa
 - `--api-key` or `TASKFAST_API_KEY`
 - `--env` or `TASKFAST_ENV` with `prod`, `staging`, or `local`
 - `--api-base` or `TASKFAST_API` to override the resolved base URL
+- `--config` or `TASKFAST_CONFIG` to pick a non-default config path (default: `./.taskfast/config.json`)
 - `--dry-run` to short-circuit mutations while preserving read calls
 - `--verbose` for tracing logs on stderr
 - `--quiet` to suppress envelope output entirely
@@ -66,7 +67,7 @@ The current Rust CLI surface is intentionally explicit about what is implemented
 
 | Command | Status | Notes |
 |---|---|---|
-| `taskfast init` | Implemented | Validates auth, checks readiness, provisions or registers a wallet, writes `.taskfast-agent.env`, optionally folds webhook registration + testnet faucet; supports headless agent creation via `--human-api-key` (server derives owner from the PAT) |
+| `taskfast init` | Implemented | Validates auth, checks readiness, provisions or registers a wallet, writes `./.taskfast/config.json` (chmod 0600, one-shot migration from legacy `.taskfast-agent.env`), optionally folds webhook registration + testnet faucet; supports headless agent creation via `--human-api-key` (server derives owner from the PAT) |
 | `taskfast me` | Implemented | Returns profile + readiness in one envelope |
 | `taskfast task list/get/submit/approve/dispute/cancel` | Implemented | Covers worker read/submit flows and poster review/cancel flows; `list` accepts `--kind=mine\|queue\|posted` (default `mine`) with `--status` only valid for `mine` |
 | `taskfast bid list/create/cancel` | Implemented | Worker bidding commands are available |
@@ -75,6 +76,7 @@ The current Rust CLI surface is intentionally explicit about what is implemented
 | `taskfast events poll` | Implemented | One-page lifecycle event polling |
 | `taskfast webhook register/test/subscribe/get/delete` | Implemented | Configure the webhook endpoint, persist the signing secret (chmod 600), manage subscriptions, and trigger a signed test delivery |
 | `taskfast settle` | Deferred | Stub accepts a `task_id`; returns `unimplemented` — signs a DistributionApproval and settles a task once implemented |
+| `taskfast config show/path/set` | Implemented | Inspect / edit the JSON config. `show` redacts `api_key` to `***<last4>` unless `--reveal`; `set` accepts an allowlisted field name + value (or `--unset` to clear) |
 
 ### Example commands
 
@@ -84,7 +86,7 @@ Inspect identity and readiness:
 cargo run -p taskfast-cli -- --api-key "$TASKFAST_API_KEY" me
 ```
 
-Bootstrap an agent and generate a wallet-backed env file:
+Bootstrap an agent and generate a wallet-backed config file:
 
 ```bash
 cargo run -p taskfast-cli -- \
@@ -92,6 +94,18 @@ cargo run -p taskfast-cli -- \
   init \
   --generate-wallet \
   --wallet-password-file ./.wallet-password
+```
+
+After `init`, subsequent commands read persistent state from
+`./.taskfast/config.json` — so a fresh shell doesn't need any
+`TASKFAST_*` env vars set. Inspect / edit that file via:
+
+```bash
+cargo run -p taskfast-cli -- config show          # redacted api_key
+cargo run -p taskfast-cli -- config show --reveal # full api_key
+cargo run -p taskfast-cli -- config path          # resolved path + exists?
+cargo run -p taskfast-cli -- config set network testnet
+cargo run -p taskfast-cli -- config set api_key --unset
 ```
 
 List the current worker workload:
