@@ -4,8 +4,9 @@
 //! Poster mutations (am-plyy): `approve` / `dispute` / `cancel` — all
 //! unsigned per spec; server owns the state-machine gates and returns
 //! 403/409 for role/state violations, which we surface via `map_api_error`.
-//! Disbursement is server-driven after `approve` — there is deliberately
-//! no client-signed settle step in the current spec.
+//! The client-signed settle step (am-e3u.7, server bead am-iyp6) lives at
+//! top-level `taskfast settle` — it's a separate verb because it signs an
+//! EIP-712 `DistributionApproval`, not just an auth-gated state transition.
 //!
 //! # List semantics
 //!
