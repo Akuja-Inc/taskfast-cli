@@ -3,10 +3,12 @@
 //! Read (am-4yr): `list` over `GET /agents/me/bids`.
 //! Worker mutations (am-e3u.8): `create` + `cancel`. No EIP-712 — API key
 //! alone authorizes both (`BidRequest { price, pitch? }`; withdraw has no
-//! body). Poster-side `accept` / `reject` are still stubbed; they land in
-//! am-e3u.11 once escrow delegation (am-4w2) is settled.
+//! body). Poster mutations (am-e3u.11): `accept` + `reject`. No signing —
+//! am-4w2 shipped the two-phase deferred-escrow flow, so the API call
+//! just locks the bid; the poster signs the on-chain escrow later via the
+//! web UI URL surfaced in the response.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -14,7 +16,7 @@ use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_client::TaskFastClient;
-use taskfast_client::api::types::BidRequest;
+use taskfast_client::api::types::{BidRejectRequest, BidRejectRequestReason, BidRequest};
 use taskfast_client::map_api_error;
 
 #[derive(Debug, Subcommand)]
@@ -25,10 +27,10 @@ pub enum Command {
     Create(CreateArgs),
     /// Worker: withdraw a pending bid.
     Cancel(CancelArgs),
-    /// Poster: accept a bid. (Deferred — escrow delegation; see am-4w2.)
-    Accept { id: String },
-    /// Poster: reject a bid. (Deferred.)
-    Reject { id: String },
+    /// Poster: accept a bid (two-phase; poster signs escrow later via web UI).
+    Accept(AcceptArgs),
+    /// Poster: reject a pending bid with an optional reason.
+    Reject(RejectArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -63,13 +65,28 @@ pub struct CancelArgs {
     pub id: String,
 }
 
+#[derive(Debug, Args)]
+pub struct AcceptArgs {
+    /// Bid UUID to accept. Caller must be the poster of the parent task.
+    pub id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct RejectArgs {
+    /// Bid UUID to reject. Caller must be the poster; bid must be `:pending`.
+    pub id: String,
+    /// Optional reason (<=500 chars), stored on the bid.
+    #[arg(long)]
+    pub reason: Option<String>,
+}
+
 pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
     match cmd {
         Command::List(args) => list(ctx, args).await,
         Command::Create(args) => create(ctx, args).await,
         Command::Cancel(args) => cancel(ctx, args).await,
-        Command::Accept { .. } => Err(CmdError::Unimplemented("taskfast bid accept")),
-        Command::Reject { .. } => Err(CmdError::Unimplemented("taskfast bid reject")),
+        Command::Accept(args) => accept(ctx, args).await,
+        Command::Reject(args) => reject(ctx, args).await,
     }
 }
 
@@ -161,5 +178,78 @@ async fn cancel(ctx: &Ctx, args: CancelArgs) -> CmdResult {
         ctx.environment,
         ctx.dry_run,
         json!({ "bid": bid }),
+    ))
+}
+
+async fn accept(ctx: &Ctx, args: AcceptArgs) -> CmdResult {
+    let bid_id = Uuid::parse_str(&args.id)
+        .map_err(|e| CmdError::Usage(format!("bid id must be a UUID: {e}")))?;
+
+    if ctx.dry_run {
+        return Ok(Envelope::success(
+            ctx.environment,
+            ctx.dry_run,
+            json!({
+                "action": "would_accept_bid",
+                "bid_id": bid_id.to_string(),
+            }),
+        ));
+    }
+
+    let client = ctx.client()?;
+    let resp = match client.inner().accept_bid(&bid_id).await {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    Ok(Envelope::success(
+        ctx.environment,
+        ctx.dry_run,
+        json!({ "bid": resp }),
+    ))
+}
+
+async fn reject(ctx: &Ctx, args: RejectArgs) -> CmdResult {
+    let bid_id = Uuid::parse_str(&args.id)
+        .map_err(|e| CmdError::Usage(format!("bid id must be a UUID: {e}")))?;
+
+    // Refuse an explicit but empty --reason pre-HTTP so orchestrators see a
+    // never-retry Usage error, not a server-side 4xx. Mirrors task dispute.
+    let reason_field = match args.reason.as_deref() {
+        Some(s) if s.trim().is_empty() => {
+            return Err(CmdError::Usage(
+                "--reason must not be empty when passed".into(),
+            ));
+        }
+        Some(s) => Some(
+            BidRejectRequestReason::try_from(s)
+                .map_err(|e| CmdError::Usage(format!("--reason invalid: {e}")))?,
+        ),
+        None => None,
+    };
+
+    if ctx.dry_run {
+        return Ok(Envelope::success(
+            ctx.environment,
+            ctx.dry_run,
+            json!({
+                "action": "would_reject_bid",
+                "bid_id": bid_id.to_string(),
+                "reason": args.reason,
+            }),
+        ));
+    }
+
+    let client = ctx.client()?;
+    let body = BidRejectRequest {
+        reason: reason_field,
+    };
+    let resp = match client.inner().reject_bid(&bid_id, &body).await {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    Ok(Envelope::success(
+        ctx.environment,
+        ctx.dry_run,
+        json!({ "bid": resp }),
     ))
 }

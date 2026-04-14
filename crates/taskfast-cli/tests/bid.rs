@@ -7,7 +7,7 @@ use serde_json::json;
 use wiremock::matchers::{body_partial_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use taskfast_cli::cmd::bid::{CancelArgs, Command, CreateArgs, ListArgs, run};
+use taskfast_cli::cmd::bid::{AcceptArgs, CancelArgs, Command, CreateArgs, ListArgs, RejectArgs, run};
 use taskfast_cli::cmd::{CmdError, Ctx};
 use taskfast_cli::{Envelope, Environment};
 
@@ -133,26 +133,6 @@ async fn list_missing_api_key_errors_before_any_http_call() {
         .await
         .expect_err("no key → MissingApiKey");
     assert!(matches!(err, CmdError::MissingApiKey), "got {err:?}");
-}
-
-#[tokio::test]
-async fn deferred_poster_subcommands_return_unimplemented() {
-    // Worker-side Create/Cancel landed in am-e3u.8. Poster-side Accept/Reject
-    // are still stubbed pending escrow-delegation design (am-4w2 / am-e3u.11).
-    let server = MockServer::start().await;
-    for cmd in [
-        Command::Accept {
-            id: BID_ID.into(),
-        },
-        Command::Reject {
-            id: BID_ID.into(),
-        },
-    ] {
-        let err = run(&ctx_for(&server, Some("test-key")), cmd)
-            .await
-            .expect_err("stubs must return Unimplemented");
-        assert!(matches!(err, CmdError::Unimplemented(_)), "got {err:?}");
-    }
 }
 
 // ─── bid create ───────────────────────────────────────────────────────────
@@ -396,4 +376,358 @@ async fn cancel_409_surfaces() {
         matches!(err, CmdError::Validation { .. } | CmdError::Server(_)),
         "got {err:?}"
     );
+}
+
+// ─── bid accept (poster; deferred-escrow two-phase per am-4w2) ─────────────
+
+fn accept_body() -> serde_json::Value {
+    // Mirrors bid_controller.ex:172-187 — server emits 8 fields on 202.
+    json!({
+        "bid_id": BID_ID,
+        "task_id": TASK_ID,
+        "payment_id": "00000000-0000-0000-0000-0000000000b9",
+        "task_status": "payment_pending",
+        "status": "accepted_pending_escrow",
+        "poster_signature_deadline": "2026-04-15T21:00:00Z",
+        "signing_url": format!("https://taskfast.app/tasks/{TASK_ID}"),
+        "message": "Bid acceptance locked pending escrow signature.",
+    })
+}
+
+#[tokio::test]
+async fn accept_happy_path_surfaces_deferred_escrow_envelope() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/bids/{BID_ID}/accept")))
+        .respond_with(ResponseTemplate::new(202).set_body_json(accept_body()))
+        .mount(&server)
+        .await;
+    let args = AcceptArgs { id: BID_ID.into() };
+    let envelope = run(&ctx_for(&server, Some("test-key")), Command::Accept(args))
+        .await
+        .expect("accept should succeed");
+    let v = envelope_value(&envelope);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["bid"]["bid_id"], BID_ID);
+    assert_eq!(v["data"]["bid"]["status"], "accepted_pending_escrow");
+    assert_eq!(v["data"]["bid"]["task_status"], "payment_pending");
+    assert!(
+        v["data"]["bid"]["signing_url"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(TASK_ID),
+        "signing_url must surface: {}",
+        v["data"]["bid"]["signing_url"]
+    );
+}
+
+#[tokio::test]
+async fn accept_dry_run_skips_http() {
+    let server = MockServer::start().await; // no mocks
+    let mut ctx = ctx_for(&server, Some("test-key"));
+    ctx.dry_run = true;
+    let args = AcceptArgs { id: BID_ID.into() };
+    let envelope = run(&ctx, Command::Accept(args)).await.expect("dry-run ok");
+    let v = envelope_value(&envelope);
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["data"]["action"], "would_accept_bid");
+    assert_eq!(v["data"]["bid_id"], BID_ID);
+}
+
+#[tokio::test]
+async fn accept_bad_bid_id_is_usage_error_without_any_http() {
+    let server = MockServer::start().await;
+    let args = AcceptArgs {
+        id: "not-a-uuid".into(),
+    };
+    let err = run(&ctx_for(&server, Some("test-key")), Command::Accept(args))
+        .await
+        .expect_err("bad UUID must fail locally");
+    assert!(matches!(err, CmdError::Usage(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn accept_401_surfaces_as_auth() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/bids/{BID_ID}/accept")))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": "invalid_api_key",
+            "message": "bad key",
+        })))
+        .mount(&server)
+        .await;
+    let args = AcceptArgs { id: BID_ID.into() };
+    let err = run(&ctx_for(&server, Some("test-key")), Command::Accept(args))
+        .await
+        .expect_err("401 must surface as Auth");
+    assert!(matches!(err, CmdError::Auth(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn accept_403_not_the_poster_surfaces_as_auth() {
+    // Per taskfast-sdk error-mapping contract: 403 on poster/worker mutations
+    // is Auth (re-credential), not Validation.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/bids/{BID_ID}/accept")))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "error": "forbidden",
+            "message": "You are not the poster of this task",
+        })))
+        .mount(&server)
+        .await;
+    let args = AcceptArgs { id: BID_ID.into() };
+    let err = run(&ctx_for(&server, Some("test-key")), Command::Accept(args))
+        .await
+        .expect_err("403 must surface as Auth");
+    assert!(matches!(err, CmdError::Auth(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn accept_422_circular_subcontracting_surfaces_as_validation() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/bids/{BID_ID}/accept")))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "error": "circular_subcontracting",
+            "message": "This assignment would create a circular delegation chain",
+        })))
+        .mount(&server)
+        .await;
+    let args = AcceptArgs { id: BID_ID.into() };
+    let err = run(&ctx_for(&server, Some("test-key")), Command::Accept(args))
+        .await
+        .expect_err("422 must surface");
+    assert!(matches!(err, CmdError::Validation { .. }), "got {err:?}");
+}
+
+#[tokio::test]
+async fn accept_missing_api_key_errors_before_any_http() {
+    let server = MockServer::start().await;
+    let args = AcceptArgs { id: BID_ID.into() };
+    let err = run(&ctx_for(&server, None), Command::Accept(args))
+        .await
+        .expect_err("no key → MissingApiKey");
+    assert!(matches!(err, CmdError::MissingApiKey), "got {err:?}");
+}
+
+// ─── bid reject ────────────────────────────────────────────────────────────
+
+fn reject_body(reason: Option<&str>) -> serde_json::Value {
+    json!({
+        "bid_id": BID_ID,
+        "status": "rejected",
+        "reason": reason,
+        "rejected_at": "2026-04-14T12:00:00Z",
+    })
+}
+
+#[tokio::test]
+async fn reject_happy_path_with_reason_round_trips() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/bids/{BID_ID}/reject")))
+        .and(body_partial_json(json!({ "reason": "too expensive" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reject_body(Some("too expensive"))))
+        .mount(&server)
+        .await;
+    let args = RejectArgs {
+        id: BID_ID.into(),
+        reason: Some("too expensive".into()),
+    };
+    let envelope = run(&ctx_for(&server, Some("test-key")), Command::Reject(args))
+        .await
+        .expect("reject should succeed");
+    let v = envelope_value(&envelope);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["bid"]["bid_id"], BID_ID);
+    assert_eq!(v["data"]["bid"]["status"], "rejected");
+    assert_eq!(v["data"]["bid"]["reason"], "too expensive");
+}
+
+#[tokio::test]
+async fn reject_happy_path_without_reason_omits_field() {
+    // With skip_serializing_if=is_none on the generated struct, the body
+    // should be `{}` (empty object). A partial-json match of `{}` accepts
+    // any object shape, but matching absence is awkward with wiremock — so
+    // we just assert the request succeeds and the envelope shape is right.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/bids/{BID_ID}/reject")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reject_body(None)))
+        .mount(&server)
+        .await;
+    let args = RejectArgs {
+        id: BID_ID.into(),
+        reason: None,
+    };
+    let envelope = run(&ctx_for(&server, Some("test-key")), Command::Reject(args))
+        .await
+        .expect("reject should succeed");
+    let v = envelope_value(&envelope);
+    assert_eq!(v["data"]["bid"]["status"], "rejected");
+    assert!(v["data"]["bid"]["reason"].is_null());
+}
+
+#[tokio::test]
+async fn reject_dry_run_skips_http_and_echoes_reason() {
+    let server = MockServer::start().await;
+    let mut ctx = ctx_for(&server, Some("test-key"));
+    ctx.dry_run = true;
+    let args = RejectArgs {
+        id: BID_ID.into(),
+        reason: Some("scope too narrow".into()),
+    };
+    let envelope = run(&ctx, Command::Reject(args)).await.expect("dry-run ok");
+    let v = envelope_value(&envelope);
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["data"]["action"], "would_reject_bid");
+    assert_eq!(v["data"]["bid_id"], BID_ID);
+    assert_eq!(v["data"]["reason"], "scope too narrow");
+}
+
+#[tokio::test]
+async fn reject_bad_bid_id_is_usage_error_without_any_http() {
+    let server = MockServer::start().await;
+    let args = RejectArgs {
+        id: "not-a-uuid".into(),
+        reason: None,
+    };
+    let err = run(&ctx_for(&server, Some("test-key")), Command::Reject(args))
+        .await
+        .expect_err("bad UUID must fail locally");
+    assert!(matches!(err, CmdError::Usage(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn reject_empty_reason_is_usage_error_without_any_http() {
+    let server = MockServer::start().await;
+    let args = RejectArgs {
+        id: BID_ID.into(),
+        reason: Some("   ".into()),
+    };
+    let err = run(&ctx_for(&server, Some("test-key")), Command::Reject(args))
+        .await
+        .expect_err("empty --reason must fail locally");
+    match err {
+        CmdError::Usage(m) => assert!(m.contains("--reason"), "unexpected: {m}"),
+        other => panic!("expected Usage, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn reject_oversize_reason_is_usage_error_without_any_http() {
+    let server = MockServer::start().await;
+    let args = RejectArgs {
+        id: BID_ID.into(),
+        reason: Some("x".repeat(501)),
+    };
+    let err = run(&ctx_for(&server, Some("test-key")), Command::Reject(args))
+        .await
+        .expect_err(">500 chars must fail locally");
+    assert!(matches!(err, CmdError::Usage(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn reject_401_surfaces_as_auth() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/bids/{BID_ID}/reject")))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": "invalid_api_key",
+            "message": "bad key",
+        })))
+        .mount(&server)
+        .await;
+    let args = RejectArgs {
+        id: BID_ID.into(),
+        reason: None,
+    };
+    let err = run(&ctx_for(&server, Some("test-key")), Command::Reject(args))
+        .await
+        .expect_err("401 must surface as Auth");
+    assert!(matches!(err, CmdError::Auth(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn reject_403_not_the_poster_surfaces_as_auth() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/bids/{BID_ID}/reject")))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "error": "forbidden",
+            "message": "You are not the poster of this task",
+        })))
+        .mount(&server)
+        .await;
+    let args = RejectArgs {
+        id: BID_ID.into(),
+        reason: None,
+    };
+    let err = run(&ctx_for(&server, Some("test-key")), Command::Reject(args))
+        .await
+        .expect_err("403 must surface as Auth");
+    assert!(matches!(err, CmdError::Auth(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn reject_409_already_accepted_surfaces_as_validation() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/bids/{BID_ID}/reject")))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "invalid_status",
+            "message": "bid is not pending",
+        })))
+        .mount(&server)
+        .await;
+    let args = RejectArgs {
+        id: BID_ID.into(),
+        reason: None,
+    };
+    let err = run(&ctx_for(&server, Some("test-key")), Command::Reject(args))
+        .await
+        .expect_err("409 must surface");
+    assert!(
+        matches!(err, CmdError::Validation { .. } | CmdError::Server(_)),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn reject_404_surfaces_as_validation() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/bids/{BID_ID}/reject")))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": "not_found",
+            "message": "Bid not found",
+        })))
+        .mount(&server)
+        .await;
+    let args = RejectArgs {
+        id: BID_ID.into(),
+        reason: None,
+    };
+    let err = run(&ctx_for(&server, Some("test-key")), Command::Reject(args))
+        .await
+        .expect_err("404 must surface");
+    assert!(
+        matches!(err, CmdError::Validation { .. } | CmdError::Server(_)),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn reject_missing_api_key_errors_before_any_http() {
+    let server = MockServer::start().await;
+    let args = RejectArgs {
+        id: BID_ID.into(),
+        reason: None,
+    };
+    let err = run(&ctx_for(&server, None), Command::Reject(args))
+        .await
+        .expect_err("no key → MissingApiKey");
+    assert!(matches!(err, CmdError::MissingApiKey), "got {err:?}");
 }
