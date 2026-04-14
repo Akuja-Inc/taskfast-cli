@@ -75,6 +75,11 @@ async fn mount_rpc_mocks(server: &MockServer, tx_hash_hex: &str) {
         .mount(server)
         .await;
     Mock::given(method("POST"))
+        .and(body_partial_json(json!({"method": "eth_estimateGas"})))
+        .respond_with(rpc_ok(json!("0x4b094"))) // 307_348 — canonical testnet USDC transfer
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
         .and(body_partial_json(json!({"method": "eth_sendRawTransaction"})))
         .respond_with(rpc_ok(json!(tx_hash_hex)))
         .mount(server)

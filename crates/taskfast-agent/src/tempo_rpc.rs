@@ -6,17 +6,18 @@
 //!   2. hand the server a raw RLP-encoded signed tx it can broadcast.
 //!
 //! Both paths need `eth_chainId` + `eth_getTransactionCount` + `eth_gasPrice`
-//! to build a replay-safe legacy tx. Path (1) additionally needs
-//! `eth_sendRawTransaction`. That's it. `alloy-provider` would cover this
-//! plus subscription, middleware, and batching we don't want — so this
-//! module wraps those four methods over `reqwest` directly.
+//! + `eth_estimateGas` to build a replay-safe legacy tx with a correctly
+//! sized gas limit. Path (1) additionally needs `eth_sendRawTransaction`.
+//! That's it. `alloy-provider` would cover this plus subscription,
+//! middleware, and batching we don't want — so this module wraps those
+//! five methods over `reqwest` directly.
 //!
 //! # Why legacy (not EIP-1559) txs
 //!
 //! Tempo is a stable-fee chain fork — `eth_gasPrice` is authoritative and
 //! `eth_feeHistory` isn't guaranteed to exist on every node. A legacy tx
 //! with `chain_id` set (EIP-155 replay protection) is the widest-compat
-//! shape and keeps the RPC surface to 3 read methods + 1 write.
+//! shape and keeps the RPC surface to 4 read methods + 1 write.
 
 use alloy_consensus::{SignableTransaction, TxEnvelope, TxLegacy};
 use alloy_eips::eip2718::Encodable2718;
@@ -27,10 +28,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error as ThisError;
 
-/// Fixed gas limit for ERC-20 transfers. Tempo testnet (moderato) estimates
-/// ~307k for the canonical USDC `transfer` against the platform wallet; 500k
-/// gives headroom without an extra `eth_estimateGas` round-trip.
-pub const ERC20_TRANSFER_GAS_LIMIT: u64 = 500_000;
+/// Buffer applied to `eth_estimateGas` output, as numerator/denominator.
+/// 13/10 = +30%. State drift between estimate and execution (cold SLOAD,
+/// new storage slot, balance flip) can push actual gas above the estimate;
+/// 30% matches the conservative end of the ethers/alloy-ecosystem default.
+const GAS_ESTIMATE_BUFFER_NUM: u64 = 13;
+const GAS_ESTIMATE_BUFFER_DEN: u64 = 10;
 
 /// Errors surfaced by [`TempoRpcClient`] and [`sign_and_broadcast_erc20_transfer`].
 #[derive(Debug, ThisError)]
@@ -117,6 +120,32 @@ impl TempoRpcClient {
         parse_hex_u128(&raw)
     }
 
+    /// `eth_estimateGas({from, to, data})` → gas units.
+    ///
+    /// Called before every ERC-20 transfer so we size `gas_limit` to actual
+    /// chain state (Tempo testnet's canonical USDC `transfer` lands around
+    /// 307k; a different token or recipient-with-no-prior-balance can push
+    /// higher). A revert here means the tx would fail on-chain — callers
+    /// should surface the error rather than broadcast a doomed tx.
+    pub async fn estimate_gas(
+        &self,
+        from: Address,
+        to: Address,
+        data: &Bytes,
+    ) -> Result<u64, RpcError> {
+        let raw: String = self
+            .call(
+                "eth_estimateGas",
+                json!([{
+                    "from": format!("{from:#x}"),
+                    "to": format!("{to:#x}"),
+                    "data": format!("0x{}", hex::encode(data)),
+                }]),
+            )
+            .await?;
+        parse_hex_u64(&raw)
+    }
+
     /// `eth_sendRawTransaction(0x<rlp>)` → tx hash.
     pub async fn send_raw_transaction(&self, raw_tx: &[u8]) -> Result<TxHash, RpcError> {
         let hex_str = format!("0x{}", hex::encode(raw_tx));
@@ -170,8 +199,8 @@ impl TempoRpcClient {
 /// it, and return the resulting tx hash. The hash is the `submission_fee_voucher`
 /// value for `POST /api/task_drafts/{id}/submit` (server polls for confirmation).
 ///
-/// Fetches chain_id + nonce + gas_price from the RPC; gas limit is fixed at
-/// [`ERC20_TRANSFER_GAS_LIMIT`] to avoid an extra `eth_estimateGas` hop.
+/// Fetches chain_id + nonce + gas_price + gas_limit (`eth_estimateGas` with a
+/// 30% buffer) from the RPC.
 pub async fn sign_and_broadcast_erc20_transfer(
     rpc: &TempoRpcClient,
     signer: &PrivateKeySigner,
@@ -194,12 +223,18 @@ pub async fn sign_erc20_transfer(
     let chain_id = rpc.chain_id().await?;
     let nonce = rpc.pending_nonce(signer.address()).await?;
     let gas_price = rpc.gas_price().await?;
+    let estimate = rpc
+        .estimate_gas(signer.address(), token_address, &calldata)
+        .await?;
+    let gas_limit = estimate
+        .saturating_mul(GAS_ESTIMATE_BUFFER_NUM)
+        / GAS_ESTIMATE_BUFFER_DEN;
 
     let tx = TxLegacy {
         chain_id: Some(chain_id),
         nonce,
         gas_price,
-        gas_limit: ERC20_TRANSFER_GAS_LIMIT,
+        gas_limit,
         to: TxKind::Call(token_address),
         value: U256::ZERO,
         input: calldata,
@@ -339,7 +374,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn estimate_gas_parses_hex_u64() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_partial_json(json!({"method": "eth_estimateGas"})))
+            .respond_with(rpc_ok(json!("0x4b094"))) // 307_348 — observed Tempo testnet USDC transfer
+            .mount(&server)
+            .await;
+        let rpc = TempoRpcClient::with_default_client(server.uri());
+        let from: Address = "0x0000000000000000000000000000000000000001".parse().unwrap();
+        let to: Address = "0x0000000000000000000000000000000000000002".parse().unwrap();
+        let gas = rpc
+            .estimate_gas(from, to, &Bytes::from_static(&[0xa9u8, 0x05, 0x9c, 0xbb]))
+            .await
+            .unwrap();
+        assert_eq!(gas, 307_348);
+    }
+
+    #[tokio::test]
+    async fn estimate_gas_rpc_error_propagates() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_partial_json(json!({"method": "eth_estimateGas"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": { "code": 3, "message": "execution reverted: ERC20: insufficient balance" },
+            })))
+            .mount(&server)
+            .await;
+        let rpc = TempoRpcClient::with_default_client(server.uri());
+        let from: Address = "0x0000000000000000000000000000000000000001".parse().unwrap();
+        let to: Address = "0x0000000000000000000000000000000000000002".parse().unwrap();
+        let err = rpc
+            .estimate_gas(from, to, &Bytes::new())
+            .await
+            .expect_err("revert must propagate");
+        assert!(
+            matches!(err, RpcError::Rpc { code: 3, .. }),
+            "expected Rpc variant, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn sign_erc20_transfer_roundtrips_through_rpc() {
+        use alloy_eips::eip2718::Decodable2718;
+
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"method": "eth_chainId"})))
@@ -356,6 +438,11 @@ mod tests {
             .respond_with(rpc_ok(json!("0x3b9aca00")))
             .mount(&server)
             .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "eth_estimateGas"})))
+            .respond_with(rpc_ok(json!("0x4b094"))) // 307_348
+            .mount(&server)
+            .await;
         let signer = PrivateKeySigner::random();
         let rpc = TempoRpcClient::with_default_client(server.uri());
         let token: Address = "0x00000000000000000000000000000000000000aa".parse().unwrap();
@@ -369,5 +456,13 @@ mod tests {
         assert!(!raw.is_empty(), "raw tx must encode to non-empty bytes");
         // Legacy tx RLP starts with list prefix 0xc0..0xf7 or 0xf8..0xff.
         assert!(raw[0] >= 0xc0, "legacy tx must be an RLP list, got first byte {:#x}", raw[0]);
+
+        // Decode the signed envelope and assert the buffered gas limit:
+        // floor(307_348 * 13 / 10) = 399_552.
+        let envelope = TxEnvelope::decode_2718(&mut raw.as_slice()).expect("decode envelope");
+        let TxEnvelope::Legacy(signed) = envelope else {
+            panic!("expected legacy envelope");
+        };
+        assert_eq!(signed.tx().gas_limit, 399_552);
     }
 }
