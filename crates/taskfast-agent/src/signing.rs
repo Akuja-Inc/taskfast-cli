@@ -391,6 +391,42 @@ mod tests {
         assert!(matches!(err, SigningError::InvalidSignatureHex(_)));
     }
 
+    /// Cross-check fixture: the 32-byte EIP-712 digest for this fixed vector
+    /// MUST byte-equal the digest produced by the Elixir implementation in
+    /// `lib/task_fast/payments/distribution_approval_verifier.ex`. If either
+    /// implementation drifts, signatures produced on one side will not recover
+    /// on the other. The mirror test lives in
+    /// `test/task_fast/payments/distribution_approval_verifier_test.exs`.
+    #[test]
+    fn cross_check_digest_matches_elixir_fixture() {
+        // escrow_id = repeat 0xab..0xab (32 bytes), deadline = 1_800_000_000,
+        // verifying_contract = 0x00..01. Chain id is pinned testnet.
+        let vc: Address = "0x0000000000000000000000000000000000000001".parse().unwrap();
+        let domain = DistributionDomain::testnet(vc);
+        let mut escrow_bytes = [0u8; 32];
+        escrow_bytes.iter_mut().for_each(|b| *b = 0xab);
+        let escrow_id = B256::from(escrow_bytes);
+        let deadline = U256::from(1_800_000_000u64);
+
+        let digest = distribution_digest(&domain, escrow_id, deadline);
+        let hex = format!("0x{}", hex::encode(digest.as_slice()));
+
+        // Regenerate with: MIX_ENV=test mix run -e \
+        //   'IO.puts elem(TaskFast.Payments.DistributionApprovalVerifier.digest( \
+        //     "0x" <> String.duplicate("ab", 32), 1_800_000_000, 42_431, \
+        //     "0x0000000000000000000000000000000000000001"), 1) |> Base.encode16(case: :lower)'
+        assert_eq!(
+            hex.len(),
+            66,
+            "digest must be 32 bytes (66 chars incl 0x prefix)"
+        );
+        // Snapshot value — update in lockstep with the Elixir mirror test.
+        assert_eq!(
+            hex, "0xff4958335cd476ae06389497e736d3630ecee1b9b33cc65cbfd9c316dd2e3efb",
+            "digest drifted — Elixir side must update in lockstep"
+        );
+    }
+
     #[test]
     fn parse_signature_tolerates_missing_0x_prefix() {
         let signer = PrivateKeySigner::random();
