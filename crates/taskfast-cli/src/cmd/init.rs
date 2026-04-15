@@ -216,7 +216,20 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     let client = effective_ctx.client()?;
 
     // 2. Validate auth + fetch readiness.
-    let profile = validate_auth(&client).await.map_err(CmdError::from)?;
+    //    On Auth failure with a PreExisting key, rewrite the error with a
+    //    remediation hint — the common cause is a stale api_key left over in
+    //    the config from a prior init run whose agent was deleted server-side.
+    let profile = match validate_auth(&client).await {
+        Ok(p) => p,
+        Err(taskfast_client::Error::Auth(msg))
+            if matches!(agent_outcome, AgentOutcome::PreExisting) =>
+        {
+            return Err(CmdError::Auth(stale_key_hint(
+                &msg, &cfg_path, &cfg, ctx, &args,
+            )));
+        }
+        Err(e) => return Err(CmdError::from(e)),
+    };
     assert_active(&profile)?;
     let readiness = get_readiness(&client).await.map_err(CmdError::from)?;
 
@@ -414,6 +427,39 @@ fn resolve_api_key(ctx: &Ctx, cfg: &Config) -> Result<String, CmdError> {
         }
     }
     Err(CmdError::MissingApiKey)
+}
+
+/// Build a remediation hint for the common "stale config" failure: the agent
+/// api_key stored in the config (or passed via flag/env) is rejected by the
+/// server. Lists the key's likely source and the minimum steps to recover.
+fn stale_key_hint(
+    msg: &str,
+    cfg_path: &Path,
+    cfg: &Config,
+    ctx: &Ctx,
+    args: &Args,
+) -> String {
+    let source = if cfg.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
+        format!("config file {}", cfg_path.display())
+    } else if ctx.api_key.is_some() {
+        "--api-key flag or TASKFAST_API_KEY env".to_string()
+    } else {
+        "unknown".to_string()
+    };
+    let had_pat = args.human_api_key.is_some();
+    let pat_note = if had_pat {
+        "\n  note: --human-api-key was provided but ignored because an existing api_key was found; \
+         the PAT mints a new agent only when no api_key is resolvable."
+    } else {
+        ""
+    };
+    format!(
+        "{msg}\n  hint: agent api_key rejected — likely stale (agent deleted or key rotated).\n  \
+         source: {source}\n  fix: delete {path} (and unset TASKFAST_API_KEY if set), then re-run \
+         `taskfast --env {env} init --human-api-key <tf_user_...>` to mint a fresh agent.{pat_note}",
+        path = cfg_path.display(),
+        env = ctx.environment.as_str(),
+    )
 }
 
 fn assert_active(profile: &taskfast_client::api::types::AgentProfile) -> Result<(), CmdError> {

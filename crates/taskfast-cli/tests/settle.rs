@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use taskfast_agent::signing::{verify_distribution, DistributionDomain};
+use taskfast_chains::tempo::{verify_distribution, DistributionDomain};
 use taskfast_cli::cmd::settle::{run, Args};
 use taskfast_cli::cmd::{CmdError, Ctx};
 use taskfast_cli::{Envelope, Environment};

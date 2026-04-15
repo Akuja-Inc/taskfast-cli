@@ -3452,6 +3452,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "taskfast-chains"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-signer",
+ "alloy-signer-local",
+ "alloy-sol-types",
+ "hex",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "taskfast-cli"
 version = "0.2.0"
 dependencies = [
@@ -3467,6 +3479,7 @@ dependencies = [
  "serde",
  "serde_json",
  "taskfast-agent",
+ "taskfast-chains",
  "taskfast-client",
  "tempfile",
  "thiserror 1.0.69",

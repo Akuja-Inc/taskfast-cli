@@ -2,7 +2,7 @@
 //! POSTs it to `/tasks/{id}/settle` to release escrowed funds.
 //!
 //! Pairs with server bead am-iyp6. The signing surface is identical to the
-//! one pinned in `taskfast_agent::signing::sign_distribution`; the domain
+//! one pinned in `taskfast_chains::tempo::sign_distribution`; the domain
 //! (`chain_id`, `verifying_contract`) is sourced at runtime from
 //! `GET /agents/me/readiness` so the same binary signs correctly on testnet
 //! and mainnet without client-side chain config.
@@ -28,7 +28,7 @@ use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_agent::bootstrap;
-use taskfast_agent::signing::{sign_distribution, DistributionDomain};
+use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
 use taskfast_client::api::types::{SettleTaskRequest, SettleTaskRequestSignature};
 use taskfast_client::map_api_error;
 

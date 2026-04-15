@@ -19,7 +19,7 @@ use crate::exit::ExitCode;
 use crate::Environment;
 
 use taskfast_agent::keystore::KeystoreError;
-use taskfast_agent::signing::SigningError;
+use taskfast_chains::tempo::SigningError;
 use taskfast_client::{Error as ClientError, TaskFastClient};
 
 pub mod agent;

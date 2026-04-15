@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/taskfast-client",
+    "crates/taskfast-chains",
     "crates/taskfast-agent",
     "crates/taskfast-cli",
     "xtask",
@@ -41,6 +42,7 @@ hex = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 
 taskfast-client = { path = "crates/taskfast-client", version = "0.3.0" }
+taskfast-chains = { path = "crates/taskfast-chains", version = "0.1.0", default-features = false }
 taskfast-agent = { path = "crates/taskfast-agent", version = "0.2.0" }
 
 [workspace.lints.rust]

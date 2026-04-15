@@ -33,7 +33,7 @@ use crate::envelope::Envelope;
 
 use taskfast_agent::bootstrap;
 use taskfast_agent::chain::{compute_escrow_id, IERC20, TaskEscrow};
-use taskfast_agent::signing::{sign_distribution, DistributionDomain};
+use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
 use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
 use taskfast_client::api::types::{
     BidEscrowFinalizeRequest, BidEscrowFinalizeRequestPosterApprovalDeadline,
