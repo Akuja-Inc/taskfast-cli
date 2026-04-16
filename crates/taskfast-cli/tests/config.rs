@@ -29,10 +29,7 @@ async fn set_then_show_roundtrips_and_redacts_api_key() {
     let ctx = ctx_for(path.clone());
 
     // Write two fields — one secret, one not.
-    for (k, v) in [
-        ("api_key", "am_live_roundtrip9999"),
-        ("network", "testnet"),
-    ] {
+    for (k, v) in [("api_key", "am_live_roundtrip9999"), ("network", "testnet")] {
         run(
             &ctx,
             Command::Set(SetArgs {

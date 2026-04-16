@@ -293,10 +293,7 @@ async fn schema_filters_by_event_key() {
     .expect("schema filter should succeed");
     let v = envelope_value(&envelope);
     assert_eq!(v["data"]["event"], "TaskAssigned");
-    assert_eq!(
-        v["data"]["message"]["payload"]["required"][0],
-        "task_id"
-    );
+    assert_eq!(v["data"]["message"]["payload"]["required"][0], "task_id");
 }
 
 #[tokio::test]

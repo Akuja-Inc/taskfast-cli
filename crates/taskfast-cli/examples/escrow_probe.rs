@@ -11,7 +11,7 @@ use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_sol_types::SolCall;
 use reqwest::Client;
 use serde_json::{json, Value};
-use taskfast_agent::chain::{IERC20, TaskEscrow};
+use taskfast_agent::chain::{TaskEscrow, IERC20};
 
 const RPC: &str = "https://rpc.moderato.tempo.xyz";
 
@@ -63,7 +63,11 @@ async fn main() {
     println!("==== escrow_params");
     println!("{}", serde_json::to_string_pretty(&params).unwrap());
 
-    let p = if params.get("data").is_some() { &params["data"] } else { &params };
+    let p = if params.get("data").is_some() {
+        &params["data"]
+    } else {
+        &params
+    };
     let token: Address = p["token_address"].as_str().unwrap().parse().unwrap();
     let task_escrow: Address = p["task_escrow_contract"].as_str().unwrap().parse().unwrap();
     let worker: Address = p["worker_address"].as_str().unwrap().parse().unwrap();
@@ -101,7 +105,14 @@ async fn main() {
     let balance_data: Bytes = IERC20::balanceOfCall { account: poster }
         .abi_encode()
         .into();
-    eth_call_probe(&http, poster, token, &balance_data, "token.balanceOf(poster)").await;
+    eth_call_probe(
+        &http,
+        poster,
+        token,
+        &balance_data,
+        "token.balanceOf(poster)",
+    )
+    .await;
 
     let allow_data: Bytes = IERC20::allowanceCall {
         owner: poster,
@@ -109,7 +120,14 @@ async fn main() {
     }
     .abi_encode()
     .into();
-    eth_call_probe(&http, poster, token, &allow_data, "token.allowance(poster, task_escrow)").await;
+    eth_call_probe(
+        &http,
+        poster,
+        token,
+        &allow_data,
+        "token.allowance(poster, task_escrow)",
+    )
+    .await;
 
     // 5. Attempt: openWithMemo with live salt
     let salt = B256::from(rand::random::<[u8; 32]>());
@@ -125,8 +143,14 @@ async fn main() {
     }
     .abi_encode()
     .into();
-    eth_call_probe(&http, poster, task_escrow, &open_memo_data, "openWithMemo (live params)")
-        .await;
+    eth_call_probe(
+        &http,
+        poster,
+        task_escrow,
+        &open_memo_data,
+        "openWithMemo (live params)",
+    )
+    .await;
 
     // 6. Attempt: openCall (no memo)
     let open_data: Bytes = TaskEscrow::openCall {
@@ -153,7 +177,14 @@ async fn main() {
     }
     .abi_encode()
     .into();
-    eth_call_probe(&http, poster, task_escrow, &open_zero_fee, "openWithMemo (fee=0)").await;
+    eth_call_probe(
+        &http,
+        poster,
+        task_escrow,
+        &open_zero_fee,
+        "openWithMemo (fee=0)",
+    )
+    .await;
 
     // 8. Attempt: openWithMemo with min deposit (1 wei-unit) — tests whether the
     //    revert depends on amount.
@@ -168,7 +199,14 @@ async fn main() {
     }
     .abi_encode()
     .into();
-    eth_call_probe(&http, poster, task_escrow, &open_min, "openWithMemo (deposit=1, fee=0)").await;
+    eth_call_probe(
+        &http,
+        poster,
+        task_escrow,
+        &open_min,
+        "openWithMemo (deposit=1, fee=0)",
+    )
+    .await;
 
     // 9. debug_traceCall (might not be exposed by public RPC)
     println!("\n==== debug_traceCall openWithMemo (may be unsupported) ====");

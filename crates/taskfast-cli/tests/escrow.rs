@@ -177,9 +177,12 @@ async fn escrow_sign_params_403_maps_to_auth() {
     )
     .await;
 
-    let err = run(&ctx_for(&server, Some("test-key")), Command::Sign(base_args(&keys)))
-        .await
-        .expect_err("403 must propagate");
+    let err = run(
+        &ctx_for(&server, Some("test-key")),
+        Command::Sign(base_args(&keys)),
+    )
+    .await
+    .expect_err("403 must propagate");
 
     assert!(matches!(err, CmdError::Auth(_)), "got {err:?}");
 }
@@ -196,9 +199,12 @@ async fn escrow_sign_params_409_wrong_status_maps_to_validation() {
     )
     .await;
 
-    let err = run(&ctx_for(&server, Some("test-key")), Command::Sign(base_args(&keys)))
-        .await
-        .expect_err("409 must propagate");
+    let err = run(
+        &ctx_for(&server, Some("test-key")),
+        Command::Sign(base_args(&keys)),
+    )
+    .await
+    .expect_err("409 must propagate");
 
     assert!(matches!(err, CmdError::Validation { .. }), "got {err:?}");
 }

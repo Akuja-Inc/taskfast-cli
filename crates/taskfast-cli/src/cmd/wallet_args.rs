@@ -54,8 +54,7 @@ pub fn resolve_password(password_file: Option<&Path>) -> Result<String, CmdError
     }
     let path = password_file.ok_or_else(|| {
         CmdError::Usage(
-            "TASKFAST_WALLET_PASSWORD or --wallet-password-file required to unlock keystore"
-                .into(),
+            "TASKFAST_WALLET_PASSWORD or --wallet-password-file required to unlock keystore".into(),
         )
     })?;
     let raw = std::fs::read_to_string(path).map_err(|e| {
@@ -124,8 +123,7 @@ mod tests {
 
     #[test]
     fn load_signer_missing_keystore_surfaces_purpose() {
-        let err = load_signer(None, None, "escrow approval")
-            .expect_err("no keystore → Usage");
+        let err = load_signer(None, None, "escrow approval").expect_err("no keystore → Usage");
         match err {
             CmdError::Usage(m) => {
                 assert!(m.contains("escrow approval"), "purpose must appear: {m}")

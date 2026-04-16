@@ -69,9 +69,7 @@ async fn create(ctx: &Ctx, args: CreateArgs) -> CmdResult {
     let reviewee_id = Uuid::parse_str(&args.reviewee_id)
         .map_err(|e| CmdError::Usage(format!("--reviewee-id must be a UUID: {e}")))?;
     if !(1..=5).contains(&args.rating) {
-        return Err(CmdError::Usage(
-            "--rating must be an integer 1..=5".into(),
-        ));
+        return Err(CmdError::Usage("--rating must be an integer 1..=5".into()));
     }
     if args.comment.trim().is_empty() {
         return Err(CmdError::Usage("--comment must not be empty".into()));

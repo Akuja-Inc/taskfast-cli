@@ -435,7 +435,15 @@ mod tests {
             Some(Environment::Staging),
             Some("http://cfg"),
         );
-        let ctx = Ctx::from_parts(Some("flag_key".into()), None, None, None, false, false, &cfg);
+        let ctx = Ctx::from_parts(
+            Some("flag_key".into()),
+            None,
+            None,
+            None,
+            false,
+            false,
+            &cfg,
+        );
         assert_eq!(ctx.api_key.as_deref(), Some("flag_key"));
         assert_eq!(ctx.environment, Environment::Staging);
         assert_eq!(ctx.api_base.as_deref(), Some("http://cfg"));

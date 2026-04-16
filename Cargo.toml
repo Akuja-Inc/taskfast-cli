@@ -12,7 +12,11 @@ members = [
 version = "0.2.0"
 edition = "2021"
 license = "MIT"
+authors = ["Akuja Inc. <onyekwelu+taskfast@obukwelu.com>"]
+homepage = "https://github.com/Akuja-Inc/taskfast-cli"
 repository = "https://github.com/Akuja-Inc/taskfast-cli"
+documentation = "https://docs.rs/taskfast-cli"
+readme = "README.md"
 rust-version = "1.75"
 
 [workspace.dependencies]
@@ -48,6 +52,7 @@ taskfast-agent = { path = "crates/taskfast-agent", version = "0.2.0" }
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_docs = "warn"
+unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

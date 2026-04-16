@@ -7,8 +7,8 @@
 
 #![allow(missing_docs)]
 
-pub mod chain;
 pub mod any;
+pub mod chain;
 
 #[cfg(feature = "tempo")]
 pub mod tempo;

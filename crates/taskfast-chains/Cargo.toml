@@ -3,9 +3,12 @@ name = "taskfast-chains"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "Chain abstraction for TaskFast SDK: trait Chain + per-chain cargo features (tempo v1; polygon/avalanche/solana/near/stellar architecture stubs)."
+publish = false
 
 [lints]
 workspace = true

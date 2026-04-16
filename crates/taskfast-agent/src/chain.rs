@@ -23,9 +23,9 @@
 //! crate section that shouldn't care about them.
 
 use alloy_primitives::{keccak256, Address, B256, U256};
-use alloy_sol_types::{sol, SolValue};
 #[cfg(test)]
 use alloy_sol_types::SolCall;
+use alloy_sol_types::{sol, SolValue};
 
 sol! {
     /// TaskEscrow contract surface used by the poster flow. Only the mutating
@@ -123,9 +123,7 @@ mod tests {
 
         // Independent re-derivation: raw abi.encode of the tuple, then
         // keccak256. Same inputs MUST yield the same 32-byte digest.
-        let manual = keccak256(
-            (poster, worker, token, deposit, fee, platform, salt).abi_encode(),
-        );
+        let manual = keccak256((poster, worker, token, deposit, fee, platform, salt).abi_encode());
         assert_eq!(id, manual);
         assert_eq!(id.len(), 32);
     }
@@ -142,24 +140,8 @@ mod tests {
         let mut salt_b = [0u8; 32];
         salt_b[31] = 0x02;
 
-        let a = compute_escrow_id(
-            p,
-            p,
-            token,
-            deposit,
-            fee,
-            p,
-            B256::from(salt_a),
-        );
-        let b = compute_escrow_id(
-            p,
-            p,
-            token,
-            deposit,
-            fee,
-            p,
-            B256::from(salt_b),
-        );
+        let a = compute_escrow_id(p, p, token, deposit, fee, p, B256::from(salt_a));
+        let b = compute_escrow_id(p, p, token, deposit, fee, p, B256::from(salt_b));
         assert_ne!(a, b, "distinct salts must produce distinct escrow ids");
     }
 
@@ -186,6 +168,6 @@ mod tests {
         };
         let data = call.abi_encode();
         // Selector = first 4 bytes of keccak("open(address,uint256,address,uint256,address,bytes32)").
-        assert_eq!(data.len() >= 4, true);
+        assert!(data.len() >= 4);
     }
 }

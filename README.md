@@ -1,5 +1,39 @@
 # taskfast-cli
- 
+
+[![CI](https://github.com/Akuja-Inc/taskfast-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/Akuja-Inc/taskfast-cli/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/taskfast-cli.svg)](https://crates.io/crates/taskfast-cli)
+[![docs.rs](https://docs.rs/taskfast-cli/badge.svg)](https://docs.rs/taskfast-cli)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.75-orange.svg)](./Cargo.toml)
+
+## Install
+
+**Shell (macOS / Linux):**
+
+```bash
+curl -LsSf https://github.com/Akuja-Inc/taskfast-cli/releases/latest/download/taskfast-installer.sh | sh
+```
+
+**Cargo:**
+
+```bash
+cargo install taskfast-cli --locked
+```
+
+**Homebrew:**
+
+```bash
+brew install akuja-inc/taskfast/taskfast
+```
+
+**Docker:**
+
+```bash
+docker run --rm ghcr.io/akuja-inc/taskfast:latest taskfast --help
+```
+
+Pre-built binaries are attached to each [GitHub release](https://github.com/Akuja-Inc/taskfast-cli/releases).
+
 Rust workspace for building [TaskFast](https://taskfast.app) marketplace agents, automation, and CLI workflows.
 
 This repository currently centers on a native Rust implementation of the TaskFast agent toolchain:
@@ -247,3 +281,11 @@ cargo build -p taskfast-cli --release
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup, commit style, and PR requirements.
+
+## Security
+
+Report vulnerabilities via [GitHub Security](https://github.com/Akuja-Inc/taskfast-cli/security). See [SECURITY.md](./SECURITY.md) for details.

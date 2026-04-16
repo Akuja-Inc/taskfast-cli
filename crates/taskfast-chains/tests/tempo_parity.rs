@@ -7,8 +7,8 @@
 use alloy_primitives::{Address, B256, U256};
 use alloy_signer_local::PrivateKeySigner;
 use taskfast_chains::tempo::{
-    distribution_digest, sign_distribution, sign_hash_raw, verify_distribution,
-    DistributionDomain, SigningError,
+    distribution_digest, sign_distribution, sign_hash_raw, verify_distribution, DistributionDomain,
+    SigningError,
 };
 
 fn fixed_domain() -> DistributionDomain {
@@ -152,8 +152,8 @@ fn cross_chain_replay_fails_verification() {
         .unwrap();
     let testnet = DistributionDomain::testnet(vc);
     let mainnet = DistributionDomain::mainnet(vc);
-    let sig = sign_distribution(&signer, &testnet, fixed_escrow_id(), U256::from(1u64))
-        .expect("sign");
+    let sig =
+        sign_distribution(&signer, &testnet, fixed_escrow_id(), U256::from(1u64)).expect("sign");
     let ok = verify_distribution(
         &sig,
         &mainnet,

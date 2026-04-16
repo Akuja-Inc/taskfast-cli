@@ -178,8 +178,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     //    init is idempotent. A config-supplied api_key is layered under
     //    the CLI/env sources Ctx already resolved (flag > env var >
     //    config).
-    let mut cfg =
-        Config::load_or_migrate(&cfg_path).map_err(|e| CmdError::Usage(e.to_string()))?;
+    let mut cfg = Config::load_or_migrate(&cfg_path).map_err(|e| CmdError::Usage(e.to_string()))?;
 
     // 1a. Resolve the agent API key. If none is available but the caller
     //     supplied a user PAT, mint a fresh agent headlessly and use the
@@ -271,7 +270,8 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     let config_written = if ctx.dry_run {
         false
     } else {
-        cfg.save(&cfg_path).map_err(|e| CmdError::Usage(e.to_string()))?;
+        cfg.save(&cfg_path)
+            .map_err(|e| CmdError::Usage(e.to_string()))?;
         true
     };
 
@@ -432,13 +432,7 @@ fn resolve_api_key(ctx: &Ctx, cfg: &Config) -> Result<String, CmdError> {
 /// Build a remediation hint for the common "stale config" failure: the agent
 /// api_key stored in the config (or passed via flag/env) is rejected by the
 /// server. Lists the key's likely source and the minimum steps to recover.
-fn stale_key_hint(
-    msg: &str,
-    cfg_path: &Path,
-    cfg: &Config,
-    ctx: &Ctx,
-    args: &Args,
-) -> String {
+fn stale_key_hint(msg: &str, cfg_path: &Path, cfg: &Config, ctx: &Ctx, args: &Args) -> String {
     let source = if cfg.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
         format!("config file {}", cfg_path.display())
     } else if ctx.api_key.is_some() {

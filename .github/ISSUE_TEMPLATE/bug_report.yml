@@ -1,0 +1,58 @@
+name: Bug report
+description: Report a reproducible issue with `taskfast-cli`.
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening, search existing issues to avoid duplicates.
+        For security vulnerabilities, use the [Security tab](https://github.com/Akuja-Inc/taskfast-cli/security) instead.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One-sentence description of the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands and inputs. Include `--verbose` output if applicable.
+      placeholder: |
+        1. `taskfast config init`
+        2. `taskfast discover ...`
+        3. Observe error ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include full error output / stack trace.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: taskfast version
+      description: "`taskfast --version` output"
+      placeholder: "taskfast 0.2.0"
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Rust version (`rustc -vV`), any relevant env vars.
+      placeholder: |
+        OS: Ubuntu 22.04
+        rustc: 1.75.0
+    validations:
+      required: false

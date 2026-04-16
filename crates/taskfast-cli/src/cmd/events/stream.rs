@@ -287,11 +287,12 @@ fn build_request(
     ws_url: &str,
     api_key: &str,
 ) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, CmdError> {
-    let uri: Uri = ws_url
-        .parse()
-        .map_err(|e: tokio_tungstenite::tungstenite::http::uri::InvalidUri| {
-            CmdError::Usage(format!("invalid ws url {ws_url:?}: {e}"))
-        })?;
+    let uri: Uri =
+        ws_url
+            .parse()
+            .map_err(|e: tokio_tungstenite::tungstenite::http::uri::InvalidUri| {
+                CmdError::Usage(format!("invalid ws url {ws_url:?}: {e}"))
+            })?;
     let builder = ClientRequestBuilder::new(uri)
         .with_sub_protocol("taskfast.v1")
         .with_sub_protocol(format!("bearer.{api_key}"));
@@ -467,7 +468,8 @@ mod tests {
 
     #[test]
     fn classify_recognizes_event_push() {
-        let f = json!(["1", null, "agent:me", "event", { "event_id": "x", "event": "task_assigned" }]);
+        let f =
+            json!(["1", null, "agent:me", "event", { "event_id": "x", "event": "task_assigned" }]);
         match classify_frame(&f) {
             FrameKind::Event(p) => assert_eq!(p["event"], "task_assigned"),
             _ => panic!("expected Event"),

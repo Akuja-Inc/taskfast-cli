@@ -62,10 +62,7 @@ async fn ping_happy_path_returns_pong_and_latency() {
     assert_eq!(v["data"]["endpoint"], "GET /agents/me");
     assert!(v["data"]["latency_ms"].is_u64(), "latency_ms must be u64");
     assert!(
-        v["data"]["base_url"]
-            .as_str()
-            .unwrap()
-            .ends_with("/api"),
+        v["data"]["base_url"].as_str().unwrap().ends_with("/api"),
         "base_url should include the /api suffix from the client"
     );
 }

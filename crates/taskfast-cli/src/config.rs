@@ -240,10 +240,7 @@ impl Config {
         }
     }
 
-    fn try_migrate(
-        config_path: &Path,
-        legacy_dotenv: Option<&Path>,
-    ) -> Result<Self, ConfigError> {
+    fn try_migrate(config_path: &Path, legacy_dotenv: Option<&Path>) -> Result<Self, ConfigError> {
         let Some(legacy) = legacy_dotenv else {
             return Ok(Self::default());
         };
@@ -574,6 +571,9 @@ mod tests {
         let config_path = tmp.path().join(".taskfast").join("config.json");
         let cfg = Config::load_or_migrate(&config_path).expect("no files, no error");
         assert_eq!(cfg, Config::default());
-        assert!(!config_path.exists(), "nothing to migrate, nothing to write");
+        assert!(
+            !config_path.exists(),
+            "nothing to migrate, nothing to write"
+        );
     }
 }

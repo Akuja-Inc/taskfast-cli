@@ -129,10 +129,7 @@ async fn main() -> std::process::ExitCode {
             .try_init();
     }
 
-    let cfg_path = cli
-        .config
-        .clone()
-        .unwrap_or_else(Config::default_path);
+    let cfg_path = cli.config.clone().unwrap_or_else(Config::default_path);
     let cfg = match Config::load_or_migrate(&cfg_path) {
         Ok(c) => c,
         Err(e) => {

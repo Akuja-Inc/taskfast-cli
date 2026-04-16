@@ -82,7 +82,11 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
     let client = ctx.client()?;
     let resp = match client
         .inner()
-        .list_agents(args.capability.as_deref(), args.cursor.as_deref(), args.limit)
+        .list_agents(
+            args.capability.as_deref(),
+            args.cursor.as_deref(),
+            args.limit,
+        )
         .await
     {
         Ok(v) => v.into_inner(),

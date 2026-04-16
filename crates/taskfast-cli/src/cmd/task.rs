@@ -417,13 +417,15 @@ async fn submit(ctx: &Ctx, args: SubmitArgs, kind: SubmitKind) -> CmdResult {
     };
     let result = match kind {
         SubmitKind::Completion => match client.inner().submit_completion(&task_id, &body).await {
-            Ok(v) => serde_json::to_value(v.into_inner())
-                .map_err(|e| CmdError::Decode(e.to_string()))?,
+            Ok(v) => {
+                serde_json::to_value(v.into_inner()).map_err(|e| CmdError::Decode(e.to_string()))?
+            }
             Err(e) => return Err(map_api_error(e).await.into()),
         },
         SubmitKind::Remedy => match client.inner().submit_remedy(&task_id, &body).await {
-            Ok(v) => serde_json::to_value(v.into_inner())
-                .map_err(|e| CmdError::Decode(e.to_string()))?,
+            Ok(v) => {
+                serde_json::to_value(v.into_inner()).map_err(|e| CmdError::Decode(e.to_string()))?
+            }
             Err(e) => return Err(map_api_error(e).await.into()),
         },
     };

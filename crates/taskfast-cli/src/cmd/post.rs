@@ -347,4 +347,3 @@ fn decode_0x_bytes(s: &str) -> Result<Vec<u8>, String> {
     let stripped = s.strip_prefix("0x").unwrap_or(s);
     hex::decode(stripped).map_err(|e| e.to_string())
 }
-

@@ -91,7 +91,10 @@ fn set(ctx: &Ctx, args: SetArgs) -> CmdResult {
     let value = if args.unset {
         None
     } else {
-        args.value.as_deref().map(str::to_string).filter(|s| !s.is_empty())
+        args.value
+            .as_deref()
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
     };
 
     // Load through `load_or_migrate` so `config set` on a fresh project
@@ -295,10 +298,12 @@ mod tests {
         .save(&path)
         .unwrap();
 
-        let env =
-            run(&ctx_with(path.clone(), false), Command::Show(ShowArgs { reveal: false }))
-                .await
-                .unwrap();
+        let env = run(
+            &ctx_with(path.clone(), false),
+            Command::Show(ShowArgs { reveal: false }),
+        )
+        .await
+        .unwrap();
         let v = serde_json::to_value(&env).unwrap();
         assert_eq!(v["data"]["config"]["api_key"], "***0123");
     }
@@ -314,10 +319,12 @@ mod tests {
         .save(&path)
         .unwrap();
 
-        let env =
-            run(&ctx_with(path, false), Command::Show(ShowArgs { reveal: true }))
-                .await
-                .unwrap();
+        let env = run(
+            &ctx_with(path, false),
+            Command::Show(ShowArgs { reveal: true }),
+        )
+        .await
+        .unwrap();
         let v = serde_json::to_value(&env).unwrap();
         assert_eq!(v["data"]["config"]["api_key"], "am_live_secret0123");
     }

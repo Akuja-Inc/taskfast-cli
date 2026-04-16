@@ -12,7 +12,10 @@ fn tempo_id_is_tempo() {
 #[cfg(feature = "polygon")]
 #[test]
 fn polygon_stub_compiles() {
-    assert_eq!(<taskfast_chains::polygon::Polygon as Chain>::id(), "polygon");
+    assert_eq!(
+        <taskfast_chains::polygon::Polygon as Chain>::id(),
+        "polygon"
+    );
 }
 
 #[cfg(feature = "avalanche")]
@@ -39,5 +42,8 @@ fn near_stub_compiles() {
 #[cfg(feature = "stellar")]
 #[test]
 fn stellar_stub_compiles() {
-    assert_eq!(<taskfast_chains::stellar::Stellar as Chain>::id(), "stellar");
+    assert_eq!(
+        <taskfast_chains::stellar::Stellar as Chain>::id(),
+        "stellar"
+    );
 }

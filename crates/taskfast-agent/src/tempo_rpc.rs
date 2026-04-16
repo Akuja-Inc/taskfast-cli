@@ -190,9 +190,7 @@ impl TempoRpcClient {
             // Moderato public RPC occasionally returns {"jsonrpc":"2.0","id":1}
             // with neither `result` nor `error`. Treat identically to
             // `result: null` (pending) so `wait_for_receipt` keeps polling.
-            Err(RpcError::Decode(ref m))
-                if m.contains("missing both result and error") =>
-            {
+            Err(RpcError::Decode(ref m)) if m.contains("missing both result and error") => {
                 return Ok(None);
             }
             Err(e) => return Err(e),

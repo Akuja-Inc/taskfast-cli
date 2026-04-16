@@ -32,9 +32,9 @@ use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_agent::bootstrap;
-use taskfast_agent::chain::{compute_escrow_id, IERC20, TaskEscrow};
-use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
+use taskfast_agent::chain::{compute_escrow_id, TaskEscrow, IERC20};
 use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
+use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
 use taskfast_client::api::types::{
     BidEscrowFinalizeRequest, BidEscrowFinalizeRequestPosterApprovalDeadline,
 };
@@ -121,8 +121,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         .map_err(CmdError::from)?;
     let domain_spec = readiness.settlement_domain.ok_or_else(|| {
         CmdError::Usage(
-            "readiness has no settlement_domain — server is not configured for settlement"
-                .into(),
+            "readiness has no settlement_domain — server is not configured for settlement".into(),
         )
     })?;
     if domain_spec.chain_id != params.chain_id {
@@ -148,7 +147,10 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         ))
     })?;
     let chain_id_u64 = u64::try_from(params.chain_id).map_err(|_| {
-        CmdError::Decode(format!("escrow params chain_id={} is negative", params.chain_id))
+        CmdError::Decode(format!(
+            "escrow params chain_id={} is negative",
+            params.chain_id
+        ))
     })?;
     let domain = DistributionDomain::new(chain_id_u64, verifying_contract);
 
@@ -205,7 +207,9 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         .as_deref()
         .map(|s| {
             B256::from_str(s).map_err(|e| {
-                CmdError::Decode(format!("server memo_hash `{s}` not a 0x-prefixed 32-byte hex: {e}"))
+                CmdError::Decode(format!(
+                    "server memo_hash `{s}` not a 0x-prefixed 32-byte hex: {e}"
+                ))
             })
         })
         .transpose()?;
@@ -279,9 +283,10 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         .into()
     };
 
-    let rpc_url = args.rpc_url.clone().unwrap_or_else(|| {
-        default_rpc_for(params.chain_id).to_string()
-    });
+    let rpc_url = args
+        .rpc_url
+        .clone()
+        .unwrap_or_else(|| default_rpc_for(params.chain_id).to_string());
 
     if ctx.dry_run {
         return Ok(Envelope::success(
@@ -331,9 +336,10 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             }
             .abi_encode()
             .into();
-            let approve_hash = sign_and_broadcast_tx(&rpc, &signer, token_address, approve_calldata)
-                .await
-                .map_err(|e| CmdError::Server(format!("approve broadcast failed: {e}")))?;
+            let approve_hash =
+                sign_and_broadcast_tx(&rpc, &signer, token_address, approve_calldata)
+                    .await
+                    .map_err(|e| CmdError::Server(format!("approve broadcast failed: {e}")))?;
             let ok = rpc
                 .wait_for_receipt(approve_hash, RECEIPT_TIMEOUT, RECEIPT_POLL_INTERVAL)
                 .await
@@ -456,7 +462,9 @@ fn decimal_to_u256(s: &str, decimals: u8) -> Result<U256, CmdError> {
         return Err(CmdError::Decode("empty decimal amount".into()));
     }
     if trimmed.starts_with('-') {
-        return Err(CmdError::Decode(format!("negative amount `{s}` disallowed")));
+        return Err(CmdError::Decode(format!(
+            "negative amount `{s}` disallowed"
+        )));
     }
     let (whole, frac) = match trimmed.split_once('.') {
         Some((w, f)) => (w, f),
@@ -487,7 +495,10 @@ mod tests {
 
     #[test]
     fn decimal_to_u256_scales_basic() {
-        assert_eq!(decimal_to_u256("75.00", 6).unwrap(), U256::from(75_000_000u64));
+        assert_eq!(
+            decimal_to_u256("75.00", 6).unwrap(),
+            U256::from(75_000_000u64)
+        );
         assert_eq!(decimal_to_u256("75", 6).unwrap(), U256::from(75_000_000u64));
         assert_eq!(decimal_to_u256("0.5", 6).unwrap(), U256::from(500_000u64));
         assert_eq!(decimal_to_u256("0", 6).unwrap(), U256::ZERO);

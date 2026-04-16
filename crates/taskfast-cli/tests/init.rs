@@ -20,12 +20,7 @@ use taskfast_cli::{Envelope, Environment};
 
 const BYOW_ADDRESS: &str = "0xdEaDbEeF00000000000000000000000000000001";
 
-fn ctx_for(
-    server: &MockServer,
-    key: Option<&str>,
-    config_path: PathBuf,
-    dry_run: bool,
-) -> Ctx {
+fn ctx_for(server: &MockServer, key: Option<&str>, config_path: PathBuf, dry_run: bool) -> Ctx {
     Ctx {
         api_key: key.map(String::from),
         environment: Environment::Local,
@@ -309,9 +304,12 @@ async fn missing_api_key_everywhere_errors_cleanly() {
     let tmp = TempDir::new().unwrap();
     let args = base_args();
 
-    let err = run(&ctx_for(&server, None, config_path_in(tmp.path()), false), args)
-        .await
-        .expect_err("no key anywhere → MissingApiKey");
+    let err = run(
+        &ctx_for(&server, None, config_path_in(tmp.path()), false),
+        args,
+    )
+    .await
+    .expect_err("no key anywhere → MissingApiKey");
     assert!(matches!(err, CmdError::MissingApiKey), "got {err:?}");
 }
 
@@ -402,7 +400,10 @@ async fn generate_wallet_with_password_file_persists_keystore_and_registers() {
     assert!(keystore_path.exists(), "keystore must be written");
 
     let loaded = Config::load(&cfg_path).unwrap();
-    assert_eq!(loaded.keystore_path.as_deref(), Some(keystore_path.as_path()));
+    assert_eq!(
+        loaded.keystore_path.as_deref(),
+        Some(keystore_path.as_path())
+    );
     assert_eq!(
         loaded.wallet_address.as_deref().map(str::to_lowercase),
         Some(addr.to_lowercase())
