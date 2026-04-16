@@ -56,7 +56,7 @@ const APPROVAL_DEADLINE_SECS: u64 = 30 * 24 * 60 * 60;
 /// `TaskEscrow.open()` receipt polling horizon. A 60s ceiling matches the
 /// Tempo testnet block-time budget plus RPC jitter; past this we surface
 /// `CmdError::Server` so the orchestrator sees a bounded retry window.
-const RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
+const RECEIPT_TIMEOUT: Duration = Duration::from_mins(1);
 const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, clap::Subcommand)]
