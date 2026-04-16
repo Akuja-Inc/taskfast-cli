@@ -312,7 +312,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     }
 
     // 10. Live RPC: allowance preflight + optional approve.
-    //     TaskEscrow.open transferFroms `deposit + platformFeeAmount` in a
+    //     TaskEscrow.open calls transferFrom for `deposit + platformFeeAmount` in a
     //     single call, so balance/allowance/approve must cover the sum — not
     //     just deposit.
     let total_required = deposit

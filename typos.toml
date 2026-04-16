@@ -1,0 +1,5 @@
+[default.extend-identifiers]
+"am-iit" = "am-iit"
+
+[default.extend-words]
+iit = "iit"
