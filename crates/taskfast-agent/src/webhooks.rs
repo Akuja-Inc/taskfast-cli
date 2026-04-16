@@ -36,7 +36,7 @@ use thiserror::Error as ThisError;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Default replay window matching the server-side contract.
-pub const DEFAULT_MAX_SKEW: Duration = Duration::from_secs(300);
+pub const DEFAULT_MAX_SKEW: Duration = Duration::from_mins(5);
 
 /// `PUT /agents/me/webhooks` — create or replace the webhook configuration.
 ///

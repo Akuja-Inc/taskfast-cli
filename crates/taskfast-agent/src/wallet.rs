@@ -109,7 +109,7 @@ impl Default for PollOptions {
     fn default() -> Self {
         Self {
             min_balance: U256::from(1u8),
-            timeout: Duration::from_secs(120),
+            timeout: Duration::from_mins(2),
             poll_interval: Duration::from_secs(10),
         }
     }
