@@ -14,13 +14,14 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use taskfast_cli::cmd::webhook::{self, Command, RegisterArgs, SubscribeArgs};
 use taskfast_cli::cmd::Ctx;
-use taskfast_cli::{Environment, Envelope};
+use taskfast_cli::{Envelope, Environment};
 
 fn ctx_for(server: &MockServer, dry_run: bool) -> Ctx {
     Ctx {
         api_key: Some("test-key".into()),
         environment: Environment::Local,
         api_base: Some(server.uri()),
+        config_path: std::path::PathBuf::from("/dev/null"),
         dry_run,
         quiet: true,
     }

@@ -2,7 +2,7 @@
 //! POSTs it to `/tasks/{id}/settle` to release escrowed funds.
 //!
 //! Pairs with server bead am-iyp6. The signing surface is identical to the
-//! one pinned in `taskfast_agent::signing::sign_distribution`; the domain
+//! one pinned in `taskfast_chains::tempo::sign_distribution`; the domain
 //! (`chain_id`, `verifying_contract`) is sourced at runtime from
 //! `GET /agents/me/readiness` so the same binary signs correctly on testnet
 //! and mainnet without client-side chain config.
@@ -20,7 +20,6 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, U256};
-use alloy_signer_local::PrivateKeySigner;
 use clap::Parser;
 use serde_json::json;
 use uuid::Uuid;
@@ -29,8 +28,7 @@ use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_agent::bootstrap;
-use taskfast_agent::keystore::{self, KeySource};
-use taskfast_agent::signing::{DistributionDomain, sign_distribution};
+use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
 use taskfast_client::api::types::{SettleTaskRequest, SettleTaskRequestSignature};
 use taskfast_client::map_api_error;
 
@@ -78,17 +76,17 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         Err(e) => return Err(map_api_error(e).await.into()),
     };
 
-    let escrow_id_hex: String = task
-        .escrow_id
-        .as_ref()
-        .map(|e| e.to_string())
-        .ok_or_else(|| {
-            CmdError::Usage(
-                "task has no escrow_id; settle requires an initialized escrow \
+    let escrow_id_hex: String =
+        task.escrow_id
+            .as_ref()
+            .map(|e| e.to_string())
+            .ok_or_else(|| {
+                CmdError::Usage(
+                    "task has no escrow_id; settle requires an initialized escrow \
                  (task must be in :complete or :disbursement_pending)"
-                    .into(),
-            )
-        })?;
+                        .into(),
+                )
+            })?;
 
     // 3. Resolve deadline: explicit override wins; otherwise require the
     //    server-stored value. Either can be absent but not both.
@@ -163,7 +161,11 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     // 6. Load keystore. Bead spec calls for the signature to appear in the
     //    dry-run envelope, so we sign even in dry-run and never short-circuit
     //    before keystore resolution.
-    let signer = load_signer_from_args(&args)?;
+    let signer = super::wallet_args::load_signer(
+        args.keystore.as_deref(),
+        args.wallet_password_file.as_deref(),
+        "settlement approval",
+    )?;
 
     // 7. Optional preflight: keystore must match --wallet-address if given.
     //    Without this, a mismatch surfaces as a server 422 after the full
@@ -209,9 +211,9 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     // 10. Live POST. Parse into the regex-validated newtype — a failure here
     //     would mean our local signer produced a malformed signature, which
     //     is a crypto-layer bug, not a network/server issue.
-    let signature: SettleTaskRequestSignature = signature_hex.parse().map_err(|e| {
-        CmdError::Signing(format!("signer produced malformed signature hex: {e}"))
-    })?;
+    let signature: SettleTaskRequestSignature = signature_hex
+        .parse()
+        .map_err(|e| CmdError::Signing(format!("signer produced malformed signature hex: {e}")))?;
     let body = SettleTaskRequest { signature };
     let resp = match client.inner().settle_task(&task_id, &body).await {
         Ok(v) => v.into_inner(),
@@ -227,47 +229,3 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         }),
     ))
 }
-
-/// Resolve `--keystore` / `TEMPO_KEY_SOURCE` to a decrypted signer. Mirrors
-/// `cmd::post::load_signer_from_args` but intentionally copied rather than
-/// hoisted to a shared helper: a third caller hasn't materialized, and
-/// premature hoisting would couple `post` and `settle`'s password-resolution
-/// policies in a way that would hurt when either drifts.
-fn load_signer_from_args(args: &Args) -> Result<PrivateKeySigner, CmdError> {
-    let raw = args.keystore.as_deref().ok_or_else(|| {
-        CmdError::Usage(
-            "--keystore (or TEMPO_KEY_SOURCE) is required to sign the settlement approval"
-                .into(),
-        )
-    })?;
-    let path_str = raw.strip_prefix("file:").unwrap_or(raw);
-    let password = resolve_password(args)?;
-    let path = PathBuf::from(path_str);
-    keystore::load(&KeySource::File { path }, &password).map_err(CmdError::from)
-}
-
-fn resolve_password(args: &Args) -> Result<String, CmdError> {
-    if let Ok(pw) = std::env::var("TASKFAST_WALLET_PASSWORD") {
-        if !pw.is_empty() {
-            return Ok(pw);
-        }
-    }
-    let path = args.wallet_password_file.as_deref().ok_or_else(|| {
-        CmdError::Usage(
-            "TASKFAST_WALLET_PASSWORD or --wallet-password-file required to unlock keystore"
-                .into(),
-        )
-    })?;
-    let raw = std::fs::read_to_string(path).map_err(|e| {
-        CmdError::Usage(format!("read wallet password file {}: {e}", path.display()))
-    })?;
-    let trimmed = raw.trim_end_matches(['\n', '\r']);
-    if trimmed.is_empty() {
-        return Err(CmdError::Usage(format!(
-            "wallet password file {} is empty",
-            path.display()
-        )));
-    }
-    Ok(trimmed.to_string())
-}
-

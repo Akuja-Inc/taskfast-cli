@@ -8,25 +8,40 @@
 //! Both are covered by tests at the bottom of this file so a refactor that
 //! silently re-homes a variant will break the build.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::Environment;
+use crate::config::Config;
 use crate::envelope::Envelope;
 use crate::exit::ExitCode;
+use crate::Environment;
 
 use taskfast_agent::keystore::KeystoreError;
-use taskfast_agent::signing::SigningError;
+use taskfast_chains::tempo::SigningError;
 use taskfast_client::{Error as ClientError, TaskFastClient};
 
+pub mod agent;
+pub mod artifact;
 pub mod bid;
+pub mod config;
+pub mod discover;
+pub mod dispute;
+pub mod escrow;
 pub mod events;
 pub mod init;
 pub mod me;
+pub mod message;
+pub mod payment;
+pub mod ping;
+pub mod platform;
 pub mod post;
+pub mod review;
 pub mod settle;
 pub mod task;
+pub mod wallet;
+pub mod wallet_args;
 pub mod webhook;
 
 /// Shared invocation context threaded through every subcommand.
@@ -38,11 +53,49 @@ pub struct Ctx {
     /// Explicit `--api-base` / `TASKFAST_API` override. Wins over
     /// [`Environment::default_base_url`] when set.
     pub api_base: Option<String>,
+    /// Resolved path to the JSON config file (default
+    /// `./.taskfast/config.json`, override via `--config` /
+    /// `TASKFAST_CONFIG`). Subcommands that persist state (init,
+    /// `config set`, etc.) write here; tests construct this directly.
+    pub config_path: PathBuf,
     pub dry_run: bool,
     pub quiet: bool,
 }
 
+/// Default environment when neither a flag nor the config file pins one.
+pub const DEFAULT_ENVIRONMENT: Environment = Environment::Prod;
+
 impl Ctx {
+    /// Build a [`Ctx`] by layering CLI flags (including clap's
+    /// env-var folding) over the on-disk [`Config`]. Precedence:
+    ///
+    /// ```text
+    /// flag > env var > config file > default
+    /// ```
+    ///
+    /// Clap already folds `flag > env var` for each field (via
+    /// `#[arg(env = "…")]`), so the merge here is just "cli wins, else
+    /// config, else default". `dry_run` and `quiet` are never
+    /// persisted — they're invocation-scoped.
+    pub fn from_parts(
+        cli_api_key: Option<String>,
+        cli_env: Option<Environment>,
+        cli_api_base: Option<String>,
+        cli_config_path: Option<PathBuf>,
+        cli_dry_run: bool,
+        cli_quiet: bool,
+        cfg: &Config,
+    ) -> Self {
+        Self {
+            api_key: cli_api_key.or_else(|| cfg.api_key.clone()),
+            environment: cli_env.or(cfg.environment).unwrap_or(DEFAULT_ENVIRONMENT),
+            api_base: cli_api_base.or_else(|| cfg.api_base.clone()),
+            config_path: cli_config_path.unwrap_or_else(Config::default_path),
+            dry_run: cli_dry_run,
+            quiet: cli_quiet,
+        }
+    }
+
     /// Resolved API base URL: override if set, else env default.
     pub fn base_url(&self) -> &str {
         match self.api_base.as_deref() {
@@ -260,6 +313,7 @@ mod tests {
             api_key: None,
             environment: Environment::Prod,
             api_base: Some("http://localhost:9999".into()),
+            config_path: PathBuf::from("/dev/null"),
             dry_run: false,
             quiet: false,
         };
@@ -277,6 +331,7 @@ mod tests {
                 api_key: None,
                 environment: env,
                 api_base: None,
+                config_path: PathBuf::from("/dev/null"),
                 dry_run: false,
                 quiet: false,
             };
@@ -290,6 +345,7 @@ mod tests {
             api_key: None,
             environment: Environment::Local,
             api_base: None,
+            config_path: PathBuf::from("/dev/null"),
             dry_run: false,
             quiet: false,
         };
@@ -306,9 +362,98 @@ mod tests {
             api_key: Some("tk_test_abc".into()),
             environment: Environment::Local,
             api_base: None,
+            config_path: PathBuf::from("/dev/null"),
             dry_run: false,
             quiet: false,
         };
         ctx.client().expect("client should build with a valid key");
+    }
+
+    fn cfg_with(
+        api_key: Option<&str>,
+        environment: Option<Environment>,
+        api_base: Option<&str>,
+    ) -> Config {
+        Config {
+            api_key: api_key.map(str::to_string),
+            environment,
+            api_base: api_base.map(str::to_string),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn from_parts_flag_wins_over_config() {
+        let cfg = cfg_with(
+            Some("cfg_key"),
+            Some(Environment::Staging),
+            Some("http://cfg"),
+        );
+        let ctx = Ctx::from_parts(
+            Some("flag_key".into()),
+            Some(Environment::Local),
+            Some("http://flag".into()),
+            None,
+            false,
+            false,
+            &cfg,
+        );
+        assert_eq!(ctx.api_key.as_deref(), Some("flag_key"));
+        assert_eq!(ctx.environment, Environment::Local);
+        assert_eq!(ctx.api_base.as_deref(), Some("http://flag"));
+    }
+
+    #[test]
+    fn from_parts_config_fills_when_flags_absent() {
+        let cfg = cfg_with(
+            Some("cfg_key"),
+            Some(Environment::Staging),
+            Some("http://cfg"),
+        );
+        let ctx = Ctx::from_parts(None, None, None, None, false, false, &cfg);
+        assert_eq!(ctx.api_key.as_deref(), Some("cfg_key"));
+        assert_eq!(ctx.environment, Environment::Staging);
+        assert_eq!(ctx.api_base.as_deref(), Some("http://cfg"));
+    }
+
+    #[test]
+    fn from_parts_defaults_when_nothing_set() {
+        let ctx = Ctx::from_parts(None, None, None, None, false, false, &Config::default());
+        assert!(ctx.api_key.is_none());
+        assert_eq!(ctx.environment, DEFAULT_ENVIRONMENT);
+        assert!(ctx.api_base.is_none());
+        assert!(!ctx.dry_run);
+        assert!(!ctx.quiet);
+    }
+
+    #[test]
+    fn from_parts_flag_partial_overrides_preserve_other_config_fields() {
+        // Only `api_key` passed on the CLI — environment + api_base
+        // should still come from the config file.
+        let cfg = cfg_with(
+            Some("cfg_key"),
+            Some(Environment::Staging),
+            Some("http://cfg"),
+        );
+        let ctx = Ctx::from_parts(
+            Some("flag_key".into()),
+            None,
+            None,
+            None,
+            false,
+            false,
+            &cfg,
+        );
+        assert_eq!(ctx.api_key.as_deref(), Some("flag_key"));
+        assert_eq!(ctx.environment, Environment::Staging);
+        assert_eq!(ctx.api_base.as_deref(), Some("http://cfg"));
+    }
+
+    #[test]
+    fn from_parts_dry_run_and_quiet_are_invocation_scoped() {
+        // These never come from config, only from the CLI.
+        let ctx = Ctx::from_parts(None, None, None, None, true, true, &Config::default());
+        assert!(ctx.dry_run);
+        assert!(ctx.quiet);
     }
 }

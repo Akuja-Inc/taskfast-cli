@@ -23,8 +23,8 @@ use alloy_signer_local::PrivateKeySigner;
 use taskfast_client::api::types::{
     WalletBalance, WalletSetupRequest, WalletSetupRequestTempoWalletAddress, WalletSetupResponse,
 };
-use taskfast_client::{Error, Result, TaskFastClient, map_api_error};
-use tokio::time::{Instant, sleep};
+use taskfast_client::{map_api_error, Error, Result, TaskFastClient};
+use tokio::time::{sleep, Instant};
 
 /// Generate a fresh secp256k1 signer via `alloy_signer_local`.
 ///
@@ -109,7 +109,7 @@ impl Default for PollOptions {
     fn default() -> Self {
         Self {
             min_balance: U256::from(1u8),
-            timeout: Duration::from_secs(120),
+            timeout: Duration::from_mins(2),
             poll_interval: Duration::from_secs(10),
         }
     }

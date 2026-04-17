@@ -5,17 +5,23 @@
 //! types are re-exported here so integration tests (and, later, embedded
 //! callers) can drive the pipeline without spawning a process.
 
+// TODO: tighten doc coverage on public items + remove this allow.
+// Tracked under the rust-best-practices follow-up.
+#![allow(missing_docs)]
+
 pub mod cmd;
+pub mod config;
 pub mod dotenv;
 pub mod envelope;
 pub mod exit;
 
+pub use config::Config;
 pub use envelope::{Envelope, ErrorPayload};
 pub use exit::ExitCode;
 
 /// Re-exported from `main.rs` so tests can construct a [`cmd::Ctx`] with a
 /// named [`Environment`] without depending on the binary entry point.
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Environment {
     Prod,
     Staging,

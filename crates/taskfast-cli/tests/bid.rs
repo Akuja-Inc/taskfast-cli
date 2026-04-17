@@ -7,7 +7,9 @@ use serde_json::json;
 use wiremock::matchers::{body_partial_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use taskfast_cli::cmd::bid::{AcceptArgs, CancelArgs, Command, CreateArgs, ListArgs, RejectArgs, run};
+use taskfast_cli::cmd::bid::{
+    run, AcceptArgs, CancelArgs, Command, CreateArgs, ListArgs, RejectArgs,
+};
 use taskfast_cli::cmd::{CmdError, Ctx};
 use taskfast_cli::{Envelope, Environment};
 
@@ -19,6 +21,7 @@ fn ctx_for(server: &MockServer, key: Option<&str>) -> Ctx {
         api_key: key.map(String::from),
         environment: Environment::Local,
         api_base: Some(server.uri()),
+        config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
     }
@@ -60,6 +63,7 @@ async fn list_forwards_cursor_and_limit_and_returns_bids() {
     let args = ListArgs {
         cursor: Some("abc".into()),
         limit: Some(5),
+        status: None,
     };
     let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
         .await
@@ -87,6 +91,7 @@ async fn list_without_pagination_params_returns_empty() {
     let args = ListArgs {
         cursor: None,
         limit: None,
+        status: None,
     };
     let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
         .await
@@ -112,6 +117,7 @@ async fn list_401_surfaces_as_auth_error() {
     let args = ListArgs {
         cursor: None,
         limit: None,
+        status: None,
     };
     let err = run(&ctx_for(&server, Some("test-key")), Command::List(args))
         .await
@@ -128,6 +134,7 @@ async fn list_missing_api_key_errors_before_any_http_call() {
     let args = ListArgs {
         cursor: None,
         limit: None,
+        status: None,
     };
     let err = run(&ctx_for(&server, None), Command::List(args))
         .await
@@ -156,7 +163,9 @@ async fn create_happy_path_posts_price_and_pitch() {
     // a regression that dropped `pitch` would pass a status-code-only assertion.
     Mock::given(method("POST"))
         .and(path(format!("/api/tasks/{TASK_ID}/bids")))
-        .and(body_partial_json(json!({ "price": "75.00", "pitch": "why me" })))
+        .and(body_partial_json(
+            json!({ "price": "75.00", "pitch": "why me" }),
+        ))
         .respond_with(ResponseTemplate::new(201).set_body_json(bid_body("pending")))
         .mount(&server)
         .await;
@@ -466,7 +475,7 @@ async fn accept_401_surfaces_as_auth() {
 
 #[tokio::test]
 async fn accept_403_not_the_poster_surfaces_as_auth() {
-    // Per taskfast-sdk error-mapping contract: 403 on poster/worker mutations
+    // Per taskfast-cli error-mapping contract: 403 on poster/worker mutations
     // is Auth (re-credential), not Validation.
     let server = MockServer::start().await;
     Mock::given(method("POST"))

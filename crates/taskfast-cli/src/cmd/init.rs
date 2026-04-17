@@ -2,17 +2,18 @@
 //!
 //! Replaces `init.sh`'s step 1-9 orchestration with a non-interactive,
 //! CLI-driven flow. Every input comes from a flag, an env var, or the
-//! existing `.taskfast-agent.env` — there are no TTY prompts, because the
+//! existing [`Config`] file — there are no TTY prompts, because the
 //! caller is expected to be another agent/LLM.
 //!
 //! # Scope (this slice, am-yvc)
 //!
-//! * api_key: direct via `--api-key` / `TASKFAST_API_KEY` / env file.
+//! * api_key: direct via `--api-key` / `TASKFAST_API_KEY` / config file.
 //! * validate: `GET /agents/me` — must be active.
 //! * readiness: `GET /agents/me/readiness` — informs wallet gate.
 //! * wallet: BYOW via `--wallet-address`, or generate + keystore with a
 //!   password sourced from `--wallet-password-file` / `TASKFAST_WALLET_PASSWORD`.
-//! * env file: load + write at `.taskfast-agent.env` (chmod 600 on unix).
+//! * config file: load + write at `ctx.config_path` (default
+//!   `./.taskfast/config.json`, chmod 600 on unix).
 //! * final readiness assert.
 //!
 //! # Scope (am-z58 extension)
@@ -21,7 +22,7 @@
 //!   available, POST /agents with the user PAT to mint one. The server
 //!   derives `owner_id` from the PAT, so the CLI never asks the caller for
 //!   it. The minted `api_key` is then used for the rest of the flow and
-//!   written to the env file. Under `--dry-run` the mint is skipped and the
+//!   written to the config file. Under `--dry-run` the mint is skipped and the
 //!   envelope reports `agent.action = "would_mint"` — the rest of the flow
 //!   is also skipped because the real agent key never materialized.
 //!
@@ -39,10 +40,10 @@
 //!
 //! # `--dry-run` semantics
 //!
-//! Mutations short-circuit: no wallet POST, no env file write, no keystore
-//! write. A wallet is still generated (so the address is real) but its
-//! signer is dropped at the end of the function. Readiness and profile
-//! reads pass through.
+//! Mutations short-circuit: no wallet POST, no config file write, no
+//! keystore write. A wallet is still generated (so the address is real)
+//! but its signer is dropped at the end of the function. Readiness and
+//! profile reads pass through.
 
 use std::path::{Path, PathBuf};
 
@@ -50,12 +51,12 @@ use clap::Parser;
 use serde_json::json;
 
 use super::{CmdError, CmdResult, Ctx};
-use crate::dotenv::{DEFAULT_ENV_FILENAME, EnvFile};
+use crate::config::Config;
 use crate::envelope::Envelope;
 
 use alloy_signer_local::PrivateKeySigner;
 use taskfast_agent::bootstrap::{create_agent_headless, get_readiness, validate_auth};
-use taskfast_agent::faucet::{FaucetDrop, request_testnet_funds};
+use taskfast_agent::faucet::{request_testnet_funds, FaucetDrop};
 use taskfast_agent::keystore;
 use taskfast_agent::wallet;
 use taskfast_agent::webhooks;
@@ -93,18 +94,13 @@ pub struct Args {
     #[arg(long)]
     pub keystore_path: Option<PathBuf>,
 
-    /// Network selector recorded in the env file. Does not change the API
-    /// base URL (that's `--api-base`).
+    /// Network selector recorded in the config file. Does not change the
+    /// API base URL (that's `--api-base`).
     #[arg(long, default_value = "mainnet", env = "TEMPO_NETWORK")]
     pub network: Network,
 
-    /// Override the env file path. Default: `.taskfast-agent.env` in the
-    /// current working directory.
-    #[arg(long, env = "TASKFAST_ENV_FILE")]
-    pub env_file: Option<PathBuf>,
-
     /// Skip wallet provisioning entirely. Useful for workers that never
-    /// settle (rare) or for redoing env-file state without touching chain.
+    /// settle (rare) or for rebuilding config state without touching chain.
     #[arg(long)]
     pub skip_wallet: bool,
 
@@ -120,7 +116,7 @@ pub struct Args {
     /// `POST /agents` when no agent API key is available. The server
     /// derives the owning user from the PAT, so no owner UUID is required.
     /// Ignored if an agent key is already resolvable (direct flag / env
-    /// var / env file).
+    /// var / config file).
     #[arg(long, env = "TASKFAST_HUMAN_API_KEY")]
     pub human_api_key: Option<String>,
 
@@ -175,21 +171,20 @@ impl Network {
 }
 
 pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
-    let env_path = args
-        .env_file
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_ENV_FILENAME));
+    let cfg_path = ctx.config_path.clone();
 
-    // 1. Load any existing env file so re-running init is idempotent. An
-    //    env-file-supplied api_key is layered under the CLI/env sources
-    //    Ctx already resolved (flag > env var > file).
-    let mut env_file = EnvFile::load(&env_path).map_err(|e| CmdError::Usage(e.to_string()))?;
+    // 1. Load any existing config (with one-shot migration from the
+    //    legacy `.taskfast-agent.env` when JSON is absent) so re-running
+    //    init is idempotent. A config-supplied api_key is layered under
+    //    the CLI/env sources Ctx already resolved (flag > env var >
+    //    config).
+    let mut cfg = Config::load_or_migrate(&cfg_path).map_err(|e| CmdError::Usage(e.to_string()))?;
 
     // 1a. Resolve the agent API key. If none is available but the caller
     //     supplied a user PAT, mint a fresh agent headlessly and use the
     //     returned key. Under --dry-run we short-circuit before the POST
     //     and return early — the rest of the flow depends on a real key.
-    let (api_key, agent_outcome) = match resolve_api_key(ctx, &env_file) {
+    let (api_key, agent_outcome) = match resolve_api_key(ctx, &cfg) {
         Ok(k) => (k, AgentOutcome::PreExisting),
         Err(CmdError::MissingApiKey) if args.human_api_key.is_some() => {
             let minted = mint_agent(ctx, &args).await?;
@@ -198,7 +193,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
                     return Ok(Envelope::success(
                         ctx.environment,
                         ctx.dry_run,
-                        build_dry_run_mint_envelope(&env_path, intent),
+                        build_dry_run_mint_envelope(&cfg_path, intent),
                     ));
                 }
                 MintedAgent::Live { ref api_key, .. } => {
@@ -213,13 +208,27 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         api_key: Some(api_key.clone()),
         environment: ctx.environment,
         api_base: ctx.api_base.clone(),
+        config_path: ctx.config_path.clone(),
         dry_run: ctx.dry_run,
         quiet: ctx.quiet,
     };
     let client = effective_ctx.client()?;
 
     // 2. Validate auth + fetch readiness.
-    let profile = validate_auth(&client).await.map_err(CmdError::from)?;
+    //    On Auth failure with a PreExisting key, rewrite the error with a
+    //    remediation hint — the common cause is a stale api_key left over in
+    //    the config from a prior init run whose agent was deleted server-side.
+    let profile = match validate_auth(&client).await {
+        Ok(p) => p,
+        Err(taskfast_client::Error::Auth(msg))
+            if matches!(agent_outcome, AgentOutcome::PreExisting) =>
+        {
+            return Err(CmdError::Auth(stale_key_hint(
+                &msg, &cfg_path, &cfg, ctx, &args,
+            )));
+        }
+        Err(e) => return Err(CmdError::from(e)),
+    };
     assert_active(&profile)?;
     let readiness = get_readiness(&client).await.map_err(CmdError::from)?;
 
@@ -237,22 +246,31 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         provision_wallet(&client, &args, ctx.dry_run).await?
     };
 
-    // 4. Update the env file in-memory (always — writing is gated by dry-run).
-    env_file.set("TASKFAST_API", ctx.base_url().to_string());
-    env_file.set("TASKFAST_API_KEY", api_key.clone());
-    env_file.set("TEMPO_NETWORK", args.network.as_str());
+    // 4. Update the config in-memory (always — writing is gated by dry-run).
+    cfg.environment = Some(ctx.environment);
+    cfg.api_base = Some(ctx.base_url().to_string());
+    cfg.api_key = Some(api_key.clone());
+    cfg.network = Some(args.network.as_str().to_string());
     if let Some(addr) = wallet_outcome.address() {
-        env_file.set("TEMPO_WALLET_ADDRESS", addr.to_string());
+        cfg.wallet_address = Some(addr.to_string());
     }
     if let Some(path) = wallet_outcome.keystore_path() {
-        env_file.set("TEMPO_KEY_SOURCE", format!("file:{}", path.display()));
+        cfg.keystore_path = Some(path.to_path_buf());
+    }
+    if let AgentOutcome::Minted(MintedAgent::Live { id: Some(id), .. }) = &agent_outcome {
+        cfg.agent_id = Some(id.clone());
+    }
+    if let Some(url) = args.webhook_url.as_deref().filter(|s| !s.trim().is_empty()) {
+        cfg.webhook_url = Some(url.to_string());
+    }
+    if let Some(path) = args.webhook_secret_file.as_ref() {
+        cfg.webhook_secret_path = Some(path.clone());
     }
 
-    let env_file_written = if ctx.dry_run {
+    let config_written = if ctx.dry_run {
         false
     } else {
-        env_file
-            .save(&env_path)
+        cfg.save(&cfg_path)
             .map_err(|e| CmdError::Usage(e.to_string()))?;
         true
     };
@@ -281,8 +299,8 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     let final_readiness = get_readiness(&client).await.map_err(CmdError::from)?;
 
     let data = build_envelope_data(
-        &env_path,
-        env_file_written,
+        &cfg_path,
+        config_written,
         &wallet_outcome,
         &agent_outcome,
         &final_readiness,
@@ -294,7 +312,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
 }
 
 /// Result of the agent-key resolution step. When the caller already had
-/// a key (flag / env var / env file), this is `PreExisting` and the
+/// a key (flag / env var / config file), this is `PreExisting` and the
 /// envelope stays quiet about it. When a key was minted via
 /// `--human-api-key`, the envelope surfaces the minted agent's id/name.
 enum AgentOutcome {
@@ -361,9 +379,10 @@ async fn mint_agent(ctx: &Ctx, args: &Args) -> Result<MintedAgent, CmdError> {
     let resp = create_agent_headless(&pat_client, &body)
         .await
         .map_err(CmdError::from)?;
-    let api_key = resp.api_key.clone().ok_or_else(|| {
-        CmdError::Server("POST /agents returned no api_key despite 201".into())
-    })?;
+    let api_key = resp
+        .api_key
+        .clone()
+        .ok_or_else(|| CmdError::Server("POST /agents returned no api_key despite 201".into()))?;
     Ok(MintedAgent::Live {
         api_key,
         id: resp.id.map(|u| u.to_string()),
@@ -371,7 +390,7 @@ async fn mint_agent(ctx: &Ctx, args: &Args) -> Result<MintedAgent, CmdError> {
     })
 }
 
-fn build_dry_run_mint_envelope(env_path: &Path, intent: &MintIntent) -> serde_json::Value {
+fn build_dry_run_mint_envelope(cfg_path: &Path, intent: &MintIntent) -> serde_json::Value {
     json!({
         "agent": {
             "action": "would_mint",
@@ -379,8 +398,8 @@ fn build_dry_run_mint_envelope(env_path: &Path, intent: &MintIntent) -> serde_js
             "description": intent.description,
             "capabilities": intent.capabilities,
         },
-        "env_file": {
-            "path": env_path.display().to_string(),
+        "config_file": {
+            "path": cfg_path.display().to_string(),
             "written": false,
             "would_write": true,
         },
@@ -388,20 +407,53 @@ fn build_dry_run_mint_envelope(env_path: &Path, intent: &MintIntent) -> serde_js
     })
 }
 
-/// Layered api_key resolution: Ctx (flag / env var) wins, then env file,
-/// else [`CmdError::MissingApiKey`].
-fn resolve_api_key(ctx: &Ctx, env_file: &EnvFile) -> Result<String, CmdError> {
+/// Layered api_key resolution: Ctx (flag / env var / already-merged
+/// config value) wins, then the on-disk config, else
+/// [`CmdError::MissingApiKey`].
+///
+/// `Ctx::from_parts` already folds `cfg.api_key` into `ctx.api_key`, so
+/// by the time we get here the config lookup is a redundant last resort
+/// — kept for the test-driven path that constructs `Ctx` directly
+/// without going through `from_parts`.
+fn resolve_api_key(ctx: &Ctx, cfg: &Config) -> Result<String, CmdError> {
     if let Some(k) = ctx.api_key.as_deref() {
         if !k.is_empty() {
             return Ok(k.to_string());
         }
     }
-    if let Some(k) = env_file.get("TASKFAST_API_KEY") {
+    if let Some(k) = cfg.api_key.as_deref() {
         if !k.is_empty() {
             return Ok(k.to_string());
         }
     }
     Err(CmdError::MissingApiKey)
+}
+
+/// Build a remediation hint for the common "stale config" failure: the agent
+/// api_key stored in the config (or passed via flag/env) is rejected by the
+/// server. Lists the key's likely source and the minimum steps to recover.
+fn stale_key_hint(msg: &str, cfg_path: &Path, cfg: &Config, ctx: &Ctx, args: &Args) -> String {
+    let source = if cfg.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
+        format!("config file {}", cfg_path.display())
+    } else if ctx.api_key.is_some() {
+        "--api-key flag or TASKFAST_API_KEY env".to_string()
+    } else {
+        "unknown".to_string()
+    };
+    let had_pat = args.human_api_key.is_some();
+    let pat_note = if had_pat {
+        "\n  note: --human-api-key was provided but ignored because an existing api_key was found; \
+         the PAT mints a new agent only when no api_key is resolvable."
+    } else {
+        ""
+    };
+    format!(
+        "{msg}\n  hint: agent api_key rejected — likely stale (agent deleted or key rotated).\n  \
+         source: {source}\n  fix: delete {path} (and unset TASKFAST_API_KEY if set), then re-run \
+         `taskfast --env {env} init --human-api-key <tf_user_...>` to mint a fresh agent.{pat_note}",
+        path = cfg_path.display(),
+        env = ctx.environment.as_str(),
+    )
 }
 
 fn assert_active(profile: &taskfast_client::api::types::AgentProfile) -> Result<(), CmdError> {
@@ -481,8 +533,7 @@ async fn provision_wallet(
     }
     if !args.generate_wallet {
         return Err(CmdError::Usage(
-            "pass --wallet-address <0x...> or --generate-wallet (or --skip-wallet to defer)"
-                .into(),
+            "pass --wallet-address <0x...> or --generate-wallet (or --skip-wallet to defer)".into(),
         ));
     }
 
@@ -515,8 +566,7 @@ fn resolve_wallet_password(args: &Args) -> Result<String, CmdError> {
     }
     let path = args.wallet_password_file.as_deref().ok_or_else(|| {
         CmdError::Usage(
-            "--generate-wallet requires --wallet-password-file or TASKFAST_WALLET_PASSWORD"
-                .into(),
+            "--generate-wallet requires --wallet-password-file or TASKFAST_WALLET_PASSWORD".into(),
         )
     })?;
     let raw = std::fs::read_to_string(path).map_err(|e| {
@@ -557,11 +607,7 @@ enum FaucetOutcome {
     Failed { error: String },
 }
 
-async fn maybe_request_faucet(
-    args: &Args,
-    wallet: &WalletOutcome,
-    dry_run: bool,
-) -> FaucetOutcome {
+async fn maybe_request_faucet(args: &Args, wallet: &WalletOutcome, dry_run: bool) -> FaucetOutcome {
     if dry_run {
         return FaucetOutcome::Skipped { reason: "dry_run" };
     }
@@ -675,8 +721,8 @@ async fn maybe_configure_webhook(
 }
 
 fn build_envelope_data(
-    env_path: &Path,
-    env_file_written: bool,
+    cfg_path: &Path,
+    config_written: bool,
     wallet: &WalletOutcome,
     agent: &AgentOutcome,
     readiness: &AgentReadiness,
@@ -694,12 +740,12 @@ fn build_envelope_data(
         wallet_obj["keystore_path"] = json!(path.display().to_string());
     }
 
-    let mut env_obj = json!({
-        "path": env_path.display().to_string(),
-        "written": env_file_written,
+    let mut cfg_obj = json!({
+        "path": cfg_path.display().to_string(),
+        "written": config_written,
     });
-    if dry_run && !env_file_written {
-        env_obj["would_write"] = json!(true);
+    if dry_run && !config_written {
+        cfg_obj["would_write"] = json!(true);
     }
 
     let faucet_obj = match faucet {
@@ -778,7 +824,7 @@ fn build_envelope_data(
 
     let mut out = json!({
         "wallet": wallet_obj,
-        "env_file": env_obj,
+        "config_file": cfg_obj,
         "faucet": faucet_obj,
         "webhook": webhook_obj,
         "readiness": readiness,
@@ -809,7 +855,6 @@ mod tests {
             wallet_password_file: None,
             keystore_path: None,
             network: Network::Mainnet,
-            env_file: None,
             skip_wallet: false,
             skip_funding: false,
             human_api_key: None,
@@ -827,33 +872,38 @@ mod tests {
             api_key: key.map(String::from),
             environment: Environment::Local,
             api_base: None,
+            config_path: PathBuf::from("/dev/null"),
             dry_run: false,
             quiet: true,
         }
     }
 
-    #[test]
-    fn resolve_api_key_prefers_ctx_over_env_file() {
-        let ctx = ctx_with_key(Some("from-flag"));
-        let mut env = EnvFile::new();
-        env.set("TASKFAST_API_KEY", "from-file");
-        assert_eq!(resolve_api_key(&ctx, &env).unwrap(), "from-flag");
+    fn cfg_with_key(key: Option<&str>) -> Config {
+        Config {
+            api_key: key.map(str::to_string),
+            ..Config::default()
+        }
     }
 
     #[test]
-    fn resolve_api_key_falls_back_to_env_file() {
+    fn resolve_api_key_prefers_ctx_over_config() {
+        let ctx = ctx_with_key(Some("from-flag"));
+        let cfg = cfg_with_key(Some("from-file"));
+        assert_eq!(resolve_api_key(&ctx, &cfg).unwrap(), "from-flag");
+    }
+
+    #[test]
+    fn resolve_api_key_falls_back_to_config() {
         let ctx = ctx_with_key(None);
-        let mut env = EnvFile::new();
-        env.set("TASKFAST_API_KEY", "from-file");
-        assert_eq!(resolve_api_key(&ctx, &env).unwrap(), "from-file");
+        let cfg = cfg_with_key(Some("from-file"));
+        assert_eq!(resolve_api_key(&ctx, &cfg).unwrap(), "from-file");
     }
 
     #[test]
     fn resolve_api_key_empty_string_is_treated_as_absent() {
         let ctx = ctx_with_key(Some(""));
-        let mut env = EnvFile::new();
-        env.set("TASKFAST_API_KEY", "");
-        match resolve_api_key(&ctx, &env) {
+        let cfg = cfg_with_key(Some(""));
+        match resolve_api_key(&ctx, &cfg) {
             Err(CmdError::MissingApiKey) => {}
             other => panic!("expected MissingApiKey, got {other:?}"),
         }

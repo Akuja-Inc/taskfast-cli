@@ -8,15 +8,16 @@ use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use taskfast_cli::cmd::me::{Args, run};
+use taskfast_cli::cmd::me::{run, Args};
 use taskfast_cli::cmd::{CmdError, Ctx};
-use taskfast_cli::{Environment, Envelope};
+use taskfast_cli::{Envelope, Environment};
 
 fn ctx_for(server: &MockServer) -> Ctx {
     Ctx {
         api_key: Some("test-key".into()),
         environment: Environment::Local,
         api_base: Some(server.uri()),
+        config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
     }
@@ -109,7 +110,10 @@ async fn me_surfaces_not_ready_verbatim() {
     // the duplicated `ready_to_work` field is for.
     assert_eq!(v["ok"], true);
     assert_eq!(v["data"]["ready_to_work"], false);
-    assert_eq!(v["data"]["readiness"]["checks"]["wallet"]["status"], "missing");
+    assert_eq!(
+        v["data"]["readiness"]["checks"]["wallet"]["status"],
+        "missing"
+    );
     assert_eq!(
         v["data"]["readiness"]["checks"]["wallet"]["hint"],
         "POST /api/agents/me/wallet"
@@ -143,6 +147,7 @@ async fn me_without_api_key_errors_with_missing_api_key() {
         api_key: None,
         environment: Environment::Local,
         api_base: Some("http://unused".into()),
+        config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
     };

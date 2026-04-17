@@ -23,7 +23,6 @@
 use std::path::PathBuf;
 
 use alloy_primitives::{Address, Bytes};
-use alloy_signer_local::PrivateKeySigner;
 use clap::Parser;
 use serde_json::json;
 use uuid::Uuid;
@@ -31,8 +30,7 @@ use uuid::Uuid;
 use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
-use taskfast_agent::keystore::{self, KeySource};
-use taskfast_agent::tempo_rpc::{TempoRpcClient, sign_and_broadcast_erc20_transfer};
+use taskfast_agent::tempo_rpc::{sign_and_broadcast_erc20_transfer, TempoRpcClient};
 use taskfast_client::api::types::{
     CompletionCriterionInput, TaskDraftPrepareRequest, TaskDraftPrepareRequestAssignmentType,
     TaskDraftPrepareRequestPosterWalletAddress, TaskDraftSubmitRequest,
@@ -166,14 +164,12 @@ impl Network {
 
 pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     let wallet_address = args.wallet_address.as_deref().ok_or_else(|| {
-        CmdError::Usage(
-            "--wallet-address (or TEMPO_WALLET_ADDRESS) required to post a task".into(),
-        )
+        CmdError::Usage("--wallet-address (or TEMPO_WALLET_ADDRESS) required to post a task".into())
     })?;
     // Validate shape upfront so a typo never makes it to the server.
-    let _: Address = wallet_address
-        .parse()
-        .map_err(|e| CmdError::Usage(format!("--wallet-address is not a valid EVM address: {e}")))?;
+    let _: Address = wallet_address.parse().map_err(|e| {
+        CmdError::Usage(format!("--wallet-address is not a valid EVM address: {e}"))
+    })?;
 
     let direct_agent_id = match (args.assignment_type, args.direct_agent_id.as_deref()) {
         (AssignmentType::Direct, Some(s)) => Some(
@@ -248,17 +244,23 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
             prep.token_address
         ))
     })?;
-    let calldata = decode_0x_bytes(&prep.payload_to_sign).map_err(|e| {
-        CmdError::Server(format!("server returned invalid payload_to_sign: {e}"))
-    })?;
+    let calldata = decode_0x_bytes(&prep.payload_to_sign)
+        .map_err(|e| CmdError::Server(format!("server returned invalid payload_to_sign: {e}")))?;
 
     // Load signer only after prepare succeeds — avoids prompting the user for
     // a keystore password on a request that never leaves local validation.
-    let signer = load_signer_from_args(&args)?;
+    let signer = super::wallet_args::load_signer(
+        args.keystore.as_deref(),
+        args.wallet_password_file.as_deref(),
+        "submission fee",
+    )?;
     // Sanity: the wallet address in the draft must match what we're signing
     // with. A mismatch means the server recorded a charge on a wallet we
     // don't control, which would poll forever.
-    if signer.address() != wallet_address.parse::<Address>().unwrap() {
+    let parsed_wallet_address = wallet_address
+        .parse::<Address>()
+        .map_err(|_| CmdError::Usage(format!("invalid wallet address: {}", wallet_address)))?;
+    if signer.address() != parsed_wallet_address {
         return Err(CmdError::Usage(format!(
             "keystore address {:#x} does not match --wallet-address {}",
             signer.address(),
@@ -275,9 +277,9 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
 
     // Phase 2 — submit voucher. The field is named `signature` for historical
     // reasons; semantically it's a voucher (tx hash, in our path).
-    let signature: TaskDraftSubmitRequestSignature = tx_hash_hex.parse().map_err(|e| {
-        CmdError::Server(format!("tx hash rejected by schema pattern: {e}"))
-    })?;
+    let signature: TaskDraftSubmitRequestSignature = tx_hash_hex
+        .parse()
+        .map_err(|e| CmdError::Server(format!("tx hash rejected by schema pattern: {e}")))?;
     let submit_body = TaskDraftSubmitRequest { signature };
     let submitted = match client
         .inner()
@@ -316,13 +318,12 @@ fn resolve_criteria(
         let raw = std::fs::read_to_string(path).map_err(|e| {
             CmdError::Usage(format!("read --criteria-file {}: {e}", path.display()))
         })?;
-        let parsed: Vec<CompletionCriterionInput> =
-            serde_json::from_str(&raw).map_err(|e| {
-                CmdError::Usage(format!(
-                    "--criteria-file {} is not a JSON array of CompletionCriterionInput: {e}",
-                    path.display()
-                ))
-            })?;
+        let parsed: Vec<CompletionCriterionInput> = serde_json::from_str(&raw).map_err(|e| {
+            CmdError::Usage(format!(
+                "--criteria-file {} is not a JSON array of CompletionCriterionInput: {e}",
+                path.display()
+            ))
+        })?;
         out.extend(parsed);
     }
     for (i, raw) in inline.iter().enumerate() {
@@ -341,52 +342,11 @@ fn parse_iso_opt(
         None => Ok(None),
         Some(raw) => chrono::DateTime::parse_from_rfc3339(raw)
             .map(|d| Some(d.with_timezone(&chrono::Utc)))
-            .map_err(|e| {
-                CmdError::Usage(format!("{flag} not a valid RFC3339 timestamp: {e}"))
-            }),
+            .map_err(|e| CmdError::Usage(format!("{flag} not a valid RFC3339 timestamp: {e}"))),
     }
 }
 
 fn decode_0x_bytes(s: &str) -> Result<Vec<u8>, String> {
     let stripped = s.strip_prefix("0x").unwrap_or(s);
     hex::decode(stripped).map_err(|e| e.to_string())
-}
-
-fn load_signer_from_args(args: &Args) -> Result<PrivateKeySigner, CmdError> {
-    let raw = args.keystore.as_deref().ok_or_else(|| {
-        CmdError::Usage(
-            "--keystore (or TEMPO_KEY_SOURCE) is required to sign the submission fee".into(),
-        )
-    })?;
-    // `taskfast init` writes `file:/abs/path` to `TEMPO_KEY_SOURCE`. Accept
-    // both that and bare paths so callers can pass either form.
-    let path_str = raw.strip_prefix("file:").unwrap_or(raw);
-    let password = resolve_password(args)?;
-    let path = PathBuf::from(path_str);
-    keystore::load(&KeySource::File { path }, &password).map_err(CmdError::from)
-}
-
-fn resolve_password(args: &Args) -> Result<String, CmdError> {
-    if let Ok(pw) = std::env::var("TASKFAST_WALLET_PASSWORD") {
-        if !pw.is_empty() {
-            return Ok(pw);
-        }
-    }
-    let path = args.wallet_password_file.as_deref().ok_or_else(|| {
-        CmdError::Usage(
-            "TASKFAST_WALLET_PASSWORD or --wallet-password-file required to unlock keystore"
-                .into(),
-        )
-    })?;
-    let raw = std::fs::read_to_string(path).map_err(|e| {
-        CmdError::Usage(format!("read wallet password file {}: {e}", path.display()))
-    })?;
-    let trimmed = raw.trim_end_matches(['\n', '\r']);
-    if trimmed.is_empty() {
-        return Err(CmdError::Usage(format!(
-            "wallet password file {} is empty",
-            path.display()
-        )));
-    }
-    Ok(trimmed.to_string())
 }

@@ -4,9 +4,14 @@
 //! returns `Result<Envelope, CmdError>`; we print the envelope (unless
 //! `--quiet`) and exit with the matching code from [`exit::ExitCode`].
 
+// TODO: tighten doc coverage on public items + remove this allow.
+#![allow(missing_docs)]
+
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
-use taskfast_cli::{Environment, Envelope, cmd, exit};
+use taskfast_cli::{cmd, config::Config, exit, Envelope, Environment};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -19,14 +24,21 @@ struct Cli {
     #[arg(long, global = true, env = "TASKFAST_API_KEY")]
     api_key: Option<String>,
 
-    /// Target environment.
-    #[arg(long, global = true, default_value = "prod", env = "TASKFAST_ENV")]
-    env: Environment,
+    /// Target environment. When unset, falls back to the config file,
+    /// then to `prod`.
+    #[arg(long, global = true, env = "TASKFAST_ENV")]
+    env: Option<Environment>,
 
     /// Override the resolved base URL (bypasses env → URL mapping). Useful
     /// for pointing at a local dev server without touching prod defaults.
     #[arg(long, global = true, env = "TASKFAST_API")]
     api_base: Option<String>,
+
+    /// Path to the JSON config file. Default: `./.taskfast/config.json`.
+    /// Missing file is treated as empty (all fields come from flags /
+    /// env vars / defaults).
+    #[arg(long, global = true, env = "TASKFAST_CONFIG")]
+    config: Option<PathBuf>,
 
     /// Short-circuit mutations; reads pass through.
     #[arg(long, global = true)]
@@ -51,6 +63,9 @@ enum Command {
     Init(cmd::init::Args),
     /// Profile + readiness (GET /agents/me + /agents/me/readiness).
     Me(cmd::me::Args),
+
+    /// Liveness probe: single-attempt GET /agents/me with latency.
+    Ping(cmd::ping::Args),
     /// Task operations (list, get, submit, approve, dispute, cancel).
     #[command(subcommand)]
     Task(cmd::task::Command),
@@ -61,12 +76,43 @@ enum Command {
     Post(cmd::post::Args),
     /// Poster: sign a DistributionApproval and settle a task.
     Settle(cmd::settle::Args),
+    /// Poster: headless escrow signing for deferred-accept bids.
+    #[command(subcommand)]
+    Escrow(cmd::escrow::Command),
     /// Event polling (stream as JSON-lines).
     #[command(subcommand)]
     Events(cmd::events::Command),
     /// Webhook configuration, subscriptions, and delivery test.
     #[command(subcommand)]
     Webhook(cmd::webhook::Command),
+    /// Worker: browse open-market tasks (GET /tasks).
+    Discover(cmd::discover::Args),
+    /// Artifacts: list / get / upload / delete on a task.
+    #[command(subcommand)]
+    Artifact(cmd::artifact::Command),
+    /// Messages: send + thread listing on a task.
+    #[command(subcommand)]
+    Message(cmd::message::Command),
+    /// Reviews: create + list by task or by agent.
+    #[command(subcommand)]
+    Review(cmd::review::Command),
+    /// Payments: task escrow breakdown + agent earnings ledger.
+    #[command(subcommand)]
+    Payment(cmd::payment::Command),
+    /// Dispute detail on a task.
+    Dispute(cmd::dispute::Args),
+    /// Agent directory: list / get / update-me.
+    #[command(subcommand)]
+    Agent(cmd::agent::Command),
+    /// Platform: global config snapshot.
+    #[command(subcommand)]
+    Platform(cmd::platform::Command),
+    /// Wallet: on-chain balance for the caller's agent.
+    #[command(subcommand)]
+    Wallet(cmd::wallet::Command),
+    /// Inspect or edit the project-local JSON config.
+    #[command(subcommand)]
+    Config(cmd::config::Command),
 }
 
 #[tokio::main]
@@ -83,23 +129,58 @@ async fn main() -> std::process::ExitCode {
             .try_init();
     }
 
-    let ctx = cmd::Ctx {
-        api_key: cli.api_key,
-        environment: cli.env,
-        api_base: cli.api_base,
-        dry_run: cli.dry_run,
-        quiet: cli.quiet,
+    let cfg_path = cli.config.clone().unwrap_or_else(Config::default_path);
+    let cfg = match Config::load_or_migrate(&cfg_path) {
+        Ok(c) => c,
+        Err(e) => {
+            // Config load failure is fatal and happens before we have
+            // a Ctx — fall back to defaults for the error envelope.
+            if !cli.quiet {
+                let err = cmd::CmdError::Usage(format!("config: {e}"));
+                let env = cli.env.unwrap_or(cmd::DEFAULT_ENVIRONMENT);
+                Envelope::error(env, cli.dry_run, &err).emit();
+            }
+            return exit::ExitCode::Usage.into();
+        }
     };
 
+    let ctx = cmd::Ctx::from_parts(
+        cli.api_key,
+        cli.env,
+        cli.api_base,
+        Some(cfg_path),
+        cli.dry_run,
+        cli.quiet,
+        &cfg,
+    );
+
     let result = match cli.command {
+        // `events stream` writes JSONL to stdout and MUST bypass the
+        // Envelope wrapper — otherwise the trailing envelope would
+        // pollute the JSONL contract. Early return with its own exit.
+        Command::Events(cmd::events::Command::Stream(args)) => {
+            return cmd::events::stream::run(&ctx, args).await;
+        }
         Command::Init(a) => cmd::init::run(&ctx, a).await,
         Command::Me(a) => cmd::me::run(&ctx, a).await,
+        Command::Ping(a) => cmd::ping::run(&ctx, a).await,
         Command::Task(c) => cmd::task::run(&ctx, c).await,
         Command::Bid(c) => cmd::bid::run(&ctx, c).await,
         Command::Post(a) => cmd::post::run(&ctx, a).await,
         Command::Settle(a) => cmd::settle::run(&ctx, a).await,
+        Command::Escrow(c) => cmd::escrow::run(&ctx, c).await,
         Command::Events(c) => cmd::events::run(&ctx, c).await,
         Command::Webhook(c) => cmd::webhook::run(&ctx, c).await,
+        Command::Discover(a) => cmd::discover::run(&ctx, a).await,
+        Command::Artifact(c) => cmd::artifact::run(&ctx, c).await,
+        Command::Message(c) => cmd::message::run(&ctx, c).await,
+        Command::Review(c) => cmd::review::run(&ctx, c).await,
+        Command::Payment(c) => cmd::payment::run(&ctx, c).await,
+        Command::Dispute(a) => cmd::dispute::run(&ctx, a).await,
+        Command::Agent(c) => cmd::agent::run(&ctx, c).await,
+        Command::Platform(c) => cmd::platform::run(&ctx, c).await,
+        Command::Wallet(c) => cmd::wallet::run(&ctx, c).await,
+        Command::Config(c) => cmd::config::run(&ctx, c).await,
     };
 
     match result {
