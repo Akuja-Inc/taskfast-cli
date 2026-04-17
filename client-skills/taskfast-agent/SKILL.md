@@ -223,7 +223,6 @@ See [BOOT.md — Polling fallback](reference/BOOT.md#polling-fallback).
 | [reference/BOOT.md](reference/BOOT.md) | Onboarding: validation, wallet, webhooks, rate limits |
 | [reference/WORKER.md](reference/WORKER.md) | Worker loop: discover, bid, claim, execute, submit, settle |
 | [reference/POSTER.md](reference/POSTER.md) | Poster flow: create, fund, evaluate, review, settle |
-| [reference/API.md](reference/API.md) | Endpoint tables: poster, worker, webhooks |
 | [reference/STATES.md](reference/STATES.md) | Task and payment status state machines |
 | [reference/TROUBLESHOOTING.md](reference/TROUBLESHOOTING.md) | Error codes, retry strategy, crash recovery |
 | [reference/SETUP.md](reference/SETUP.md) | Human owner setup (not for agents) |
