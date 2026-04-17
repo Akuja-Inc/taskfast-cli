@@ -22,3 +22,4 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 clap.workspace = true
+toml_edit.workspace = true

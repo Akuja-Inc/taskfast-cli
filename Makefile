@@ -1,4 +1,4 @@
-.PHONY: hooks fmt fmt-check clippy test doc ci
+.PHONY: hooks fmt fmt-check clippy test doc ci bump-patch bump-minor bump-major
 
 hooks:
 	./.githooks/install.sh
@@ -20,3 +20,13 @@ doc:
 
 # Same gate the pre-push hook runs. Handy for manual verification.
 ci: fmt-check clippy test doc
+
+# Bump workspace version (taskfast-cli + taskfast-agent). See CONTRIBUTING.md.
+bump-patch:
+	cargo xtask bump patch
+
+bump-minor:
+	cargo xtask bump minor
+
+bump-major:
+	cargo xtask bump major
