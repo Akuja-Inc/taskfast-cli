@@ -1,0 +1,72 @@
+# Manually-triggered patch-release workflow.
+#
+# Click "Run workflow" in the Actions tab on the `main` branch. CI will:
+#   1. `cargo xtask bump patch` (bumps the 3 synced version sites + Cargo.lock)
+#   2. commit the diff as `chore(release): vX.Y.Z`
+#   3. tag `taskfast-cli-vX.Y.Z`
+#   4. push commit + tag via the RELEASE_PLZ_TOKEN secret — the tag push re-triggers
+#      release.yml (cargo-dist). A default GITHUB_TOKEN push would NOT trigger
+#      another workflow (GitHub anti-loop), hence the PAT.
+#
+# For minor/major releases, or if you prefer local control, run:
+#   cargo xtask bump <minor|major>
+#   git commit -am "chore(release): vX.Y.Z"
+#   git tag taskfast-cli-vX.Y.Z
+#   git push --follow-tags
+#
+# Required secret: RELEASE_PLZ_TOKEN
+#   Fine-grained PAT with `Contents: Read and write` on this repo, owned by a
+#   user/bot that is exempt from branch protection on `main`. Rotate periodically.
+
+name: Release bump (patch)
+
+on:
+  workflow_dispatch: {}
+
+# Prevent two clicks racing.
+concurrency:
+  group: release-bump
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # PAT (not GITHUB_TOKEN) so the subsequent tag push fires release.yml.
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Configure git identity
+        run: |
+          git config user.name 'taskfast-release-bot'
+          git config user.email 'taskfast-release-bot@users.noreply.github.com'
+
+      - name: Bump patch version
+        run: cargo xtask bump patch
+
+      - name: Read new version
+        id: version
+        run: |
+          V=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "taskfast-cli") | .version')
+          if [ -z "$V" ]; then
+            echo "failed to read taskfast-cli version from cargo metadata" >&2
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Commit, tag, push
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git add Cargo.toml Cargo.lock crates/taskfast-client/Cargo.toml
+          git commit -m "chore(release): v$VERSION"
+          git tag "taskfast-cli-v$VERSION"
+          git push --follow-tags
