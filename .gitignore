@@ -16,7 +16,7 @@ spec/openapi.normalized.yaml
 .taskfast-agent.env
 # Never commit secret material.
 *.pw
-wallet.*
+wallet.json
 *.key
 *.pem
 *.p12
