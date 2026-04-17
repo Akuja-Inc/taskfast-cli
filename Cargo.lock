@@ -3585,7 +3585,7 @@ dependencies = [
  "sha2",
  "taskfast-client",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid 1.23.0",
@@ -3601,7 +3601,7 @@ dependencies = [
  "alloy-signer-local",
  "alloy-sol-types",
  "hex",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3624,7 +3624,7 @@ dependencies = [
  "taskfast-chains",
  "taskfast-client",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
  "tracing",
@@ -3654,7 +3654,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "syn 2.0.117",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid 1.23.0",

@@ -28,7 +28,7 @@ tracing.workspace = true
 progenitor-client = "0.9"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
-uuid = { version = "1", features = ["serde", "v4"] }
+uuid.workspace = true
 rand = "0.8"
 regress = "0.10"
 base64 = "0.22"

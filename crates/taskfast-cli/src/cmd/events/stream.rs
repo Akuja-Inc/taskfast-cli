@@ -275,12 +275,12 @@ fn classify_frame(frame: &Value) -> FrameKind {
 
 fn phx_frame(join_ref: &str, msg_ref: &str, topic: &str, event: &str, payload: Value) -> String {
     serde_json::to_string(&json!([join_ref, msg_ref, topic, event, payload]))
-        .expect("phoenix frame serializes")
+        .expect("phoenix frame must serialize")
 }
 
 fn phx_frame_null_join(msg_ref: &str, topic: &str, event: &str, payload: Value) -> String {
     serde_json::to_string(&json!([Value::Null, msg_ref, topic, event, payload]))
-        .expect("phoenix frame serializes")
+        .expect("phoenix frame must serialize")
 }
 
 fn build_request(
