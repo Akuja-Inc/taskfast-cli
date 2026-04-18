@@ -19,6 +19,7 @@ fn ctx_for(server: &MockServer) -> Ctx {
         config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
+        ..Default::default()
     }
 }
 
@@ -30,6 +31,7 @@ fn anon_ctx_for(server: &MockServer) -> Ctx {
         config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
+        ..Default::default()
     }
 }
 
@@ -124,6 +126,7 @@ async fn ping_anonymous_surfaces_network_error_when_host_unreachable() {
         config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
+        ..Default::default()
     };
     let err = run(&ctx, Args)
         .await

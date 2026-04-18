@@ -30,7 +30,7 @@ use taskfast_client::api::types::WebhookConfigRequest;
 /// convenience default for `subscribe --default-events`; the
 /// authoritative list lives on the server and is surfaced by
 /// `webhook subscribe --list` (via `GET /webhooks/subscriptions`).
-const DEFAULT_WORKER_EVENTS: &[&str] = &[
+pub const DEFAULT_WORKER_EVENTS: &[&str] = &[
     "task_assigned",
     "bid_accepted",
     "bid_rejected",

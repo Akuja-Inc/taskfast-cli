@@ -26,6 +26,7 @@ fn ctx_for(server: &MockServer, key: Option<&str>) -> Ctx {
         config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
+        ..Default::default()
     }
 }
 
@@ -59,7 +60,7 @@ async fn list_mine_forwards_status_and_cursor_and_returns_tasks() {
         kind: ListKind::Mine,
         status: Some(TaskStatus::InProgress),
         cursor: Some("abc".into()),
-        limit: Some(5),
+        limit: 5,
     };
     let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
         .await
@@ -88,7 +89,7 @@ async fn list_queue_hits_queue_endpoint() {
         kind: ListKind::Queue,
         status: None,
         cursor: None,
-        limit: None,
+        limit: 20,
     };
     let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
         .await
@@ -114,7 +115,7 @@ async fn list_posted_hits_posted_endpoint() {
         kind: ListKind::Posted,
         status: None,
         cursor: None,
-        limit: None,
+        limit: 20,
     };
     let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
         .await
@@ -132,7 +133,7 @@ async fn list_status_with_non_mine_kind_is_usage_error() {
         kind: ListKind::Queue,
         status: Some(TaskStatus::Assigned),
         cursor: None,
-        limit: None,
+        limit: 20,
     };
     let err = run(&ctx_for(&server, Some("test-key")), Command::List(args))
         .await
@@ -141,6 +142,157 @@ async fn list_status_with_non_mine_kind_is_usage_error() {
         CmdError::Usage(msg) => assert!(msg.contains("--status"), "got: {msg}"),
         other => panic!("expected Usage, got {other:?}"),
     }
+}
+
+/// Fixture builder for the minimum required fields of `AgentTaskSummary`
+/// in the `/agents/me/tasks` response envelope.
+fn mine_task(id: &str, status: &str) -> serde_json::Value {
+    json!({
+        "id": id,
+        "title": format!("task {id}"),
+        "description": "desc",
+        "budget_max": "1.00",
+        "status": status,
+    })
+}
+
+#[tokio::test]
+async fn list_mine_defaults_to_active_filter_when_status_absent() {
+    // PLAN #12: raw `task list --kind mine` with no `--status` should
+    // drop closed/cancelled noise client-side. Active set =
+    // {assigned,in_progress,under_review,disputed,remedied}.
+    let server = MockServer::start().await;
+    let body = json!({
+        "data": [
+            mine_task("00000000-0000-0000-0000-000000000001", "in_progress"),
+            mine_task("00000000-0000-0000-0000-000000000002", "completed"),
+            mine_task("00000000-0000-0000-0000-000000000003", "assigned"),
+            mine_task("00000000-0000-0000-0000-000000000004", "cancelled"),
+            mine_task("00000000-0000-0000-0000-000000000005", "under_review"),
+        ],
+        "meta": paginated(None),
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/agents/me/tasks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+
+    let args = ListArgs {
+        kind: ListKind::Mine,
+        status: None,
+        cursor: None,
+        limit: 20,
+    };
+    let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
+        .await
+        .expect("list mine should succeed");
+
+    let v = envelope_value(&envelope);
+    let tasks = v["data"]["tasks"].as_array().expect("tasks array");
+    let statuses: Vec<String> = tasks
+        .iter()
+        .map(|t| t["status"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(statuses, vec!["in_progress", "assigned", "under_review"]);
+}
+
+#[tokio::test]
+async fn list_mine_status_all_disables_active_filter() {
+    // Escape hatch: `--status all` preserves the historical "everything"
+    // view for operators who rely on it.
+    let server = MockServer::start().await;
+    let body = json!({
+        "data": [
+            mine_task("00000000-0000-0000-0000-000000000001", "in_progress"),
+            mine_task("00000000-0000-0000-0000-000000000002", "completed"),
+            mine_task("00000000-0000-0000-0000-000000000003", "cancelled"),
+        ],
+        "meta": paginated(None),
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/agents/me/tasks"))
+        .and(query_param("status", "all"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+
+    let args = ListArgs {
+        kind: ListKind::Mine,
+        status: Some(TaskStatus::All),
+        cursor: None,
+        limit: 20,
+    };
+    let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
+        .await
+        .expect("list mine should succeed");
+
+    let v = envelope_value(&envelope);
+    let tasks = v["data"]["tasks"].as_array().expect("tasks array");
+    assert_eq!(tasks.len(), 3, "--status all must not filter");
+}
+
+#[tokio::test]
+async fn list_mine_default_filter_over_fetches_to_preserve_limit() {
+    // Mitigation for Path B (client-side filter): over-fetch 2× so
+    // `--limit` stays approximately honored even when some server rows
+    // get filtered out. Strict pagination math is sacrificed — documented
+    // caveat until the server grows an `Active` aggregate.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/agents/me/tasks"))
+        .and(query_param("limit", "10"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [],
+            "meta": paginated(None),
+        })))
+        .mount(&server)
+        .await;
+
+    let args = ListArgs {
+        kind: ListKind::Mine,
+        status: None,
+        cursor: None,
+        limit: 5,
+    };
+    run(&ctx_for(&server, Some("test-key")), Command::List(args))
+        .await
+        .expect("list mine should succeed");
+}
+
+#[tokio::test]
+async fn list_mine_default_filter_truncates_to_limit() {
+    // After over-fetch + filter, result must honor the user-supplied
+    // limit — never surface more rows than they asked for.
+    let server = MockServer::start().await;
+    let body = json!({
+        "data": [
+            mine_task("00000000-0000-0000-0000-000000000001", "in_progress"),
+            mine_task("00000000-0000-0000-0000-000000000002", "assigned"),
+            mine_task("00000000-0000-0000-0000-000000000003", "under_review"),
+            mine_task("00000000-0000-0000-0000-000000000004", "disputed"),
+        ],
+        "meta": paginated(None),
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/agents/me/tasks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+
+    let args = ListArgs {
+        kind: ListKind::Mine,
+        status: None,
+        cursor: None,
+        limit: 2,
+    };
+    let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
+        .await
+        .expect("list mine should succeed");
+
+    let v = envelope_value(&envelope);
+    let tasks = v["data"]["tasks"].as_array().expect("tasks array");
+    assert_eq!(tasks.len(), 2);
 }
 
 #[tokio::test]
@@ -228,7 +380,7 @@ async fn list_401_surfaces_as_auth_error() {
         kind: ListKind::Mine,
         status: None,
         cursor: None,
-        limit: None,
+        limit: 20,
     };
     let err = run(&ctx_for(&server, Some("test-key")), Command::List(args))
         .await
@@ -246,7 +398,7 @@ async fn missing_api_key_errors_before_any_http_call() {
         kind: ListKind::Mine,
         status: None,
         cursor: None,
-        limit: None,
+        limit: 20,
     };
     let err = run(&ctx_for(&server, None), Command::List(args))
         .await

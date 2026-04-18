@@ -24,6 +24,7 @@ fn ctx_for(server: &MockServer, dry_run: bool) -> Ctx {
         config_path: std::path::PathBuf::from("/dev/null"),
         dry_run,
         quiet: true,
+        ..Default::default()
     }
 }
 

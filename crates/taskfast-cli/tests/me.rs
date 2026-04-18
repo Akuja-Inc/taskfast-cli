@@ -20,6 +20,7 @@ fn ctx_for(server: &MockServer) -> Ctx {
         config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
+        ..Default::default()
     }
 }
 
@@ -150,6 +151,7 @@ async fn me_without_api_key_errors_with_missing_api_key() {
         config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
+        ..Default::default()
     };
     let err = run(&ctx, Args { resume: false })
         .await

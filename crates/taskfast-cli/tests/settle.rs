@@ -34,6 +34,7 @@ fn ctx_for(server: &MockServer, key: Option<&str>) -> Ctx {
         config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
+        ..Default::default()
     }
 }
 
@@ -73,6 +74,7 @@ fn base_args(keys: &Keys) -> Args {
         keystore: Some(keys.keystore_path.display().to_string()),
         wallet_password_file: Some(keys.password_path.clone()),
         wallet_address: None,
+        yes: false,
     }
 }
 

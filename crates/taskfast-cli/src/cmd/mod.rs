@@ -9,8 +9,10 @@
 //! silently re-homes a variant will break the build.
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
+use rust_decimal::Decimal;
 use thiserror::Error;
 
 use crate::config::Config;
@@ -58,12 +60,54 @@ pub struct Ctx {
     /// `TASKFAST_CONFIG`). Subcommands that persist state (init,
     /// `config set`, etc.) write here; tests construct this directly.
     pub config_path: PathBuf,
+    /// Poster wallet address from config — fallback when no flag/env set
+    /// on `post`/`settle`/`escrow sign`. Persisted by `taskfast init`.
+    pub wallet_address: Option<String>,
+    /// Keystore path from config — fallback for the same trio.
+    pub keystore_path: Option<PathBuf>,
+    /// Stablecoin-units threshold above which mutating commands
+    /// (`post`, `settle`) require an explicit `--yes`. `None` = gate
+    /// disabled. Set via `confirm_above_budget` in the JSON config.
+    pub confirm_above_budget: Option<String>,
+    /// Default log format for `--verbose` output. `None` = text. Set
+    /// via `log_format` in the JSON config or `TASKFAST_LOG_FORMAT` env.
+    pub log_format: Option<String>,
+    /// Poster approval-deadline horizon for `escrow sign`. Parsed from
+    /// the config file's `approval_horizon` at startup (fail-fast on
+    /// malformed values). `None` = built-in default (7 days). The
+    /// `--approval-horizon` flag / `TASKFAST_APPROVAL_HORIZON` env
+    /// still win over this.
+    pub approval_horizon: Option<Duration>,
+    /// Receipt-polling ceiling for `escrow sign`. Parsed from the
+    /// config file's `receipt_timeout` at startup. `None` = network-aware
+    /// default (3min mainnet, 1min testnet). `--receipt-timeout` /
+    /// `TASKFAST_RECEIPT_TIMEOUT` still win over this.
+    pub receipt_timeout: Option<Duration>,
     pub dry_run: bool,
     pub quiet: bool,
 }
 
 /// Default environment when neither a flag nor the config file pins one.
 pub const DEFAULT_ENVIRONMENT: Environment = Environment::Prod;
+
+impl Default for Ctx {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            environment: DEFAULT_ENVIRONMENT,
+            api_base: None,
+            config_path: PathBuf::from("/dev/null"),
+            wallet_address: None,
+            keystore_path: None,
+            confirm_above_budget: None,
+            log_format: None,
+            approval_horizon: None,
+            receipt_timeout: None,
+            dry_run: false,
+            quiet: false,
+        }
+    }
+}
 
 impl Ctx {
     /// Build a [`Ctx`] by layering CLI flags (including clap's
@@ -85,15 +129,25 @@ impl Ctx {
         cli_dry_run: bool,
         cli_quiet: bool,
         cfg: &Config,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, CmdError> {
+        let approval_horizon =
+            parse_duration_cfg(cfg.approval_horizon.as_deref(), "approval_horizon")?;
+        let receipt_timeout =
+            parse_duration_cfg(cfg.receipt_timeout.as_deref(), "receipt_timeout")?;
+        Ok(Self {
             api_key: cli_api_key.or_else(|| cfg.api_key.clone()),
             environment: cli_env.or(cfg.environment).unwrap_or(DEFAULT_ENVIRONMENT),
             api_base: cli_api_base.or_else(|| cfg.api_base.clone()),
             config_path: cli_config_path.unwrap_or_else(Config::default_path),
+            wallet_address: cfg.wallet_address.clone(),
+            keystore_path: cfg.keystore_path.clone(),
+            confirm_above_budget: cfg.confirm_above_budget.clone(),
+            log_format: cfg.log_format.clone(),
+            approval_horizon,
+            receipt_timeout,
             dry_run: cli_dry_run,
             quiet: cli_quiet,
-        }
+        })
     }
 
     /// Resolved API base URL: override if set, else env default.
@@ -110,6 +164,73 @@ impl Ctx {
         let key = self.api_key.as_deref().ok_or(CmdError::MissingApiKey)?;
         TaskFastClient::from_api_key(self.base_url(), key).map_err(CmdError::from)
     }
+
+    /// Fail-closed budget gate. When `confirm_above_budget` is set in the
+    /// config, any mutation whose budget exceeds it must be opted into via
+    /// `--yes`. By design there's no TTY prompt — automation-first stays
+    /// intact; the gate just stops a fat-finger script before it broadcasts
+    /// an oversized ERC-20 approve. `verb` is the action ("post a task",
+    /// "settle this task") for the error message.
+    pub fn enforce_budget_gate(
+        &self,
+        budget: Option<&str>,
+        yes: bool,
+        verb: &str,
+    ) -> Result<(), CmdError> {
+        let threshold_str = match self.confirm_above_budget.as_deref() {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+        let budget_str = match budget {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+        // Decimal (not f64): budget values are decimal strings like "0.1"
+        // that f64 cannot represent exactly. An f64 compare could flip the
+        // gate around an exact-boundary threshold, which defeats the whole
+        // point of a safety rail against oversized approvals.
+        let threshold = Decimal::from_str(threshold_str).map_err(|_| {
+            CmdError::Usage(format!(
+                "config `confirm_above_budget` is not a decimal: {threshold_str:?}"
+            ))
+        })?;
+        let amount = Decimal::from_str(budget_str)
+            .map_err(|_| CmdError::Usage(format!("budget {budget_str:?} is not a decimal")))?;
+        if amount > threshold && !yes {
+            return Err(CmdError::Usage(format!(
+                "refusing to {verb}: budget {amount} exceeds confirm_above_budget \
+                 {threshold} (pass --yes to override)"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Parse a human-readable duration string from the config file,
+/// wrapping a malformed value in [`CmdError::Usage`] that names the
+/// field. Startup-time parsing lets a bad `approval_horizon: "7xyz"`
+/// surface before any on-chain operation instead of mid-`escrow sign`.
+fn parse_duration_cfg(
+    raw: Option<&str>,
+    field: &'static str,
+) -> Result<Option<Duration>, CmdError> {
+    match raw {
+        None => Ok(None),
+        Some(s) => humantime::parse_duration(s).map(Some).map_err(|e| {
+            CmdError::Usage(format!("config `{field}` is not a duration: {s:?} ({e})"))
+        }),
+    }
+}
+
+/// Resolve a duration with the CLI precedence: flag > Ctx (config) > default.
+/// Pulled out so #9 (`approval_horizon`) and #10 (`receipt_timeout`) share one
+/// pinning path — and tests exercise the precedence once, not per command.
+pub fn resolve_duration(
+    flag: Option<Duration>,
+    ctx_field: Option<Duration>,
+    default: Duration,
+) -> Duration {
+    flag.or(ctx_field).unwrap_or(default)
 }
 
 pub type CmdResult = Result<Envelope, CmdError>;
@@ -316,6 +437,7 @@ mod tests {
             config_path: PathBuf::from("/dev/null"),
             dry_run: false,
             quiet: false,
+            ..Default::default()
         };
         assert_eq!(ctx.base_url(), "http://localhost:9999");
     }
@@ -334,6 +456,7 @@ mod tests {
                 config_path: PathBuf::from("/dev/null"),
                 dry_run: false,
                 quiet: false,
+                ..Default::default()
             };
             assert_eq!(ctx.base_url(), expected);
         }
@@ -348,6 +471,7 @@ mod tests {
             config_path: PathBuf::from("/dev/null"),
             dry_run: false,
             quiet: false,
+            ..Default::default()
         };
         match ctx.client() {
             Err(CmdError::MissingApiKey) => {}
@@ -365,6 +489,7 @@ mod tests {
             config_path: PathBuf::from("/dev/null"),
             dry_run: false,
             quiet: false,
+            ..Default::default()
         };
         ctx.client().expect("client should build with a valid key");
     }
@@ -383,6 +508,181 @@ mod tests {
     }
 
     #[test]
+    fn from_parts_threads_wallet_keystore_confirm_log_format_from_config() {
+        let cfg = Config {
+            wallet_address: Some("0xfeed".into()),
+            keystore_path: Some(PathBuf::from("/tmp/k.json")),
+            confirm_above_budget: Some("500".into()),
+            log_format: Some("json".into()),
+            ..Config::default()
+        };
+        let ctx = Ctx::from_parts(None, None, None, None, false, false, &cfg).expect("valid cfg");
+        assert_eq!(ctx.wallet_address.as_deref(), Some("0xfeed"));
+        assert_eq!(
+            ctx.keystore_path.as_deref(),
+            Some(std::path::Path::new("/tmp/k.json"))
+        );
+        assert_eq!(ctx.confirm_above_budget.as_deref(), Some("500"));
+        assert_eq!(ctx.log_format.as_deref(), Some("json"));
+    }
+
+    #[test]
+    fn from_parts_parses_approval_horizon_from_config() {
+        let cfg = Config {
+            approval_horizon: Some("7d".into()),
+            ..Config::default()
+        };
+        let ctx = Ctx::from_parts(None, None, None, None, false, false, &cfg).expect("parse 7d");
+        assert_eq!(ctx.approval_horizon, Some(Duration::from_hours(24 * 7)));
+    }
+
+    #[test]
+    fn from_parts_parses_receipt_timeout_from_config() {
+        let cfg = Config {
+            receipt_timeout: Some("3min".into()),
+            ..Config::default()
+        };
+        let ctx = Ctx::from_parts(None, None, None, None, false, false, &cfg).expect("parse 3min");
+        assert_eq!(ctx.receipt_timeout, Some(Duration::from_mins(3)));
+    }
+
+    #[test]
+    fn from_parts_rejects_malformed_approval_horizon() {
+        let cfg = Config {
+            approval_horizon: Some("7xyz".into()),
+            ..Config::default()
+        };
+        let err = Ctx::from_parts(None, None, None, None, false, false, &cfg)
+            .err()
+            .expect("malformed config must fail at startup");
+        match err {
+            CmdError::Usage(msg) => {
+                assert!(msg.contains("approval_horizon"), "msg: {msg}");
+                assert!(msg.contains("7xyz"), "msg: {msg}");
+            }
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_parts_rejects_malformed_receipt_timeout() {
+        let cfg = Config {
+            receipt_timeout: Some("nope".into()),
+            ..Config::default()
+        };
+        let err = Ctx::from_parts(None, None, None, None, false, false, &cfg)
+            .err()
+            .expect("malformed timeout = startup error");
+        assert!(matches!(err, CmdError::Usage(msg) if msg.contains("receipt_timeout")));
+    }
+
+    #[test]
+    fn from_parts_duration_fields_none_when_config_absent() {
+        let ctx = Ctx::from_parts(None, None, None, None, false, false, &Config::default())
+            .expect("default cfg is valid");
+        assert!(ctx.approval_horizon.is_none());
+        assert!(ctx.receipt_timeout.is_none());
+    }
+
+    #[test]
+    fn resolve_duration_flag_wins_over_ctx_and_default() {
+        let out = resolve_duration(
+            Some(Duration::from_secs(10)),
+            Some(Duration::from_secs(20)),
+            Duration::from_secs(30),
+        );
+        assert_eq!(out, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn resolve_duration_ctx_wins_over_default_when_no_flag() {
+        let out = resolve_duration(None, Some(Duration::from_secs(20)), Duration::from_secs(30));
+        assert_eq!(out, Duration::from_secs(20));
+    }
+
+    #[test]
+    fn resolve_duration_falls_back_to_default() {
+        let out = resolve_duration(None, None, Duration::from_secs(30));
+        assert_eq!(out, Duration::from_secs(30));
+    }
+
+    fn ctx_with_threshold(threshold: Option<&str>) -> Ctx {
+        Ctx {
+            confirm_above_budget: threshold.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn budget_gate_no_op_when_threshold_unset() {
+        let ctx = ctx_with_threshold(None);
+        ctx.enforce_budget_gate(Some("99999"), false, "post a task")
+            .expect("no threshold = no gate");
+    }
+
+    #[test]
+    fn budget_gate_no_op_when_budget_absent() {
+        let ctx = ctx_with_threshold(Some("100"));
+        ctx.enforce_budget_gate(None, false, "post a task")
+            .expect("no budget = nothing to compare");
+    }
+
+    #[test]
+    fn budget_gate_passes_when_under_threshold() {
+        let ctx = ctx_with_threshold(Some("100"));
+        ctx.enforce_budget_gate(Some("50"), false, "post a task")
+            .expect("under threshold passes without --yes");
+    }
+
+    #[test]
+    fn budget_gate_passes_at_threshold_boundary() {
+        let ctx = ctx_with_threshold(Some("100"));
+        ctx.enforce_budget_gate(Some("100"), false, "post a task")
+            .expect("equal-to-threshold passes (gate is strict >)");
+    }
+
+    #[test]
+    fn budget_gate_blocks_above_threshold_without_yes() {
+        let ctx = ctx_with_threshold(Some("100"));
+        let err = ctx
+            .enforce_budget_gate(Some("100.01"), false, "post a task")
+            .expect_err("over threshold without --yes must fail");
+        match err {
+            CmdError::Usage(msg) => {
+                assert!(msg.contains("--yes"), "msg: {msg}");
+                assert!(msg.contains("post a task"), "msg: {msg}");
+            }
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn budget_gate_passes_above_threshold_with_yes() {
+        let ctx = ctx_with_threshold(Some("100"));
+        ctx.enforce_budget_gate(Some("9999"), true, "post a task")
+            .expect("--yes overrides the gate");
+    }
+
+    #[test]
+    fn budget_gate_uses_decimal_not_float_precision() {
+        // f64 parsing would round "0.30000000000000004" to 0.3 and let it
+        // slip past a "0.3" threshold. Decimal preserves every digit so
+        // the gate correctly blocks.
+        let ctx = ctx_with_threshold(Some("0.3"));
+        ctx.enforce_budget_gate(Some("0.30000000000000004"), false, "post a task")
+            .expect_err("decimal compare must detect trailing precision");
+    }
+
+    #[test]
+    fn budget_gate_rejects_non_decimal_threshold() {
+        let ctx = ctx_with_threshold(Some("not-a-number"));
+        let err = ctx
+            .enforce_budget_gate(Some("50"), false, "post a task")
+            .expect_err("garbage threshold = usage error");
+        assert!(matches!(err, CmdError::Usage(_)));
+    }
+
+    #[test]
     fn from_parts_flag_wins_over_config() {
         let cfg = cfg_with(
             Some("cfg_key"),
@@ -397,7 +697,8 @@ mod tests {
             false,
             false,
             &cfg,
-        );
+        )
+        .expect("valid cfg");
         assert_eq!(ctx.api_key.as_deref(), Some("flag_key"));
         assert_eq!(ctx.environment, Environment::Local);
         assert_eq!(ctx.api_base.as_deref(), Some("http://flag"));
@@ -410,7 +711,7 @@ mod tests {
             Some(Environment::Staging),
             Some("http://cfg"),
         );
-        let ctx = Ctx::from_parts(None, None, None, None, false, false, &cfg);
+        let ctx = Ctx::from_parts(None, None, None, None, false, false, &cfg).expect("valid cfg");
         assert_eq!(ctx.api_key.as_deref(), Some("cfg_key"));
         assert_eq!(ctx.environment, Environment::Staging);
         assert_eq!(ctx.api_base.as_deref(), Some("http://cfg"));
@@ -418,7 +719,8 @@ mod tests {
 
     #[test]
     fn from_parts_defaults_when_nothing_set() {
-        let ctx = Ctx::from_parts(None, None, None, None, false, false, &Config::default());
+        let ctx = Ctx::from_parts(None, None, None, None, false, false, &Config::default())
+            .expect("default cfg is valid");
         assert!(ctx.api_key.is_none());
         assert_eq!(ctx.environment, DEFAULT_ENVIRONMENT);
         assert!(ctx.api_base.is_none());
@@ -443,7 +745,8 @@ mod tests {
             false,
             false,
             &cfg,
-        );
+        )
+        .expect("valid cfg");
         assert_eq!(ctx.api_key.as_deref(), Some("flag_key"));
         assert_eq!(ctx.environment, Environment::Staging);
         assert_eq!(ctx.api_base.as_deref(), Some("http://cfg"));
@@ -452,7 +755,8 @@ mod tests {
     #[test]
     fn from_parts_dry_run_and_quiet_are_invocation_scoped() {
         // These never come from config, only from the CLI.
-        let ctx = Ctx::from_parts(None, None, None, None, true, true, &Config::default());
+        let ctx = Ctx::from_parts(None, None, None, None, true, true, &Config::default())
+            .expect("default cfg is valid");
         assert!(ctx.dry_run);
         assert!(ctx.quiet);
     }

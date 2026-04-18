@@ -235,6 +235,7 @@ mod tests {
             config_path: path,
             dry_run,
             quiet: true,
+            ..Default::default()
         }
     }
 

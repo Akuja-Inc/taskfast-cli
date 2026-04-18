@@ -28,6 +28,7 @@ fn ctx_for(server: &MockServer, key: Option<&str>, config_path: PathBuf, dry_run
         config_path,
         dry_run,
         quiet: true,
+        ..Default::default()
     }
 }
 
@@ -39,7 +40,7 @@ fn base_args() -> Args {
         keystore_path: None,
         network: Network::Testnet,
         skip_wallet: false,
-        skip_funding: true,
+        fund: false,
         human_api_key: None,
         agent_name: "taskfast-agent".into(),
         agent_description: "Headless agent registered via taskfast init".into(),
@@ -47,6 +48,7 @@ fn base_args() -> Args {
         webhook_url: None,
         webhook_secret_file: None,
         webhook_events: Vec::new(),
+        no_default_events: false,
     }
 }
 

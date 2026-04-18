@@ -50,8 +50,10 @@ pub struct Args {
     #[arg(long)]
     pub cursor: Option<String>,
 
-    #[arg(long)]
-    pub limit: Option<i64>,
+    /// Max tasks per page. Defaults to 50 — predictable batch size for
+    /// agent worker loops without accidentally pulling a huge backlog.
+    #[arg(long, default_value_t = 50)]
+    pub limit: i64,
 }
 
 /// clap-friendly mirror of `ListOpenTasksStatus`.
@@ -101,7 +103,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
             args.budget_min,
             capabilities_vec.as_ref(),
             args.cursor.as_deref(),
-            args.limit,
+            Some(args.limit),
             args.status.map(Into::into),
         )
         .await

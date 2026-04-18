@@ -36,6 +36,7 @@ fn ctx_for(server: &MockServer, key: Option<&str>) -> Ctx {
         config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
+        ..Default::default()
     }
 }
 
@@ -73,6 +74,8 @@ fn base_args(keys: &Keys) -> SignArgs {
         wallet_address: None,
         rpc_url: Some("http://rpc.invalid".into()), // never hit in dry-run
         skip_allowance_check: false,
+        approval_horizon: None,
+        receipt_timeout: None,
     }
 }
 
@@ -122,6 +125,103 @@ async fn mount_readiness(server: &MockServer) {
         .respond_with(ResponseTemplate::new(200).set_body_json(readiness_json()))
         .mount(server)
         .await;
+}
+
+/// Absolute tolerance for deadline-window assertions: the test grabs
+/// `now` seconds before/after the call, so any clock skew inside `sign()`
+/// sits inside this envelope.
+const DEADLINE_SLOP_SECS: u64 = 10;
+
+fn assert_deadline_near(deadline: u64, expected_horizon_secs: u64) {
+    let now = u64::try_from(chrono::Utc::now().timestamp()).expect("clock");
+    let low = now
+        .saturating_add(expected_horizon_secs)
+        .saturating_sub(DEADLINE_SLOP_SECS);
+    let high = now
+        .saturating_add(expected_horizon_secs)
+        .saturating_add(DEADLINE_SLOP_SECS);
+    assert!(
+        deadline >= low && deadline <= high,
+        "deadline {deadline} outside [{low}, {high}] for horizon {expected_horizon_secs}s"
+    );
+}
+
+#[tokio::test]
+async fn escrow_sign_dry_run_uses_seven_day_default_deadline() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    mount_params(&server, escrow_params_json(), 200).await;
+    mount_readiness(&server).await;
+
+    let mut ctx = ctx_for(&server, Some("k"));
+    ctx.dry_run = true;
+
+    let env = run(&ctx, Command::Sign(base_args(&keys)))
+        .await
+        .expect("dry-run");
+    let deadline = envelope_value(&env)["data"]["deadline"]
+        .as_u64()
+        .expect("deadline");
+    assert_deadline_near(deadline, 7 * 24 * 60 * 60);
+}
+
+#[tokio::test]
+async fn escrow_sign_dry_run_flag_overrides_default_horizon() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    mount_params(&server, escrow_params_json(), 200).await;
+    mount_readiness(&server).await;
+
+    let mut ctx = ctx_for(&server, Some("k"));
+    ctx.dry_run = true;
+    let mut args = base_args(&keys);
+    args.approval_horizon = Some(std::time::Duration::from_hours(24)); // 1d
+
+    let env = run(&ctx, Command::Sign(args)).await.expect("dry-run");
+    let deadline = envelope_value(&env)["data"]["deadline"]
+        .as_u64()
+        .expect("deadline");
+    assert_deadline_near(deadline, 24 * 60 * 60);
+}
+
+#[tokio::test]
+async fn escrow_sign_dry_run_ctx_horizon_used_when_flag_absent() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    mount_params(&server, escrow_params_json(), 200).await;
+    mount_readiness(&server).await;
+
+    let mut ctx = ctx_for(&server, Some("k"));
+    ctx.dry_run = true;
+    ctx.approval_horizon = Some(std::time::Duration::from_hours(2)); // 2h
+
+    let env = run(&ctx, Command::Sign(base_args(&keys)))
+        .await
+        .expect("dry-run");
+    let deadline = envelope_value(&env)["data"]["deadline"]
+        .as_u64()
+        .expect("deadline");
+    assert_deadline_near(deadline, 2 * 60 * 60);
+}
+
+#[tokio::test]
+async fn escrow_sign_dry_run_flag_beats_ctx() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    mount_params(&server, escrow_params_json(), 200).await;
+    mount_readiness(&server).await;
+
+    let mut ctx = ctx_for(&server, Some("k"));
+    ctx.dry_run = true;
+    ctx.approval_horizon = Some(std::time::Duration::from_hours(24)); // 1d
+    let mut args = base_args(&keys);
+    args.approval_horizon = Some(std::time::Duration::from_hours(1)); // 1h — flag wins
+
+    let env = run(&ctx, Command::Sign(args)).await.expect("dry-run");
+    let deadline = envelope_value(&env)["data"]["deadline"]
+        .as_u64()
+        .expect("deadline");
+    assert_deadline_near(deadline, 60 * 60);
 }
 
 #[tokio::test]

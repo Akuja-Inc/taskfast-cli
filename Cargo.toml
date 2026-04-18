@@ -28,7 +28,7 @@ serde_yaml = "0.9"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 uuid = { version = "1", features = ["serde", "v4"] }
@@ -46,6 +46,7 @@ sha2 = "0.10"
 hex = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 toml_edit = "0.25"
+rust_decimal = { version = "1", default-features = false, features = ["std"] }
 
 taskfast-client = { path = "crates/taskfast-client", version = "0.3.0" }
 taskfast-chains = { path = "crates/taskfast-chains", version = "0.1.0", default-features = false }

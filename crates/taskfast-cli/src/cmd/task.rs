@@ -112,7 +112,10 @@ pub struct ListArgs {
     pub kind: ListKind,
 
     /// Filter by task status. Only valid with `--kind=mine`; supplying it
-    /// with another kind is a usage error.
+    /// with another kind is a usage error. When omitted on `--kind=mine`,
+    /// results are filtered client-side to the active set (assigned /
+    /// in_progress / under_review / disputed / remedied). Pass
+    /// `--status all` to restore the unfiltered historical view.
     #[arg(long)]
     pub status: Option<TaskStatus>,
 
@@ -120,9 +123,10 @@ pub struct ListArgs {
     #[arg(long)]
     pub cursor: Option<String>,
 
-    /// Max items per page. Server enforces its own ceiling; we pass through.
-    #[arg(long)]
-    pub limit: Option<i64>,
+    /// Max items per page. Defaults to 20 — keeps `task list` envelopes
+    /// compact for routine worker polling.
+    #[arg(long, default_value_t = 20)]
+    pub limit: i64,
 }
 
 #[derive(Debug, Parser)]
@@ -149,9 +153,9 @@ pub struct BidsArgs {
     #[arg(long)]
     pub cursor: Option<String>,
 
-    /// Max items per page.
-    #[arg(long)]
-    pub limit: Option<i64>,
+    /// Max items per page. Defaults to 20.
+    #[arg(long, default_value_t = 20)]
+    pub limit: i64,
 }
 
 #[derive(Debug, Parser)]
@@ -653,7 +657,7 @@ async fn bids(ctx: &Ctx, args: BidsArgs) -> CmdResult {
     let client = ctx.client()?;
     let resp = match client
         .inner()
-        .list_task_bids(&task_id, args.cursor.as_deref(), args.limit)
+        .list_task_bids(&task_id, args.cursor.as_deref(), Some(args.limit))
         .await
     {
         Ok(v) => v.into_inner(),
@@ -753,22 +757,58 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
     Ok(Envelope::success(ctx.environment, ctx.dry_run, data))
 }
 
+/// Task statuses considered "active" by the default `list --kind mine`
+/// filter. Everything outside this set (completed, cancelled, expired,
+/// …) is treated as closed noise and dropped unless the caller opts in
+/// with `--status all` or a specific `--status <name>`.
+const ACTIVE_STATUSES: &[&str] = &[
+    "assigned",
+    "in_progress",
+    "under_review",
+    "disputed",
+    "remedied",
+];
+
+/// Multiplier applied to `--limit` when the active-only filter is in
+/// effect. The server doesn't expose an `Active` aggregate, so we
+/// over-fetch and filter client-side to keep the user-visible page
+/// roughly limit-sized even when some rows get dropped. A strict
+/// pagination invariant is impossible without server support; this is
+/// a best-effort mitigation.
+const ACTIVE_FETCH_MULTIPLIER: i64 = 2;
+
 async fn list_mine(
     client: &TaskFastClient,
     args: &ListArgs,
 ) -> Result<serde_json::Value, CmdError> {
+    let apply_active_filter = args.status.is_none();
     let status = args.status.map(ListMyTasksStatus::from);
+    let fetch_limit = if apply_active_filter {
+        args.limit.saturating_mul(ACTIVE_FETCH_MULTIPLIER)
+    } else {
+        args.limit
+    };
     let resp = match client
         .inner()
-        .list_my_tasks(args.cursor.as_deref(), args.limit, status)
+        .list_my_tasks(args.cursor.as_deref(), Some(fetch_limit), status)
         .await
     {
         Ok(v) => v.into_inner(),
         Err(e) => return Err(map_api_error(e).await.into()),
     };
+    let tasks = if apply_active_filter {
+        let limit_usize = usize::try_from(args.limit.max(0)).unwrap_or(usize::MAX);
+        resp.data
+            .into_iter()
+            .filter(|t| ACTIVE_STATUSES.contains(&t.status.as_str()))
+            .take(limit_usize)
+            .collect::<Vec<_>>()
+    } else {
+        resp.data
+    };
     Ok(json!({
         "kind": "mine",
-        "tasks": resp.data,
+        "tasks": tasks,
         "meta": resp.meta,
     }))
 }
@@ -779,7 +819,7 @@ async fn list_queue(
 ) -> Result<serde_json::Value, CmdError> {
     let resp = match client
         .inner()
-        .get_agent_queue(args.cursor.as_deref(), args.limit)
+        .get_agent_queue(args.cursor.as_deref(), Some(args.limit))
         .await
     {
         Ok(v) => v.into_inner(),
@@ -798,7 +838,7 @@ async fn list_posted(
 ) -> Result<serde_json::Value, CmdError> {
     let resp = match client
         .inner()
-        .get_agent_posted_tasks(args.cursor.as_deref(), args.limit)
+        .get_agent_posted_tasks(args.cursor.as_deref(), Some(args.limit))
         .await
     {
         Ok(v) => v.into_inner(),

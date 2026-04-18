@@ -59,6 +59,12 @@ pub struct StreamArgs {
     /// callers leave this off and the stream runs until SIGTERM/SIGINT.
     #[arg(long)]
     pub once: bool,
+
+    /// Exit on first transport drop instead of reconnecting. Reverts to the
+    /// pre-auto-reconnect behaviour for callers that own the respawn loop
+    /// themselves (e.g. systemd unit with `Restart=on-failure`).
+    #[arg(long)]
+    pub no_reconnect: bool,
 }
 
 /// Topic the CLI joins on the socket.
@@ -113,6 +119,12 @@ pub async fn run(ctx: &Ctx, args: StreamArgs) -> ExitCode {
             ConnectOutcome::Disconnected => {
                 // Fall through to reconnect loop below.
             }
+        }
+
+        if args.no_reconnect {
+            // Surface the drop as a non-zero exit so supervisors (systemd,
+            // k8s) see it as a failure and respawn under their own policy.
+            return ExitCode::from(1);
         }
 
         emit_sentinel("reconnecting");

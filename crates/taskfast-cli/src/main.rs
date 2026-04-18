@@ -9,9 +9,28 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use taskfast_cli::{cmd, config::Config, exit, Envelope, Environment};
+
+/// `--log-format` selector. `Text` is the human-friendly default for
+/// interactive use; `Json` emits `tracing_subscriber::fmt::json()` lines
+/// so logs can be shipped to a structured sink without regex parsing.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum LogFormat {
+    Text,
+    Json,
+}
+
+impl LogFormat {
+    fn parse_str(s: &str) -> Option<Self> {
+        match s {
+            "json" => Some(Self::Json),
+            "text" => Some(Self::Text),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -48,6 +67,18 @@ struct Cli {
     /// (e.g. `--verbose=debug`, `--verbose=taskfast_client=trace`).
     #[arg(long, global = true, value_name = "LEVEL", num_args = 0..=1, default_missing_value = "info")]
     verbose: Option<String>,
+
+    /// Log encoding for `--verbose` output. `text` is human-friendly;
+    /// `json` ships structured lines for Datadog/Loki ingest. Falls back
+    /// to `TASKFAST_LOG_FORMAT`, then `log_format` in the config file,
+    /// then `text`.
+    #[arg(
+        long,
+        global = true,
+        value_name = "FORMAT",
+        env = "TASKFAST_LOG_FORMAT"
+    )]
+    log_format: Option<LogFormat>,
 
     /// Suppress even the error envelope (exit code still conveys outcome).
     #[arg(long, global = true, conflicts_with = "verbose")]
@@ -119,16 +150,6 @@ enum Command {
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
-    if let Some(level) = cli.verbose.as_deref() {
-        // Fallible init: tracing subscriber can only be set once per
-        // process. Ignore re-init errors so tests that call main()
-        // multiple times in-process don't trip the global-default trap.
-        let _ = tracing_subscriber::fmt()
-            .with_writer(std::io::stderr)
-            .with_env_filter(level)
-            .try_init();
-    }
-
     let cfg_path = cli.config.clone().unwrap_or_else(Config::default_path);
     let cfg = match Config::load_or_migrate(&cfg_path) {
         Ok(c) => c,
@@ -144,7 +165,7 @@ async fn main() -> std::process::ExitCode {
         }
     };
 
-    let ctx = cmd::Ctx::from_parts(
+    let ctx = match cmd::Ctx::from_parts(
         cli.api_key,
         cli.env,
         cli.api_base,
@@ -152,7 +173,43 @@ async fn main() -> std::process::ExitCode {
         cli.dry_run,
         cli.quiet,
         &cfg,
-    );
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            // Malformed duration strings in config surface here, before any
+            // subcommand runs. Emit the same Usage envelope as a bad flag.
+            if !cli.quiet {
+                let env = cli.env.unwrap_or(cmd::DEFAULT_ENVIRONMENT);
+                Envelope::error(env, cli.dry_run, &e).emit();
+            }
+            return exit::ExitCode::Usage.into();
+        }
+    };
+
+    if let Some(level) = cli.verbose.as_deref() {
+        let format = cli
+            .log_format
+            .or_else(|| ctx.log_format.as_deref().and_then(LogFormat::parse_str))
+            .unwrap_or(LogFormat::Text);
+        // Fallible init: tracing subscriber can only be set once per
+        // process. Ignore re-init errors so tests that call main()
+        // multiple times in-process don't trip the global-default trap.
+        match format {
+            LogFormat::Text => {
+                let _ = tracing_subscriber::fmt()
+                    .with_writer(std::io::stderr)
+                    .with_env_filter(level)
+                    .try_init();
+            }
+            LogFormat::Json => {
+                let _ = tracing_subscriber::fmt()
+                    .with_writer(std::io::stderr)
+                    .with_env_filter(level)
+                    .json()
+                    .try_init();
+            }
+        }
+    }
 
     let result = match cli.command {
         // `events stream` writes JSONL to stdout and MUST bypass the
