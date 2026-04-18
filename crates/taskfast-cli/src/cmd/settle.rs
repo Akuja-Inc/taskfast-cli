@@ -61,6 +61,13 @@ pub struct Args {
     /// would 422 after the round-trip. Purely a UX preflight.
     #[arg(long, env = "TEMPO_WALLET_ADDRESS")]
     pub wallet_address: Option<String>,
+
+    /// Acknowledge oversized budgets. Required when the task's budget
+    /// exceeds `confirm_above_budget` in the config. Mirrors the same
+    /// gate on `taskfast post`; both fail closed before any keystore
+    /// prompt or signing.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
@@ -75,6 +82,10 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         Ok(v) => v.into_inner(),
         Err(e) => return Err(map_api_error(e).await.into()),
     };
+
+    // Fail-closed budget gate before keystore prompt or signing — a
+    // fat-finger settle on a huge task should die immediately.
+    ctx.enforce_budget_gate(task.budget_max.as_deref(), args.yes, "settle this task")?;
 
     let escrow_id_hex: String =
         task.escrow_id
@@ -161,8 +172,13 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     // 6. Load keystore. Bead spec calls for the signature to appear in the
     //    dry-run envelope, so we sign even in dry-run and never short-circuit
     //    before keystore resolution.
+    let keystore_ref = args.keystore.as_deref().map(str::to_string).or_else(|| {
+        ctx.keystore_path
+            .as_deref()
+            .and_then(|p| p.to_str().map(str::to_string))
+    });
     let signer = super::wallet_args::load_signer(
-        args.keystore.as_deref(),
+        keystore_ref.as_deref(),
         args.wallet_password_file.as_deref(),
         "settlement approval",
     )?;
@@ -170,7 +186,11 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     // 7. Optional preflight: keystore must match --wallet-address if given.
     //    Without this, a mismatch surfaces as a server 422 after the full
     //    round-trip (including the get_task + readiness calls above).
-    if let Some(expected) = args.wallet_address.as_deref() {
+    let wallet_address_for_check = args
+        .wallet_address
+        .as_deref()
+        .or(ctx.wallet_address.as_deref());
+    if let Some(expected) = wallet_address_for_check {
         let expected_addr: Address = expected.parse().map_err(|e| {
             CmdError::Usage(format!("--wallet-address is not a valid EVM address: {e}"))
         })?;

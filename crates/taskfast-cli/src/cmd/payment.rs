@@ -43,8 +43,10 @@ pub struct ListArgs {
     #[arg(long)]
     pub cursor: Option<String>,
 
-    #[arg(long)]
-    pub limit: Option<i64>,
+    /// Max items per page. Defaults to 50 — earnings ledger pulls
+    /// typically scan a wider window than active worker queues.
+    #[arg(long, default_value_t = 50)]
+    pub limit: i64,
 }
 
 /// clap-friendly mirror of `ListAgentPaymentsStatus`.
@@ -99,7 +101,7 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
         .list_agent_payments(
             args.cursor.as_deref(),
             args.from.as_ref(),
-            args.limit,
+            Some(args.limit),
             args.status.map(Into::into),
             args.to.as_ref(),
         )

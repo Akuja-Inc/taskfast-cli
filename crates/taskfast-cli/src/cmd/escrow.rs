@@ -215,12 +215,21 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         .transpose()?;
 
     // 6. Load signer + preflight address equality.
+    let keystore_ref = args.keystore.as_deref().map(str::to_string).or_else(|| {
+        ctx.keystore_path
+            .as_deref()
+            .and_then(|p| p.to_str().map(str::to_string))
+    });
     let signer = super::wallet_args::load_signer(
-        args.keystore.as_deref(),
+        keystore_ref.as_deref(),
         args.wallet_password_file.as_deref(),
         "escrow approval",
     )?;
-    if let Some(expected) = args.wallet_address.as_deref() {
+    let wallet_address_for_check = args
+        .wallet_address
+        .as_deref()
+        .or(ctx.wallet_address.as_deref());
+    if let Some(expected) = wallet_address_for_check {
         let expected_addr: Address = expected.parse().map_err(|e| {
             CmdError::Usage(format!("--wallet-address is not a valid EVM address: {e}"))
         })?;

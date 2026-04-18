@@ -26,6 +26,7 @@ fn ctx_for(server: &MockServer, key: Option<&str>) -> Ctx {
         config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
+        ..Default::default()
     }
 }
 
@@ -59,7 +60,7 @@ async fn list_mine_forwards_status_and_cursor_and_returns_tasks() {
         kind: ListKind::Mine,
         status: Some(TaskStatus::InProgress),
         cursor: Some("abc".into()),
-        limit: Some(5),
+        limit: 5,
     };
     let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
         .await
@@ -88,7 +89,7 @@ async fn list_queue_hits_queue_endpoint() {
         kind: ListKind::Queue,
         status: None,
         cursor: None,
-        limit: None,
+        limit: 20,
     };
     let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
         .await
@@ -114,7 +115,7 @@ async fn list_posted_hits_posted_endpoint() {
         kind: ListKind::Posted,
         status: None,
         cursor: None,
-        limit: None,
+        limit: 20,
     };
     let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
         .await
@@ -132,7 +133,7 @@ async fn list_status_with_non_mine_kind_is_usage_error() {
         kind: ListKind::Queue,
         status: Some(TaskStatus::Assigned),
         cursor: None,
-        limit: None,
+        limit: 20,
     };
     let err = run(&ctx_for(&server, Some("test-key")), Command::List(args))
         .await
@@ -228,7 +229,7 @@ async fn list_401_surfaces_as_auth_error() {
         kind: ListKind::Mine,
         status: None,
         cursor: None,
-        limit: None,
+        limit: 20,
     };
     let err = run(&ctx_for(&server, Some("test-key")), Command::List(args))
         .await
@@ -246,7 +247,7 @@ async fn missing_api_key_errors_before_any_http_call() {
         kind: ListKind::Mine,
         status: None,
         cursor: None,
-        limit: None,
+        limit: 20,
     };
     let err = run(&ctx_for(&server, None), Command::List(args))
         .await

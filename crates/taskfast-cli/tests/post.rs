@@ -22,6 +22,7 @@ fn ctx_for(server: &MockServer, key: Option<&str>) -> Ctx {
         config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
+        ..Default::default()
     }
 }
 
@@ -48,6 +49,7 @@ fn base_args(wallet_address: Option<String>, keystore: Option<String>) -> Args {
         wallet_password_file: None,
         rpc_url: None,
         network: Network::Testnet,
+        yes: false,
     }
 }
 

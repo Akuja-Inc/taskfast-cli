@@ -40,7 +40,7 @@ taskfast config set network --unset   # revert to built-in default
 ### `testnet`
 
 - Default RPC: `https://rpc.moderato.tempo.xyz`.
-- `taskfast init --generate-wallet` may auto-fund the wallet via the testnet faucet. Suppress with `--skip-funding`.
+- `taskfast init --generate-wallet --fund` requests testnet faucet drops for the new wallet. Without `--fund` no faucet call is made on any network.
 
 ## RPC override
 

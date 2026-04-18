@@ -16,12 +16,17 @@
 //! tests that import them by name.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use alloy_signer_local::PrivateKeySigner;
 
 use taskfast_agent::keystore::{self, KeySource};
 
 use super::CmdError;
+
+/// One-shot guard so the env-var deprecation warning fires at most once
+/// per process. Streaming subcommands could otherwise spam stderr.
+static PWD_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
 /// Decrypt the keystore at `keystore_ref` using the resolved password.
 ///
@@ -49,6 +54,7 @@ pub fn load_signer(
 pub fn resolve_password(password_file: Option<&Path>) -> Result<String, CmdError> {
     if let Ok(pw) = std::env::var("TASKFAST_WALLET_PASSWORD") {
         if !pw.is_empty() {
+            warn_pwd_env_once();
             return Ok(pw);
         }
     }
@@ -68,6 +74,26 @@ pub fn resolve_password(password_file: Option<&Path>) -> Result<String, CmdError
         )));
     }
     Ok(trimmed.to_string())
+}
+
+/// Print the `TASKFAST_WALLET_PASSWORD` deprecation nudge to stderr once
+/// per process. Suppressed by `TASKFAST_SUPPRESS_PWD_WARNING=1` so CI
+/// pipelines that intentionally use the env var can quiet the noise.
+fn warn_pwd_env_once() {
+    if std::env::var("TASKFAST_SUPPRESS_PWD_WARNING")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        return;
+    }
+    if PWD_WARNING_EMITTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    eprintln!(
+        "warning: TASKFAST_WALLET_PASSWORD is readable via /proc/<pid>/environ; \
+         prefer --wallet-password-file (TASKFAST_WALLET_PASSWORD_FILE) or set \
+         TASKFAST_SUPPRESS_PWD_WARNING=1 to silence."
+    );
 }
 
 #[cfg(test)]

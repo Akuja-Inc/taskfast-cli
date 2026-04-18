@@ -116,6 +116,20 @@ pub struct Config {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_secret_path: Option<PathBuf>,
+
+    /// Fail-closed confirmation gate for mutating commands. When the
+    /// requested budget on `post` (or task budget on `settle`) exceeds
+    /// this stablecoin-units threshold, the command refuses to proceed
+    /// without an explicit `--yes`. Decimal string in the same units
+    /// as `--budget` (e.g. `"1000"` = 1000 USDC). `None` = gate off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirm_above_budget: Option<String>,
+
+    /// Default `--verbose` log encoding. Accepts `"json"` or `"text"`.
+    /// `None` = `"text"`. CLI flag and env var (`TASKFAST_LOG_FORMAT`)
+    /// still win over this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_format: Option<String>,
 }
 
 // `skip_serializing_if` is required by serde to take `&T`, so clippy's
@@ -278,6 +292,8 @@ impl Config {
             agent_id: None,
             webhook_url: None,
             webhook_secret_path: None,
+            confirm_above_budget: None,
+            log_format: None,
         }
     }
 }
@@ -338,6 +354,8 @@ mod tests {
             agent_id: Some("agent_123".into()),
             webhook_url: Some("https://example.com/hook".into()),
             webhook_secret_path: Some(PathBuf::from("/tmp/hook.secret")),
+            confirm_above_budget: Some("1000".into()),
+            log_format: Some("json".into()),
         }
     }
 

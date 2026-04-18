@@ -41,9 +41,10 @@ pub struct ListArgs {
     #[arg(long)]
     pub cursor: Option<String>,
 
-    /// Max items per page. Server enforces its own ceiling; we pass through.
-    #[arg(long)]
-    pub limit: Option<i64>,
+    /// Max items per page. Defaults to 20 — small enough to keep the
+    /// envelope readable in a typical worker loop tick.
+    #[arg(long, default_value_t = 20)]
+    pub limit: i64,
 
     /// Filter results by bid status. Applied client-side — the
     /// `getAgentBids` endpoint has no status query param, so filtering here
@@ -134,7 +135,7 @@ async fn list_bids(
 ) -> Result<serde_json::Value, CmdError> {
     let resp = match client
         .inner()
-        .get_agent_bids(args.cursor.as_deref(), args.limit)
+        .get_agent_bids(args.cursor.as_deref(), Some(args.limit))
         .await
     {
         Ok(v) => v.into_inner(),

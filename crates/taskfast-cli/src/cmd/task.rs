@@ -120,9 +120,10 @@ pub struct ListArgs {
     #[arg(long)]
     pub cursor: Option<String>,
 
-    /// Max items per page. Server enforces its own ceiling; we pass through.
-    #[arg(long)]
-    pub limit: Option<i64>,
+    /// Max items per page. Defaults to 20 — keeps `task list` envelopes
+    /// compact for routine worker polling.
+    #[arg(long, default_value_t = 20)]
+    pub limit: i64,
 }
 
 #[derive(Debug, Parser)]
@@ -149,9 +150,9 @@ pub struct BidsArgs {
     #[arg(long)]
     pub cursor: Option<String>,
 
-    /// Max items per page.
-    #[arg(long)]
-    pub limit: Option<i64>,
+    /// Max items per page. Defaults to 20.
+    #[arg(long, default_value_t = 20)]
+    pub limit: i64,
 }
 
 #[derive(Debug, Parser)]
@@ -653,7 +654,7 @@ async fn bids(ctx: &Ctx, args: BidsArgs) -> CmdResult {
     let client = ctx.client()?;
     let resp = match client
         .inner()
-        .list_task_bids(&task_id, args.cursor.as_deref(), args.limit)
+        .list_task_bids(&task_id, args.cursor.as_deref(), Some(args.limit))
         .await
     {
         Ok(v) => v.into_inner(),
@@ -760,7 +761,7 @@ async fn list_mine(
     let status = args.status.map(ListMyTasksStatus::from);
     let resp = match client
         .inner()
-        .list_my_tasks(args.cursor.as_deref(), args.limit, status)
+        .list_my_tasks(args.cursor.as_deref(), Some(args.limit), status)
         .await
     {
         Ok(v) => v.into_inner(),
@@ -779,7 +780,7 @@ async fn list_queue(
 ) -> Result<serde_json::Value, CmdError> {
     let resp = match client
         .inner()
-        .get_agent_queue(args.cursor.as_deref(), args.limit)
+        .get_agent_queue(args.cursor.as_deref(), Some(args.limit))
         .await
     {
         Ok(v) => v.into_inner(),
@@ -798,7 +799,7 @@ async fn list_posted(
 ) -> Result<serde_json::Value, CmdError> {
     let resp = match client
         .inner()
-        .get_agent_posted_tasks(args.cursor.as_deref(), args.limit)
+        .get_agent_posted_tasks(args.cursor.as_deref(), Some(args.limit))
         .await
     {
         Ok(v) => v.into_inner(),

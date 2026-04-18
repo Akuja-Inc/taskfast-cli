@@ -58,12 +58,41 @@ pub struct Ctx {
     /// `TASKFAST_CONFIG`). Subcommands that persist state (init,
     /// `config set`, etc.) write here; tests construct this directly.
     pub config_path: PathBuf,
+    /// Poster wallet address from config — fallback when no flag/env set
+    /// on `post`/`settle`/`escrow sign`. Persisted by `taskfast init`.
+    pub wallet_address: Option<String>,
+    /// Keystore path from config — fallback for the same trio.
+    pub keystore_path: Option<PathBuf>,
+    /// Stablecoin-units threshold above which mutating commands
+    /// (`post`, `settle`) require an explicit `--yes`. `None` = gate
+    /// disabled. Set via `confirm_above_budget` in the JSON config.
+    pub confirm_above_budget: Option<String>,
+    /// Default log format for `--verbose` output. `None` = text. Set
+    /// via `log_format` in the JSON config or `TASKFAST_LOG_FORMAT` env.
+    pub log_format: Option<String>,
     pub dry_run: bool,
     pub quiet: bool,
 }
 
 /// Default environment when neither a flag nor the config file pins one.
 pub const DEFAULT_ENVIRONMENT: Environment = Environment::Prod;
+
+impl Default for Ctx {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            environment: DEFAULT_ENVIRONMENT,
+            api_base: None,
+            config_path: PathBuf::from("/dev/null"),
+            wallet_address: None,
+            keystore_path: None,
+            confirm_above_budget: None,
+            log_format: None,
+            dry_run: false,
+            quiet: false,
+        }
+    }
+}
 
 impl Ctx {
     /// Build a [`Ctx`] by layering CLI flags (including clap's
@@ -91,6 +120,10 @@ impl Ctx {
             environment: cli_env.or(cfg.environment).unwrap_or(DEFAULT_ENVIRONMENT),
             api_base: cli_api_base.or_else(|| cfg.api_base.clone()),
             config_path: cli_config_path.unwrap_or_else(Config::default_path),
+            wallet_address: cfg.wallet_address.clone(),
+            keystore_path: cfg.keystore_path.clone(),
+            confirm_above_budget: cfg.confirm_above_budget.clone(),
+            log_format: cfg.log_format.clone(),
             dry_run: cli_dry_run,
             quiet: cli_quiet,
         }
@@ -109,6 +142,43 @@ impl Ctx {
     pub fn client(&self) -> Result<TaskFastClient, CmdError> {
         let key = self.api_key.as_deref().ok_or(CmdError::MissingApiKey)?;
         TaskFastClient::from_api_key(self.base_url(), key).map_err(CmdError::from)
+    }
+
+    /// Fail-closed budget gate. When `confirm_above_budget` is set in the
+    /// config, any mutation whose budget exceeds it must be opted into via
+    /// `--yes`. By design there's no TTY prompt — automation-first stays
+    /// intact; the gate just stops a fat-finger script before it broadcasts
+    /// an oversized ERC-20 approve. `verb` is the action ("post a task",
+    /// "settle this task") for the error message.
+    pub fn enforce_budget_gate(
+        &self,
+        budget: Option<&str>,
+        yes: bool,
+        verb: &str,
+    ) -> Result<(), CmdError> {
+        let threshold_str = match self.confirm_above_budget.as_deref() {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+        let budget_str = match budget {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+        let threshold: f64 = threshold_str.parse().map_err(|_| {
+            CmdError::Usage(format!(
+                "config `confirm_above_budget` is not a decimal: {threshold_str:?}"
+            ))
+        })?;
+        let amount: f64 = budget_str
+            .parse()
+            .map_err(|_| CmdError::Usage(format!("budget {budget_str:?} is not a decimal")))?;
+        if amount > threshold && !yes {
+            return Err(CmdError::Usage(format!(
+                "refusing to {verb}: budget {amount} exceeds confirm_above_budget \
+                 {threshold} (pass --yes to override)"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -316,6 +386,7 @@ mod tests {
             config_path: PathBuf::from("/dev/null"),
             dry_run: false,
             quiet: false,
+            ..Default::default()
         };
         assert_eq!(ctx.base_url(), "http://localhost:9999");
     }
@@ -334,6 +405,7 @@ mod tests {
                 config_path: PathBuf::from("/dev/null"),
                 dry_run: false,
                 quiet: false,
+                ..Default::default()
             };
             assert_eq!(ctx.base_url(), expected);
         }
@@ -348,6 +420,7 @@ mod tests {
             config_path: PathBuf::from("/dev/null"),
             dry_run: false,
             quiet: false,
+            ..Default::default()
         };
         match ctx.client() {
             Err(CmdError::MissingApiKey) => {}
@@ -365,6 +438,7 @@ mod tests {
             config_path: PathBuf::from("/dev/null"),
             dry_run: false,
             quiet: false,
+            ..Default::default()
         };
         ctx.client().expect("client should build with a valid key");
     }
@@ -380,6 +454,91 @@ mod tests {
             api_base: api_base.map(str::to_string),
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn from_parts_threads_wallet_keystore_confirm_log_format_from_config() {
+        let cfg = Config {
+            wallet_address: Some("0xfeed".into()),
+            keystore_path: Some(PathBuf::from("/tmp/k.json")),
+            confirm_above_budget: Some("500".into()),
+            log_format: Some("json".into()),
+            ..Config::default()
+        };
+        let ctx = Ctx::from_parts(None, None, None, None, false, false, &cfg);
+        assert_eq!(ctx.wallet_address.as_deref(), Some("0xfeed"));
+        assert_eq!(
+            ctx.keystore_path.as_deref(),
+            Some(std::path::Path::new("/tmp/k.json"))
+        );
+        assert_eq!(ctx.confirm_above_budget.as_deref(), Some("500"));
+        assert_eq!(ctx.log_format.as_deref(), Some("json"));
+    }
+
+    fn ctx_with_threshold(threshold: Option<&str>) -> Ctx {
+        Ctx {
+            confirm_above_budget: threshold.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn budget_gate_no_op_when_threshold_unset() {
+        let ctx = ctx_with_threshold(None);
+        ctx.enforce_budget_gate(Some("99999"), false, "post a task")
+            .expect("no threshold = no gate");
+    }
+
+    #[test]
+    fn budget_gate_no_op_when_budget_absent() {
+        let ctx = ctx_with_threshold(Some("100"));
+        ctx.enforce_budget_gate(None, false, "post a task")
+            .expect("no budget = nothing to compare");
+    }
+
+    #[test]
+    fn budget_gate_passes_when_under_threshold() {
+        let ctx = ctx_with_threshold(Some("100"));
+        ctx.enforce_budget_gate(Some("50"), false, "post a task")
+            .expect("under threshold passes without --yes");
+    }
+
+    #[test]
+    fn budget_gate_passes_at_threshold_boundary() {
+        let ctx = ctx_with_threshold(Some("100"));
+        ctx.enforce_budget_gate(Some("100"), false, "post a task")
+            .expect("equal-to-threshold passes (gate is strict >)");
+    }
+
+    #[test]
+    fn budget_gate_blocks_above_threshold_without_yes() {
+        let ctx = ctx_with_threshold(Some("100"));
+        let err = ctx
+            .enforce_budget_gate(Some("100.01"), false, "post a task")
+            .expect_err("over threshold without --yes must fail");
+        match err {
+            CmdError::Usage(msg) => {
+                assert!(msg.contains("--yes"), "msg: {msg}");
+                assert!(msg.contains("post a task"), "msg: {msg}");
+            }
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn budget_gate_passes_above_threshold_with_yes() {
+        let ctx = ctx_with_threshold(Some("100"));
+        ctx.enforce_budget_gate(Some("9999"), true, "post a task")
+            .expect("--yes overrides the gate");
+    }
+
+    #[test]
+    fn budget_gate_rejects_non_decimal_threshold() {
+        let ctx = ctx_with_threshold(Some("not-a-number"));
+        let err = ctx
+            .enforce_budget_gate(Some("50"), false, "post a task")
+            .expect_err("garbage threshold = usage error");
+        assert!(matches!(err, CmdError::Usage(_)));
     }
 
     #[test]

@@ -50,10 +50,9 @@ pub struct Args {
     #[arg(long)]
     pub title: String,
 
-    /// Task description. Required by the server; defaults to an empty string
-    /// if the caller omits it so the 422 is a server-side signal rather than
-    /// a client-side shape error.
-    #[arg(long, default_value = "")]
+    /// Task description (required, non-empty). Validated client-side so a
+    /// typoed script fails fast instead of paying for a server 422 round-trip.
+    #[arg(long)]
     pub description: String,
 
     /// Max budget the poster will pay, as a decimal string ("2.50"). Passed
@@ -121,6 +120,13 @@ pub struct Args {
     /// Network selector for the default RPC URL.
     #[arg(long, default_value = "mainnet", env = "TEMPO_NETWORK")]
     pub network: Network,
+
+    /// Acknowledge oversized budgets. Required when the budget exceeds
+    /// `confirm_above_budget` in the config. No-op when the gate is unset
+    /// or when the budget is below it. Fail-closed by design (no TTY
+    /// prompt) so a CI script accident doesn't broadcast a huge approve.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -163,9 +169,21 @@ impl Network {
 }
 
 pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
-    let wallet_address = args.wallet_address.as_deref().ok_or_else(|| {
-        CmdError::Usage("--wallet-address (or TEMPO_WALLET_ADDRESS) required to post a task".into())
-    })?;
+    if args.description.trim().is_empty() {
+        return Err(CmdError::Usage(
+            "--description must not be empty (server requires a non-blank description)".into(),
+        ));
+    }
+    ctx.enforce_budget_gate(args.budget.as_deref(), args.yes, "post a task")?;
+    let wallet_address = args
+        .wallet_address
+        .as_deref()
+        .or(ctx.wallet_address.as_deref())
+        .ok_or_else(|| {
+            CmdError::Usage(
+                "--wallet-address (or TEMPO_WALLET_ADDRESS, or wallet_address in config) required to post a task".into(),
+            )
+        })?;
     // Validate shape upfront so a typo never makes it to the server.
     let _: Address = wallet_address.parse().map_err(|e| {
         CmdError::Usage(format!("--wallet-address is not a valid EVM address: {e}"))
@@ -249,8 +267,13 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
 
     // Load signer only after prepare succeeds — avoids prompting the user for
     // a keystore password on a request that never leaves local validation.
+    let keystore_ref = args.keystore.as_deref().map(str::to_string).or_else(|| {
+        ctx.keystore_path
+            .as_deref()
+            .and_then(|p| p.to_str().map(str::to_string))
+    });
     let signer = super::wallet_args::load_signer(
-        args.keystore.as_deref(),
+        keystore_ref.as_deref(),
         args.wallet_password_file.as_deref(),
         "submission fee",
     )?;

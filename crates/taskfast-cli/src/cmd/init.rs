@@ -104,13 +104,12 @@ pub struct Args {
     #[arg(long)]
     pub skip_wallet: bool,
 
-    /// Skip the testnet faucet call even when `--network testnet` with a
-    /// freshly-generated wallet would normally trigger it. Intended for CI
-    /// / reproducible-test flows where the faucet is supplied out-of-band
-    /// (fixture wallets, mocked RPC). No-op on `--network mainnet` — prod
-    /// never auto-funds.
+    /// Opt in to the testnet faucet for a freshly-generated wallet on
+    /// `--network testnet`. Off by default so prod scripts (and CI flows
+    /// supplying funds out-of-band) never accidentally hit the faucet.
+    /// No-op on `--network mainnet` — prod never auto-funds.
     #[arg(long)]
-    pub skip_funding: bool,
+    pub fund: bool,
 
     /// User PAT (`tf_user_*`) used to headlessly mint a fresh agent via
     /// `POST /agents` when no agent API key is available. The server
@@ -209,6 +208,10 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         environment: ctx.environment,
         api_base: ctx.api_base.clone(),
         config_path: ctx.config_path.clone(),
+        wallet_address: ctx.wallet_address.clone(),
+        keystore_path: ctx.keystore_path.clone(),
+        confirm_above_budget: ctx.confirm_above_budget.clone(),
+        log_format: ctx.log_format.clone(),
         dry_run: ctx.dry_run,
         quiet: ctx.quiet,
     };
@@ -611,9 +614,9 @@ async fn maybe_request_faucet(args: &Args, wallet: &WalletOutcome, dry_run: bool
     if dry_run {
         return FaucetOutcome::Skipped { reason: "dry_run" };
     }
-    if args.skip_funding {
+    if !args.fund {
         return FaucetOutcome::Skipped {
-            reason: "skip_funding_flag",
+            reason: "fund_flag_not_set",
         };
     }
     if !matches!(args.network, Network::Testnet) {
@@ -856,7 +859,7 @@ mod tests {
             keystore_path: None,
             network: Network::Mainnet,
             skip_wallet: false,
-            skip_funding: false,
+            fund: false,
             human_api_key: None,
             agent_name: "taskfast-agent".into(),
             agent_description: "Headless agent registered via taskfast init".into(),
@@ -875,6 +878,7 @@ mod tests {
             config_path: PathBuf::from("/dev/null"),
             dry_run: false,
             quiet: true,
+            ..Default::default()
         }
     }
 

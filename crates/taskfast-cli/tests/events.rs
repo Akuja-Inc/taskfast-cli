@@ -19,6 +19,7 @@ fn ctx_for(server: &MockServer, key: Option<&str>) -> Ctx {
         config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
+        ..Default::default()
     }
 }
 
@@ -49,7 +50,7 @@ async fn poll_forwards_cursor_and_limit_and_returns_events() {
 
     let args = PollArgs {
         cursor: Some("abc".into()),
-        limit: Some(3),
+        limit: 3,
     };
     let envelope = run(&ctx_for(&server, Some("test-key")), Command::Poll(args))
         .await
@@ -77,7 +78,7 @@ async fn poll_empty_page_returns_empty_events() {
         &ctx_for(&server, Some("test-key")),
         Command::Poll(PollArgs {
             cursor: None,
-            limit: None,
+            limit: 25,
         }),
     )
     .await
@@ -104,7 +105,7 @@ async fn poll_401_surfaces_as_auth_error() {
         &ctx_for(&server, Some("test-key")),
         Command::Poll(PollArgs {
             cursor: None,
-            limit: None,
+            limit: 25,
         }),
     )
     .await
@@ -122,7 +123,7 @@ async fn poll_missing_api_key_errors_before_any_http_call() {
         &ctx_for(&server, None),
         Command::Poll(PollArgs {
             cursor: None,
-            limit: None,
+            limit: 25,
         }),
     )
     .await

@@ -24,6 +24,7 @@ fn ctx_for(server: &MockServer, key: Option<&str>) -> Ctx {
         config_path: std::path::PathBuf::from("/dev/null"),
         dry_run: false,
         quiet: true,
+        ..Default::default()
     }
 }
 
@@ -62,7 +63,7 @@ async fn list_forwards_cursor_and_limit_and_returns_bids() {
 
     let args = ListArgs {
         cursor: Some("abc".into()),
-        limit: Some(5),
+        limit: 5,
         status: None,
     };
     let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
@@ -90,7 +91,7 @@ async fn list_without_pagination_params_returns_empty() {
 
     let args = ListArgs {
         cursor: None,
-        limit: None,
+        limit: 20,
         status: None,
     };
     let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
@@ -116,7 +117,7 @@ async fn list_401_surfaces_as_auth_error() {
 
     let args = ListArgs {
         cursor: None,
-        limit: None,
+        limit: 20,
         status: None,
     };
     let err = run(&ctx_for(&server, Some("test-key")), Command::List(args))
@@ -133,7 +134,7 @@ async fn list_missing_api_key_errors_before_any_http_call() {
     let server = MockServer::start().await;
     let args = ListArgs {
         cursor: None,
-        limit: None,
+        limit: 20,
         status: None,
     };
     let err = run(&ctx_for(&server, None), Command::List(args))

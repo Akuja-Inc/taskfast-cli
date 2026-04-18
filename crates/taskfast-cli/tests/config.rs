@@ -15,6 +15,7 @@ fn ctx_for(path: std::path::PathBuf) -> Ctx {
         config_path: path,
         dry_run: false,
         quiet: true,
+        ..Default::default()
     }
 }
 
