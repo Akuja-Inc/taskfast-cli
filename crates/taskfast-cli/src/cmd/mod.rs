@@ -9,8 +9,10 @@
 //! silently re-homes a variant will break the build.
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
+use rust_decimal::Decimal;
 use thiserror::Error;
 
 use crate::config::Config;
@@ -183,13 +185,16 @@ impl Ctx {
             Some(b) => b,
             None => return Ok(()),
         };
-        let threshold: f64 = threshold_str.parse().map_err(|_| {
+        // Decimal (not f64): budget values are decimal strings like "0.1"
+        // that f64 cannot represent exactly. An f64 compare could flip the
+        // gate around an exact-boundary threshold, which defeats the whole
+        // point of a safety rail against oversized approvals.
+        let threshold = Decimal::from_str(threshold_str).map_err(|_| {
             CmdError::Usage(format!(
                 "config `confirm_above_budget` is not a decimal: {threshold_str:?}"
             ))
         })?;
-        let amount: f64 = budget_str
-            .parse()
+        let amount = Decimal::from_str(budget_str)
             .map_err(|_| CmdError::Usage(format!("budget {budget_str:?} is not a decimal")))?;
         if amount > threshold && !yes {
             return Err(CmdError::Usage(format!(
@@ -656,6 +661,16 @@ mod tests {
         let ctx = ctx_with_threshold(Some("100"));
         ctx.enforce_budget_gate(Some("9999"), true, "post a task")
             .expect("--yes overrides the gate");
+    }
+
+    #[test]
+    fn budget_gate_uses_decimal_not_float_precision() {
+        // f64 parsing would round "0.30000000000000004" to 0.3 and let it
+        // slip past a "0.3" threshold. Decimal preserves every digit so
+        // the gate correctly blocks.
+        let ctx = ctx_with_threshold(Some("0.3"));
+        ctx.enforce_budget_gate(Some("0.30000000000000004"), false, "post a task")
+            .expect_err("decimal compare must detect trailing precision");
     }
 
     #[test]

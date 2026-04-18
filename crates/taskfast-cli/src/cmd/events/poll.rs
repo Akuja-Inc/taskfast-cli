@@ -151,8 +151,15 @@ fn read_cursor(path: &Path) -> Option<String> {
 /// Best-effort write. A failure (read-only FS, permission denied) is logged
 /// to stderr but does not fail the command — the user already got their
 /// page; losing the cursor only costs one redundant poll on next run.
+///
+/// When the server returns `next_cursor: null` (tip reached) the on-disk
+/// cursor is left untouched. Overwriting with an empty string would make
+/// the next `events poll` (without `--cursor`) restart from the beginning
+/// and replay backlog.
 fn persist_cursor(path: &Path, next_cursor: Option<&str>, ctx: &Ctx) {
-    let payload = next_cursor.unwrap_or("");
+    let Some(payload) = next_cursor else {
+        return;
+    };
     if let Some(dir) = path.parent() {
         if let Err(e) = fs::create_dir_all(dir) {
             warn_persist_failed(ctx, path, &e.to_string());
@@ -241,5 +248,16 @@ mod tests {
         let path = cursor_path(&ctx).unwrap();
         persist_cursor(&path, Some("xyz"), &ctx);
         assert_eq!(read_cursor(&path), Some("xyz".into()));
+    }
+
+    #[test]
+    fn persist_none_preserves_last_known_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.json");
+        let ctx = ctx_with_config(cfg);
+        let path = cursor_path(&ctx).unwrap();
+        persist_cursor(&path, Some("abc"), &ctx);
+        persist_cursor(&path, None, &ctx);
+        assert_eq!(read_cursor(&path), Some("abc".into()));
     }
 }
