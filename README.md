@@ -11,7 +11,7 @@
 **Shell (macOS / Linux):**
 
 ```bash
-curl -LsSf https://github.com/Akuja-Inc/taskfast-cli/releases/latest/download/taskfast-installer.sh | sh
+curl -LsSf https://github.com/Akuja-Inc/taskfast-cli/releases/latest/download/taskfast-cli-installer.sh | sh
 ```
 
 **Cargo:**
@@ -23,7 +23,7 @@ cargo install taskfast-cli --locked
 **Homebrew:**
 
 ```bash
-brew install akuja-inc/taskfast/taskfast
+brew install akuja-inc/taskfast/taskfast-cli
 ```
 
 **Docker:**
