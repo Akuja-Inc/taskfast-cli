@@ -92,9 +92,7 @@ struct CursorState {
 
 impl CursorState {
     fn resolve(cursor_arg: Option<&str>, ctx: &Ctx) -> Self {
-        let env_disabled = std::env::var(DISABLE_ENV)
-            .map(|v| v == "1")
-            .unwrap_or(false);
+        let env_disabled = std::env::var(DISABLE_ENV).is_ok_and(|v| v == "1");
         let sentinel = matches!(cursor_arg, Some(s) if s == DISABLE_SENTINEL);
         let persist_to = if env_disabled || sentinel {
             None

@@ -49,15 +49,28 @@ const TEMPO_TESTNET_RPC: &str = "https://rpc.moderato.tempo.xyz";
 const TEMPO_MAINNET_CHAIN_ID: i64 = 4217;
 const TEMPO_TESTNET_CHAIN_ID: i64 = 42_431;
 
-/// Poster approval deadline horizon: matches `assets/js/escrow_sign.js`
-/// `buildPosterApprovalDeadline` — 30 days from now.
-const APPROVAL_DEADLINE_SECS: u64 = 30 * 24 * 60 * 60;
+/// Poster approval deadline horizon — built-in default when neither the
+/// `--approval-horizon` flag nor `approval_horizon` in the config file
+/// is set. 7 days tightens the blast radius on a leaked keystore vs the
+/// prior 30-day hardcode; CI flows that need the old window set
+/// `TASKFAST_APPROVAL_HORIZON=30d` or the config field.
+const DEFAULT_APPROVAL_HORIZON: Duration = Duration::from_hours(24 * 7);
 
-/// `TaskEscrow.open()` receipt polling horizon. A 60s ceiling matches the
-/// Tempo testnet block-time budget plus RPC jitter; past this we surface
-/// `CmdError::Server` so the orchestrator sees a bounded retry window.
-const RECEIPT_TIMEOUT: Duration = Duration::from_mins(1);
+/// `TaskEscrow.open()` receipt polling defaults. Mainnet gets a 3min
+/// ceiling to ride out block-time jitter under congestion; testnet keeps
+/// the prior 1min budget. Unknown chain_ids fall back to 1min.
+const DEFAULT_RECEIPT_TIMEOUT_MAINNET: Duration = Duration::from_mins(3);
+const DEFAULT_RECEIPT_TIMEOUT_TESTNET: Duration = Duration::from_mins(1);
 const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Network-aware default receipt-timeout used when the caller supplies
+/// neither `--receipt-timeout` nor `receipt_timeout` in config.
+fn default_receipt_timeout(chain_id: i64) -> Duration {
+    match chain_id {
+        TEMPO_MAINNET_CHAIN_ID => DEFAULT_RECEIPT_TIMEOUT_MAINNET,
+        _ => DEFAULT_RECEIPT_TIMEOUT_TESTNET,
+    }
+}
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
@@ -93,6 +106,26 @@ pub struct SignArgs {
     /// the caller already granted a sufficient allowance out-of-band.
     #[arg(long)]
     pub skip_allowance_check: bool,
+
+    /// Poster approval-deadline horizon — accepts human durations like
+    /// `7d`, `24h`, `3600s`. Falls back to `approval_horizon` in config,
+    /// then the built-in 7-day default.
+    #[arg(
+        long,
+        env = "TASKFAST_APPROVAL_HORIZON",
+        value_parser = humantime::parse_duration,
+    )]
+    pub approval_horizon: Option<Duration>,
+
+    /// Receipt-polling ceiling — human duration (`3min`, `90s`). Falls
+    /// back to `receipt_timeout` in config, then a chain-aware default
+    /// (3min mainnet, 1min testnet).
+    #[arg(
+        long,
+        env = "TASKFAST_RECEIPT_TIMEOUT",
+        value_parser = humantime::parse_duration,
+    )]
+    pub receipt_timeout: Option<Duration>,
 }
 
 pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
@@ -258,10 +291,15 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     );
 
     // 8. Sign DistributionApproval(escrowId, deadline). Deadline is absolute
-    //    seconds, matching the JS builder's 30-day horizon.
+    //    seconds. Horizon precedence: flag > config > 7d built-in default.
+    let approval_horizon = super::resolve_duration(
+        args.approval_horizon,
+        ctx.approval_horizon,
+        DEFAULT_APPROVAL_HORIZON,
+    );
     let deadline_unix = u64::try_from(chrono::Utc::now().timestamp())
         .map_err(|_| CmdError::Decode("system clock before epoch".into()))?
-        .saturating_add(APPROVAL_DEADLINE_SECS);
+        .saturating_add(approval_horizon.as_secs());
     let deadline = U256::from(deadline_unix);
     let signature_hex = sign_distribution(&signer, &domain, escrow_id, deadline)?;
 
@@ -320,6 +358,15 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         ));
     }
 
+    // Receipt-timeout precedence: flag > config > network-aware default.
+    // Resolved here (post-`params.chain_id`) so both approve + open receipts
+    // share the same ceiling.
+    let receipt_timeout = super::resolve_duration(
+        args.receipt_timeout,
+        ctx.receipt_timeout,
+        default_receipt_timeout(params.chain_id),
+    );
+
     // 10. Live RPC: allowance preflight + optional approve.
     //     TaskEscrow.open calls transferFrom for `deposit + platformFeeAmount` in a
     //     single call, so balance/allowance/approve must cover the sum — not
@@ -350,7 +397,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                     .await
                     .map_err(|e| CmdError::Server(format!("approve broadcast failed: {e}")))?;
             let ok = rpc
-                .wait_for_receipt(approve_hash, RECEIPT_TIMEOUT, RECEIPT_POLL_INTERVAL)
+                .wait_for_receipt(approve_hash, receipt_timeout, RECEIPT_POLL_INTERVAL)
                 .await
                 .map_err(|e| CmdError::Server(format!("approve receipt: {e}")))?;
             if !ok {
@@ -374,7 +421,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         .await
         .map_err(|e| CmdError::Server(format!("open broadcast failed: {e}")))?;
     let voucher_ok = rpc
-        .wait_for_receipt(voucher_tx, RECEIPT_TIMEOUT, RECEIPT_POLL_INTERVAL)
+        .wait_for_receipt(voucher_tx, receipt_timeout, RECEIPT_POLL_INTERVAL)
         .await
         .map_err(|e| CmdError::Server(format!("open receipt: {e}")))?;
     if !voucher_ok {
@@ -531,5 +578,34 @@ mod tests {
         assert_eq!(default_rpc_for(42_431), TEMPO_TESTNET_RPC);
         // Unknown chain ⇒ testnet, never mainnet — safer default for dev chains.
         assert_eq!(default_rpc_for(31_337), TEMPO_TESTNET_RPC);
+    }
+
+    #[test]
+    fn default_receipt_timeout_mainnet_is_three_minutes() {
+        assert_eq!(
+            default_receipt_timeout(TEMPO_MAINNET_CHAIN_ID),
+            Duration::from_mins(3),
+        );
+    }
+
+    #[test]
+    fn default_receipt_timeout_testnet_is_one_minute() {
+        assert_eq!(
+            default_receipt_timeout(TEMPO_TESTNET_CHAIN_ID),
+            Duration::from_mins(1),
+        );
+    }
+
+    #[test]
+    fn default_receipt_timeout_unknown_chain_falls_back_to_testnet_budget() {
+        // Dev / anvil chains get the shorter budget — mirrors `default_rpc_for`.
+        assert_eq!(default_receipt_timeout(31_337), Duration::from_mins(1));
+    }
+
+    #[test]
+    fn default_approval_horizon_is_seven_days() {
+        // Pinned: the whole point of #9 is trimming the 30-day hardcode to
+        // 7 days. If someone widens it, the gate-tightening premise breaks.
+        assert_eq!(DEFAULT_APPROVAL_HORIZON, Duration::from_hours(24 * 7));
     }
 }

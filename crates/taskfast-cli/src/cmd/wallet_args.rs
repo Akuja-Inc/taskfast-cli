@@ -80,10 +80,7 @@ pub fn resolve_password(password_file: Option<&Path>) -> Result<String, CmdError
 /// per process. Suppressed by `TASKFAST_SUPPRESS_PWD_WARNING=1` so CI
 /// pipelines that intentionally use the env var can quiet the noise.
 fn warn_pwd_env_once() {
-    if std::env::var("TASKFAST_SUPPRESS_PWD_WARNING")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
+    if std::env::var("TASKFAST_SUPPRESS_PWD_WARNING").is_ok_and(|v| v == "1") {
         return;
     }
     if PWD_WARNING_EMITTED.swap(true, Ordering::Relaxed) {

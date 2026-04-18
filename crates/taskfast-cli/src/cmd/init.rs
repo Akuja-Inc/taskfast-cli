@@ -71,6 +71,10 @@ use super::webhook::persist_secret;
 const WALLET_STATUS_COMPLETE: &str = "complete";
 
 #[derive(Debug, Parser)]
+// CLI surface: each flag is an independent user opt-in/out. Collapsing
+// them into a state machine or nested enum would make clap's derive
+// macro unergonomic without narrowing the actual accepted inputs.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Args {
     /// Wallet address to register (BYOW). Mutually exclusive with
     /// `--generate-wallet`.
@@ -149,9 +153,20 @@ pub struct Args {
     pub webhook_secret_file: Option<PathBuf>,
 
     /// Event type to subscribe to after webhook registration. Repeat
-    /// for multiple. Ignored unless `--webhook-url` is also set.
+    /// for multiple. Ignored unless `--webhook-url` is also set. When
+    /// `--webhook-url` is supplied and this flag is omitted, init
+    /// auto-subscribes to the worker default set (same list as
+    /// `taskfast webhook subscribe --default-events`); pass
+    /// `--no-default-events` to opt out and register a URL-only endpoint.
     #[arg(long = "webhook-event", value_name = "EVENT")]
     pub webhook_events: Vec<String>,
+
+    /// Opt out of auto-subscribing to default worker events when
+    /// `--webhook-url` is set without any explicit `--webhook-event`.
+    /// Preserves the pre-existing behavior of registering a URL with
+    /// zero subscriptions (a deliberate URL-only push endpoint).
+    #[arg(long)]
+    pub no_default_events: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -212,6 +227,8 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         keystore_path: ctx.keystore_path.clone(),
         confirm_above_budget: ctx.confirm_above_budget.clone(),
         log_format: ctx.log_format.clone(),
+        approval_horizon: ctx.approval_horizon,
+        receipt_timeout: ctx.receipt_timeout,
         dry_run: ctx.dry_run,
         quiet: ctx.quiet,
     };
@@ -644,6 +661,7 @@ async fn maybe_request_faucet(args: &Args, wallet: &WalletOutcome, dry_run: bool
 /// `--webhook-url` wasn't passed; the remaining variants mirror the
 /// shell-script states (`registered`, `registered + subscribed`,
 /// `would_register`).
+#[cfg_attr(test, derive(Debug))]
 enum WebhookOutcome {
     Skipped,
     DryRun {
@@ -663,6 +681,26 @@ enum WebhookOutcome {
     },
 }
 
+/// Resolve the final event subscription list for `taskfast init
+/// --webhook-url`. Precedence: explicit `--webhook-event` flags win
+/// outright; absent-events + `--no-default-events` yields an empty list
+/// (URL-only registration); absent-events + default path fans out to
+/// the 9-event worker default (`webhook::DEFAULT_WORKER_EVENTS`). Shared
+/// between the live subscription path and the `--dry-run` envelope so
+/// the preview never diverges from what would be pushed.
+fn resolve_webhook_events(args: &Args) -> Vec<String> {
+    if !args.webhook_events.is_empty() {
+        return args.webhook_events.clone();
+    }
+    if args.no_default_events {
+        return Vec::new();
+    }
+    crate::cmd::webhook::DEFAULT_WORKER_EVENTS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
 async fn maybe_configure_webhook(
     client: &TaskFastClient,
     args: &Args,
@@ -671,10 +709,11 @@ async fn maybe_configure_webhook(
     let Some(url) = args.webhook_url.as_deref().filter(|s| !s.trim().is_empty()) else {
         return WebhookOutcome::Skipped;
     };
+    let events = resolve_webhook_events(args);
     if dry_run {
         return WebhookOutcome::DryRun {
             url: url.to_string(),
-            events: args.webhook_events.clone(),
+            events,
             secret_file: args.webhook_secret_file.clone(),
         };
     }
@@ -702,10 +741,10 @@ async fn maybe_configure_webhook(
         },
         _ => false,
     };
-    let subscribed = if args.webhook_events.is_empty() {
+    let subscribed = if events.is_empty() {
         None
     } else {
-        match webhooks::update_subscriptions(client, args.webhook_events.clone()).await {
+        match webhooks::update_subscriptions(client, events).await {
             Ok(subs) => Some(subs.subscribed_event_types),
             Err(e) => {
                 return WebhookOutcome::Failed {
@@ -867,6 +906,7 @@ mod tests {
             webhook_url: None,
             webhook_secret_file: None,
             webhook_events: Vec::new(),
+            no_default_events: false,
         }
     }
 
@@ -952,5 +992,98 @@ mod tests {
             "dry_run_generated"
         );
         assert_eq!(WalletOutcome::Skipped.tag(), "skipped");
+    }
+
+    #[test]
+    fn resolve_webhook_events_uses_defaults_when_events_empty() {
+        // URL set, no explicit events, no opt-out → auto-subscribe to
+        // the 9-event worker default. Guards PLAN #11: raw `init
+        // --webhook-url X` must not silently register a zero-event
+        // endpoint.
+        let args = Args {
+            webhook_url: Some("https://h.example/x".into()),
+            ..base_args()
+        };
+        let events = resolve_webhook_events(&args);
+        assert_eq!(events, crate::cmd::webhook::DEFAULT_WORKER_EVENTS);
+    }
+
+    #[test]
+    fn resolve_webhook_events_respects_no_default_events_opt_out() {
+        // Explicit opt-out preserves the legacy URL-only behavior.
+        let args = Args {
+            webhook_url: Some("https://h.example/x".into()),
+            no_default_events: true,
+            ..base_args()
+        };
+        assert!(resolve_webhook_events(&args).is_empty());
+    }
+
+    #[test]
+    fn resolve_webhook_events_explicit_events_override_defaults() {
+        // Any `--webhook-event` wins: the defaults are NOT mixed in.
+        let args = Args {
+            webhook_url: Some("https://h.example/x".into()),
+            webhook_events: vec!["task_assigned".into()],
+            ..base_args()
+        };
+        assert_eq!(resolve_webhook_events(&args), vec!["task_assigned"]);
+    }
+
+    #[test]
+    fn resolve_webhook_events_explicit_events_win_over_no_default_events() {
+        // Safety: --no-default-events is an opt-out flag for the
+        // auto-population path; explicit events should still flow.
+        let args = Args {
+            webhook_url: Some("https://h.example/x".into()),
+            webhook_events: vec!["bid_accepted".into()],
+            no_default_events: true,
+            ..base_args()
+        };
+        assert_eq!(resolve_webhook_events(&args), vec!["bid_accepted"]);
+    }
+
+    #[tokio::test]
+    async fn maybe_configure_webhook_dry_run_surfaces_default_events() {
+        // Dry-run envelope must preview what the live path would push —
+        // otherwise `init --webhook-url X --dry-run` silently differs
+        // from the real call.
+        let client = TaskFastClient::from_api_key("http://127.0.0.1:1/", "k").unwrap();
+        let args = Args {
+            webhook_url: Some("https://h.example/x".into()),
+            ..base_args()
+        };
+        let outcome = maybe_configure_webhook(&client, &args, true).await;
+        match outcome {
+            WebhookOutcome::DryRun { events, url, .. } => {
+                assert_eq!(url, "https://h.example/x");
+                assert_eq!(events, crate::cmd::webhook::DEFAULT_WORKER_EVENTS);
+            }
+            other => panic!("expected DryRun, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn maybe_configure_webhook_dry_run_respects_no_default_events() {
+        let client = TaskFastClient::from_api_key("http://127.0.0.1:1/", "k").unwrap();
+        let args = Args {
+            webhook_url: Some("https://h.example/x".into()),
+            no_default_events: true,
+            ..base_args()
+        };
+        let outcome = maybe_configure_webhook(&client, &args, true).await;
+        match outcome {
+            WebhookOutcome::DryRun { events, .. } => assert!(events.is_empty()),
+            other => panic!("expected DryRun, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn maybe_configure_webhook_no_url_is_skipped() {
+        // Regression guard: the auto-subscribe branch must not fire
+        // when the URL is absent — init stays single-purpose.
+        let client = TaskFastClient::from_api_key("http://127.0.0.1:1/", "k").unwrap();
+        let outcome = maybe_configure_webhook(&client, &base_args(), true).await;
+        assert!(matches!(outcome, WebhookOutcome::Skipped));
     }
 }

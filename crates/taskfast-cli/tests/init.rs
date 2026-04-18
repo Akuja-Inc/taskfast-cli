@@ -48,6 +48,7 @@ fn base_args() -> Args {
         webhook_url: None,
         webhook_secret_file: None,
         webhook_events: Vec::new(),
+        no_default_events: false,
     }
 }
 

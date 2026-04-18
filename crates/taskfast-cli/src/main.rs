@@ -165,7 +165,7 @@ async fn main() -> std::process::ExitCode {
         }
     };
 
-    let ctx = cmd::Ctx::from_parts(
+    let ctx = match cmd::Ctx::from_parts(
         cli.api_key,
         cli.env,
         cli.api_base,
@@ -173,7 +173,18 @@ async fn main() -> std::process::ExitCode {
         cli.dry_run,
         cli.quiet,
         &cfg,
-    );
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            // Malformed duration strings in config surface here, before any
+            // subcommand runs. Emit the same Usage envelope as a bad flag.
+            if !cli.quiet {
+                let env = cli.env.unwrap_or(cmd::DEFAULT_ENVIRONMENT);
+                Envelope::error(env, cli.dry_run, &e).emit();
+            }
+            return exit::ExitCode::Usage.into();
+        }
+    };
 
     if let Some(level) = cli.verbose.as_deref() {
         let format = cli

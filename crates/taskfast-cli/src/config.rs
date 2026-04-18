@@ -130,6 +130,21 @@ pub struct Config {
     /// still win over this.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_format: Option<String>,
+
+    /// Poster approval deadline for `escrow sign`. Human-readable
+    /// duration string (e.g. `"7d"`, `"24h"`). `None` = built-in
+    /// default (7 days). Flag `--approval-horizon` and env var
+    /// `TASKFAST_APPROVAL_HORIZON` still win over this. Malformed
+    /// values are rejected at CLI startup, not mid-escrow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_horizon: Option<String>,
+
+    /// Receipt-polling ceiling for `escrow sign`. Human-readable
+    /// duration. `None` = network-aware default (3min mainnet,
+    /// 1min testnet). Flag `--receipt-timeout` and env var
+    /// `TASKFAST_RECEIPT_TIMEOUT` still win over this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_timeout: Option<String>,
 }
 
 // `skip_serializing_if` is required by serde to take `&T`, so clippy's
@@ -294,6 +309,8 @@ impl Config {
             webhook_secret_path: None,
             confirm_above_budget: None,
             log_format: None,
+            approval_horizon: None,
+            receipt_timeout: None,
         }
     }
 }
@@ -356,6 +373,8 @@ mod tests {
             webhook_secret_path: Some(PathBuf::from("/tmp/hook.secret")),
             confirm_above_budget: Some("1000".into()),
             log_format: Some("json".into()),
+            approval_horizon: Some("7d".into()),
+            receipt_timeout: Some("3min".into()),
         }
     }
 
