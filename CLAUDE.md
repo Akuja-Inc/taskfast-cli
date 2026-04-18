@@ -1,0 +1,1 @@
+Reference the AGENTS.md file for guidance on how to work with this codebase.
