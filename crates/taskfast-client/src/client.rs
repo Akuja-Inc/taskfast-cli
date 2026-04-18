@@ -197,7 +197,7 @@ pub async fn map_api_error(err: api::Error<()>) -> Error {
 /// Owning human's display name + email, returned by `GET /users/me`.
 /// Lives alongside the hand-rolled fetch until the endpoint is added to
 /// `spec/openapi.yaml` and the type can be regenerated under
-/// [`api::types`](crate::api::types).
+/// [`crate::api::types`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct UserProfile {
     /// Display name for the owning human (e.g. `"Alice Smith"`).
