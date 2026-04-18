@@ -214,7 +214,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     .await
 }
 
-/// Same as [`run`] but with an injectable [`Prompter`] and an explicit
+/// Same as [`run`] but with an injectable [`crate::cmd::init_tui::Prompter`] and an explicit
 /// `interactive` gate so tests can drive the TUI branches under
 /// `cargo test` (where neither stdin nor stdout is a TTY). Production
 /// callers should use [`run`].
