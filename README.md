@@ -6,6 +6,8 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.95-orange.svg)](./Cargo.toml)
 
+> 📖 **[Full docs on the wiki](https://github.com/Akuja-Inc/taskfast-cli/wiki)** — installation, command reference, agent skill, release process.
+
 ## Install
 
 **Shell (macOS / Linux):**
