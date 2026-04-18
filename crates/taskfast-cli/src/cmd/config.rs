@@ -71,7 +71,7 @@ pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
 }
 
 fn show(ctx: &Ctx, args: ShowArgs) -> CmdResult {
-    let cfg = Config::load(&ctx.config_path).map_err(|e| CmdError::Usage(e.to_string()))?;
+    let cfg = Config::load(&ctx.config_path)?;
     let data = json!({
         "path": ctx.config_path.display().to_string(),
         "config": serialize_for_display(&cfg, args.reveal),
@@ -97,7 +97,7 @@ fn set(ctx: &Ctx, args: SetArgs) -> CmdResult {
             .filter(|s| !s.is_empty())
     };
 
-    let mut cfg = Config::load(&ctx.config_path).map_err(|e| CmdError::Usage(e.to_string()))?;
+    let mut cfg = Config::load(&ctx.config_path)?;
 
     let before = field_summary(&cfg, &args.key);
     apply_set(&mut cfg, &args.key, value.as_deref())?;
@@ -118,8 +118,7 @@ fn set(ctx: &Ctx, args: SetArgs) -> CmdResult {
         ));
     }
 
-    cfg.save(&ctx.config_path)
-        .map_err(|e| CmdError::Usage(e.to_string()))?;
+    cfg.save(&ctx.config_path)?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
