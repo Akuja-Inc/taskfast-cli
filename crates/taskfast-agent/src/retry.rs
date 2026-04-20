@@ -78,12 +78,7 @@ where
                 // If a server ever echoes the X-API-Key header into an
                 // error body, the full Display / Debug would carry that
                 // secret into every log sink downstream.
-                tracing::debug!(
-                    attempt,
-                    ?delay,
-                    kind = err.kind(),
-                    "retrying after error"
-                );
+                tracing::debug!(attempt, ?delay, kind = err.kind(), "retrying after error");
                 tokio::time::sleep(delay).await;
                 attempt += 1;
             }

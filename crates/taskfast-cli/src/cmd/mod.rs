@@ -147,11 +147,7 @@ impl Ctx {
             parse_duration_cfg(cfg.receipt_timeout.as_deref(), "receipt_timeout")?;
         let environment = cli_env.or(cfg.environment).unwrap_or(DEFAULT_ENVIRONMENT);
         let api_base = cli_api_base.or_else(|| cfg.api_base.clone());
-        enforce_endpoint_guard(
-            environment,
-            api_base.as_deref(),
-            cli_allow_custom_endpoints,
-        )?;
+        enforce_endpoint_guard(environment, api_base.as_deref(), cli_allow_custom_endpoints)?;
         Ok(Self {
             api_key: cli_api_key.or_else(|| cfg.api_key.clone()),
             environment,
@@ -605,7 +601,8 @@ mod tests {
             log_format: Some("json".into()),
             ..Config::default()
         };
-        let ctx = Ctx::from_parts(None, None, None, None, false, false, false, &cfg).expect("valid cfg");
+        let ctx =
+            Ctx::from_parts(None, None, None, None, false, false, false, &cfg).expect("valid cfg");
         assert_eq!(ctx.wallet_address.as_deref(), Some("0xfeed"));
         assert_eq!(
             ctx.keystore_path.as_deref(),
@@ -621,7 +618,8 @@ mod tests {
             approval_horizon: Some("7d".into()),
             ..Config::default()
         };
-        let ctx = Ctx::from_parts(None, None, None, None, false, false, false, &cfg).expect("parse 7d");
+        let ctx =
+            Ctx::from_parts(None, None, None, None, false, false, false, &cfg).expect("parse 7d");
         assert_eq!(ctx.approval_horizon, Some(Duration::from_hours(24 * 7)));
     }
 
@@ -631,7 +629,8 @@ mod tests {
             receipt_timeout: Some("3min".into()),
             ..Config::default()
         };
-        let ctx = Ctx::from_parts(None, None, None, None, false, false, false, &cfg).expect("parse 3min");
+        let ctx =
+            Ctx::from_parts(None, None, None, None, false, false, false, &cfg).expect("parse 3min");
         assert_eq!(ctx.receipt_timeout, Some(Duration::from_mins(3)));
     }
 
@@ -667,8 +666,17 @@ mod tests {
 
     #[test]
     fn from_parts_duration_fields_none_when_config_absent() {
-        let ctx = Ctx::from_parts(None, None, None, None, false, false, false, &Config::default())
-            .expect("default cfg is valid");
+        let ctx = Ctx::from_parts(
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            &Config::default(),
+        )
+        .expect("default cfg is valid");
         assert!(ctx.approval_horizon.is_none());
         assert!(ctx.receipt_timeout.is_none());
     }
@@ -803,7 +811,8 @@ mod tests {
         );
         // allow_custom=true because "http://cfg" is a test fixture, not a
         // well-known endpoint — the F2 guard would otherwise refuse it.
-        let ctx = Ctx::from_parts(None, None, None, None, false, false, true, &cfg).expect("valid cfg");
+        let ctx =
+            Ctx::from_parts(None, None, None, None, false, false, true, &cfg).expect("valid cfg");
         assert_eq!(ctx.api_key.as_deref(), Some("cfg_key"));
         assert_eq!(ctx.environment, Environment::Staging);
         assert_eq!(ctx.api_base.as_deref(), Some("http://cfg"));
@@ -811,8 +820,17 @@ mod tests {
 
     #[test]
     fn from_parts_defaults_when_nothing_set() {
-        let ctx = Ctx::from_parts(None, None, None, None, false, false, false, &Config::default())
-            .expect("default cfg is valid");
+        let ctx = Ctx::from_parts(
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            &Config::default(),
+        )
+        .expect("default cfg is valid");
         assert!(ctx.api_key.is_none());
         assert_eq!(ctx.environment, DEFAULT_ENVIRONMENT);
         assert!(ctx.api_base.is_none());
@@ -906,16 +924,34 @@ mod tests {
     #[test]
     fn from_parts_guard_ignores_missing_api_base() {
         // No override ⇒ we use the env default ⇒ nothing to guard against.
-        let ctx = Ctx::from_parts(None, None, None, None, false, false, false, &Config::default())
-            .expect("no api_base = no guard");
+        let ctx = Ctx::from_parts(
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            &Config::default(),
+        )
+        .expect("no api_base = no guard");
         assert!(ctx.api_base.is_none());
     }
 
     #[test]
     fn from_parts_dry_run_and_quiet_are_invocation_scoped() {
         // These never come from config, only from the CLI.
-        let ctx = Ctx::from_parts(None, None, None, None, true, true, false, &Config::default())
-            .expect("default cfg is valid");
+        let ctx = Ctx::from_parts(
+            None,
+            None,
+            None,
+            None,
+            true,
+            true,
+            false,
+            &Config::default(),
+        )
+        .expect("default cfg is valid");
         assert!(ctx.dry_run);
         assert!(ctx.quiet);
     }

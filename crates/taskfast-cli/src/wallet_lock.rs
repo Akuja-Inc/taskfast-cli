@@ -46,10 +46,7 @@ pub fn acquire(keystore_path: &Path) -> Result<WalletGuard, CmdError> {
         .open(&lock_path)
         .map_err(|e| CmdError::Usage(format!("open wallet lock {}: {e}", lock_path.display())))?;
     FileExt::lock_exclusive(&f).map_err(|e| {
-        CmdError::Usage(format!(
-            "acquire wallet lock {}: {e}",
-            lock_path.display()
-        ))
+        CmdError::Usage(format!("acquire wallet lock {}: {e}", lock_path.display()))
     })?;
     Ok(WalletGuard(f))
 }

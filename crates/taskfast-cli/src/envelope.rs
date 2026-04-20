@@ -130,12 +130,13 @@ mod tests {
 
     #[test]
     fn with_warnings_populates_the_array() {
-        let env = Envelope::success(Environment::Prod, false, serde_json::json!({})).with_warnings(
-            vec![SecurityWarning {
-                code: "custom_api_base",
-                message: "api_base overridden via --allow-custom-endpoints".into(),
-            }],
-        );
+        let env =
+            Envelope::success(Environment::Prod, false, serde_json::json!({})).with_warnings(vec![
+                SecurityWarning {
+                    code: "custom_api_base",
+                    message: "api_base overridden via --allow-custom-endpoints".into(),
+                },
+            ]);
         let v = serde_json::to_value(&env).unwrap();
         let arr = v["security_warnings"].as_array().unwrap();
         assert_eq!(arr.len(), 1);

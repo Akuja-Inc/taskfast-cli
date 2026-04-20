@@ -67,7 +67,10 @@ fn is_well_known_tempo_rpc(url: &str) -> bool {
 /// check when developers run against a local anvil/hardhat node.
 fn is_loopback_url(url: &str) -> bool {
     match url::Url::parse(url) {
-        Ok(u) => matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]" | "::1")),
+        Ok(u) => matches!(
+            u.host_str(),
+            Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+        ),
         Err(_) => false,
     }
 }
@@ -78,11 +81,7 @@ fn is_loopback_url(url: &str) -> bool {
 ///   * A plain-HTTP mainnet RPC, unless the host is loopback.
 ///
 /// Returns the original URL on success so callers can chain.
-fn validate_rpc_url(
-    url: &str,
-    network: Network,
-    allow_custom: bool,
-) -> Result<&str, CmdError> {
+fn validate_rpc_url(url: &str, network: Network, allow_custom: bool) -> Result<&str, CmdError> {
     let custom = !is_well_known_tempo_rpc(url);
     if custom && !allow_custom {
         return Err(CmdError::Usage(format!(
@@ -93,10 +92,7 @@ fn validate_rpc_url(
              fee-transfer RPC traffic."
         )));
     }
-    if matches!(network, Network::Mainnet)
-        && url.starts_with("http://")
-        && !is_loopback_url(url)
-    {
+    if matches!(network, Network::Mainnet) && url.starts_with("http://") && !is_loopback_url(url) {
         return Err(CmdError::Usage(format!(
             "refusing plain-HTTP mainnet tempo_rpc_url {url:?}: MITM on a \
              mainnet RPC can observe the poster wallet and inflate gas \

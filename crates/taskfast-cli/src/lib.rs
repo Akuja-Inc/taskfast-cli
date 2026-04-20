@@ -142,11 +142,12 @@ mod tests {
     #[test]
     fn is_well_known_api_base_rejects_attacker_hosts() {
         assert!(!is_well_known_api_base("https://evil.example"));
-        assert!(!is_well_known_api_base("https://api.taskfast.app.evil.example"));
+        assert!(!is_well_known_api_base(
+            "https://api.taskfast.app.evil.example"
+        ));
         assert!(!is_well_known_api_base("http://api.taskfast.app"));
         assert!(!is_well_known_api_base("https://staging.taskfast.app"));
     }
-
 
     #[test]
     fn accounts_url_strips_api_prefix_prod() {

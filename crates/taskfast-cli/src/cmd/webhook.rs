@@ -301,7 +301,8 @@ async fn delete(ctx: &Ctx) -> CmdResult {
 /// looser perms. Mirrors [`crate::config::Config::save`].
 pub(crate) fn persist_secret(path: &std::path::Path, secret: &str) -> Result<(), CmdError> {
     let tmp = path.with_extension("secret.tmp");
-    fs::write(&tmp, secret).map_err(|e| CmdError::Usage(format!("write {}: {e}", tmp.display())))?;
+    fs::write(&tmp, secret)
+        .map_err(|e| CmdError::Usage(format!("write {}: {e}", tmp.display())))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -254,12 +254,18 @@ mod allowlist_tests {
 
     #[test]
     fn pathusd_is_allowed_on_mainnet() {
-        assert!(is_allowed_fee_token(TEMPO_MAINNET_CHAIN_ID, PATHUSD_MAINNET));
+        assert!(is_allowed_fee_token(
+            TEMPO_MAINNET_CHAIN_ID,
+            PATHUSD_MAINNET
+        ));
     }
 
     #[test]
     fn pathusd_is_allowed_on_testnet() {
-        assert!(is_allowed_fee_token(TEMPO_TESTNET_CHAIN_ID, PATHUSD_TESTNET));
+        assert!(is_allowed_fee_token(
+            TEMPO_TESTNET_CHAIN_ID,
+            PATHUSD_TESTNET
+        ));
     }
 
     #[test]

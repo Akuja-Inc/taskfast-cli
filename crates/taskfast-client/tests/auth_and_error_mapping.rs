@@ -254,8 +254,7 @@ async fn redirect_is_not_followed_so_api_key_cannot_leak_cross_host() {
     Mock::given(method("GET"))
         .and(path("/api/platform/config"))
         .respond_with(
-            ResponseTemplate::new(302)
-                .insert_header("location", format!("{}/stolen", hop.uri())),
+            ResponseTemplate::new(302).insert_header("location", format!("{}/stolen", hop.uri())),
         )
         .mount(&target)
         .await;

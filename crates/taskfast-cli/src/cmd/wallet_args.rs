@@ -180,7 +180,10 @@ mod tests {
         let f = write_temp("scrubme\n");
         let pw = resolve_password(Some(f.path())).expect("ok");
         let name = std::any::type_name_of_val(&pw);
-        assert!(name.contains("Zeroizing"), "password must be Zeroizing: {name}");
+        assert!(
+            name.contains("Zeroizing"),
+            "password must be Zeroizing: {name}"
+        );
     }
 
     #[test]
