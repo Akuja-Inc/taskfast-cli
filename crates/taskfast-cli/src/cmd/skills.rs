@@ -26,7 +26,21 @@ const SKILL_NAME: &str = "taskfast-agent";
 const SOURCE_KIND: &str = "embedded";
 const DEST_ROOTS: &[&str] = &[".claude/skills", ".agents/skills"];
 
+macro_rules! bundled_file {
+    ($path:literal) => {
+        BundledFile {
+            relative_path: $path,
+            contents: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../client-skills/taskfast-agent/",
+                $path
+            )),
+        }
+    };
+}
+
 #[derive(Debug, Parser)]
+/// Install the bundled TaskFast agent skill into local tool folders.
 pub struct Args {
     /// Approve installation without a TTY confirmation prompt.
     #[arg(long)]
@@ -40,55 +54,13 @@ struct BundledFile {
 }
 
 const BUNDLED_FILES: &[BundledFile] = &[
-    BundledFile {
-        relative_path: "SKILL.md",
-        contents: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../client-skills/taskfast-agent/SKILL.md"
-        )),
-    },
-    BundledFile {
-        relative_path: "reference/BOOT.md",
-        contents: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../client-skills/taskfast-agent/reference/BOOT.md"
-        )),
-    },
-    BundledFile {
-        relative_path: "reference/POSTER.md",
-        contents: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../client-skills/taskfast-agent/reference/POSTER.md"
-        )),
-    },
-    BundledFile {
-        relative_path: "reference/SETUP.md",
-        contents: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../client-skills/taskfast-agent/reference/SETUP.md"
-        )),
-    },
-    BundledFile {
-        relative_path: "reference/STATES.md",
-        contents: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../client-skills/taskfast-agent/reference/STATES.md"
-        )),
-    },
-    BundledFile {
-        relative_path: "reference/TROUBLESHOOTING.md",
-        contents: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../client-skills/taskfast-agent/reference/TROUBLESHOOTING.md"
-        )),
-    },
-    BundledFile {
-        relative_path: "reference/WORKER.md",
-        contents: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../client-skills/taskfast-agent/reference/WORKER.md"
-        )),
-    },
+    bundled_file!("SKILL.md"),
+    bundled_file!("reference/BOOT.md"),
+    bundled_file!("reference/POSTER.md"),
+    bundled_file!("reference/SETUP.md"),
+    bundled_file!("reference/STATES.md"),
+    bundled_file!("reference/TROUBLESHOOTING.md"),
+    bundled_file!("reference/WORKER.md"),
 ];
 
 #[derive(Debug, Serialize)]
@@ -125,6 +97,12 @@ fn dialoguer_err(error: dialoguer::Error) -> io::Error {
 }
 
 #[allow(clippy::unused_async)]
+/// Install the embedded skill tree into the current working directory.
+///
+/// # Errors
+///
+/// Returns [`CmdError::Usage`] when the current directory cannot be resolved,
+/// confirmation cannot be collected, or filesystem writes fail.
 pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     let cwd = std::env::current_dir().map_err(|error| {
         CmdError::Usage(format!("failed to resolve current directory: {error}"))
@@ -142,11 +120,13 @@ fn run_with_prompter<P: ConfirmPrompter>(
 ) -> CmdResult {
     let destinations = destination_paths(cwd);
     if ctx.dry_run {
-        return Ok(success_envelope(
+        return Ok(status_envelope(
             ctx,
+            cwd,
             "dry_run",
             "no",
-            targets_with_status(&destinations, "would_install"),
+            "would_install",
+            &destinations,
         ));
     }
 
@@ -157,11 +137,13 @@ fn run_with_prompter<P: ConfirmPrompter>(
             .confirm_install(SKILL_NAME, &destinations)
             .map_err(|error| CmdError::Usage(format!("install confirmation failed: {error}")))?;
         if !approved {
-            return Ok(success_envelope(
+            return Ok(status_envelope(
                 ctx,
+                cwd,
                 "declined",
                 "yes",
-                targets_with_status(&destinations, "skipped"),
+                "skipped",
+                &destinations,
             ));
         }
         ("yes", "prompt")
@@ -178,34 +160,40 @@ fn run_with_prompter<P: ConfirmPrompter>(
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
-        json!({
-            "skill": SKILL_NAME,
-            "source": SOURCE_KIND,
-            "cwd": cwd.display().to_string(),
-            "prompted": prompted,
-            "approval": approval,
-            "targets": targets_with_status(&destinations, "installed"),
-        }),
+        status_data(cwd, approval, prompted, "installed", &destinations),
     ))
 }
 
-fn success_envelope(
+fn status_envelope(
     ctx: &Ctx,
+    cwd: &Path,
     approval: &'static str,
     prompted: &'static str,
-    targets: Vec<InstallTarget>,
+    status: &'static str,
+    destinations: &[PathBuf],
 ) -> Envelope {
     Envelope::success(
         ctx.environment,
         ctx.dry_run,
-        json!({
-            "skill": SKILL_NAME,
-            "source": SOURCE_KIND,
-            "approval": approval,
-            "prompted": prompted,
-            "targets": targets,
-        }),
+        status_data(cwd, approval, prompted, status, destinations),
     )
+}
+
+fn status_data(
+    cwd: &Path,
+    approval: &'static str,
+    prompted: &'static str,
+    status: &'static str,
+    destinations: &[PathBuf],
+) -> serde_json::Value {
+    json!({
+        "skill": SKILL_NAME,
+        "source": SOURCE_KIND,
+        "cwd": cwd.display().to_string(),
+        "approval": approval,
+        "prompted": prompted,
+        "targets": targets_with_status(destinations, status),
+    })
 }
 
 fn destination_paths(cwd: &Path) -> Vec<PathBuf> {
