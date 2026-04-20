@@ -152,6 +152,8 @@ enum Command {
     /// Inspect or edit the project-local JSON config.
     #[command(subcommand)]
     Config(cmd::config::Command),
+    /// Install the bundled TaskFast agent skill into local agent folders.
+    Skills(cmd::skills::Args),
 }
 
 #[tokio::main]
@@ -247,6 +249,7 @@ async fn main() -> std::process::ExitCode {
         Command::Platform(c) => cmd::platform::run(&ctx, c).await,
         Command::Wallet(c) => cmd::wallet::run(&ctx, c).await,
         Command::Config(c) => cmd::config::run(&ctx, c).await,
+        Command::Skills(a) => cmd::skills::run(&ctx, a).await,
     };
 
     match result {

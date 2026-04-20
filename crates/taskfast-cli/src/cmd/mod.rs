@@ -42,6 +42,7 @@ pub mod platform;
 pub mod post;
 pub mod review;
 pub mod settle;
+pub mod skills;
 pub mod task;
 pub mod wallet;
 pub mod wallet_args;
