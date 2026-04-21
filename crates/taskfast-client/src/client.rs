@@ -189,7 +189,7 @@ impl TaskFastClient {
     /// [`serde_json::Value`] instead of the strict [`api::types::AgentEventListResponse`]
     /// so the agent layer can apply per-item tolerant decoding when a
     /// single malformed event would otherwise fail the whole page.
-    /// Non-2xx responses still funnel through [`classify_response`].
+    /// Non-2xx responses still funnel through `classify_response`.
     pub async fn list_agent_events_raw(
         &self,
         cursor: Option<&str>,
