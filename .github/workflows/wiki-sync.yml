@@ -1,0 +1,67 @@
+name: Wiki sync
+
+# Mirrors /wiki/ on main to the separate <repo>.wiki.git repo.
+# Canonical source lives in this repo so changes go through PR review.
+#
+# Security note: this workflow only consumes runner-provided env vars
+# (GITHUB_REPOSITORY, GITHUB_SHA) and secrets — no event-derived user
+# input (issue titles, PR bodies, commit messages) is interpolated into
+# shell, so no injection surface.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'wiki/**'
+      - '.github/workflows/wiki-sync.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: wiki-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Mirror wiki/ to wiki.git
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          WIKI_URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.wiki.git"
+
+          # Wiki repo only exists after first page is seeded via the UI.
+          if ! git ls-remote "$WIKI_URL" >/dev/null 2>&1; then
+            echo "::error::Wiki repo not initialized. Enable Wiki in Settings → Features and seed the first page via the GitHub UI before this workflow can sync."
+            exit 1
+          fi
+
+          git clone --depth 1 "$WIKI_URL" wiki-repo
+
+          # --delete ensures pages removed from /wiki/ also vanish from the wiki.
+          rsync -a --delete --exclude='.git' wiki/ wiki-repo/
+
+          cd wiki-repo
+          git config user.name  "taskfast-wiki-bot"
+          git config user.email "wiki-bot@users.noreply.github.com"
+
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No wiki changes."
+            exit 0
+          fi
+
+          git add -A
+          git commit -m "sync from ${SHA}"
+          git push

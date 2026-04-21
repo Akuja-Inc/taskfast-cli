@@ -6,12 +6,14 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.95-orange.svg)](./Cargo.toml)
 
+> 📖 **[Full docs on the wiki](https://github.com/Akuja-Inc/taskfast-cli/wiki)** — installation, command reference, agent skill, release process.
+
 ## Install
 
 **Shell (macOS / Linux):**
 
 ```bash
-curl -LsSf https://github.com/Akuja-Inc/taskfast-cli/releases/latest/download/taskfast-installer.sh | sh
+curl -LsSf https://github.com/Akuja-Inc/taskfast-cli/releases/latest/download/taskfast-cli-installer.sh | sh
 ```
 
 **Cargo:**
@@ -23,7 +25,7 @@ cargo install taskfast-cli --locked
 **Homebrew:**
 
 ```bash
-brew install akuja-inc/taskfast/taskfast
+brew install akuja-inc/taskfast/taskfast-cli
 ```
 
 **Docker:**
@@ -101,7 +103,7 @@ The current Rust CLI surface is intentionally explicit about what is implemented
 
 | Command | Status | Notes |
 |---|---|---|
-| `taskfast init` | Implemented | Validates auth, checks readiness, provisions or registers a wallet, writes `./.taskfast/config.json` (chmod 0600, one-shot migration from legacy `.taskfast-agent.env`), optionally folds webhook registration + testnet faucet; supports headless agent creation via `--human-api-key` (server derives owner from the PAT) |
+| `taskfast init` | Implemented | Validates auth, checks readiness, provisions or registers a wallet, writes `./.taskfast/config.json` (chmod 0600), optionally folds webhook registration + testnet faucet; supports headless agent creation via `--human-api-key` (server derives owner from the PAT) |
 | `taskfast me` | Implemented | Returns profile + readiness in one envelope |
 | `taskfast task list/get/submit/approve/dispute/cancel` | Implemented | Covers worker read/submit flows and poster review/cancel flows; `list` accepts `--kind=mine\|queue\|posted` (default `mine`) with `--status` only valid for `mine` |
 | `taskfast bid list/create/cancel` | Implemented | Worker bidding commands are available |
@@ -217,7 +219,7 @@ A few design choices are important if you are extending the Rust codebase:
 - The poster path in `taskfast post` is one of the clearest examples of that reuse: it resolves keystore input, uses Tempo RPC helpers from `taskfast-agent`, signs and broadcasts the ERC-20 transfer locally, then submits the draft with the resulting transaction hash.
 - Event access is currently exposed as one-shot polling in the CLI even though the underlying libraries already separate page reads from longer-running event stream concerns.
 - `taskfast-agent` ships a `retry.rs` module with back-off helpers reusable across bootstrap, event, and webhook flows.
-- `dotenv.rs` in `taskfast-cli` is a purpose-built round-trip parser for the `.taskfast-agent.env` file written by `taskfast init` — it does not load into `std::env`.
+- `taskfast init` persists agent state to `./.taskfast/config.json` (mode 0600, atomic temp + rename); every subcommand loads it via `Config::load` and layers CLI/env overrides on top.
 
 ## `taskfast-agent` skill
 
