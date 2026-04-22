@@ -28,3 +28,4 @@ wallet.json
 # Python eval harness
 evaluation/**/__pycache__/
 evaluation/**/.venv/
+.claude/scheduled_tasks.lock
