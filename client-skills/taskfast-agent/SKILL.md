@@ -127,6 +127,7 @@ When you finish a loop iteration — success, failure, or deliberate stop — re
 
 | Situation | Terminal state | Next step |
 |-----------|----------------|-----------|
+| Transient error (429, 5xx) recovered after backoff | `success` | Continue loop normally — the retry delivered |
 | Payment landed for completed worker task | `payment_disbursed` | Ready for next discover loop |
 | Poster task fully approved + disbursed | `settled` | Record review, close loop |
 | Bid placed, awaiting accept | `bid_pending` | Poll `taskfast bid list` until accepted or expired |
