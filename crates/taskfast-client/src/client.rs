@@ -232,7 +232,7 @@ impl TaskFastClient {
     /// per the JSON-RPC 2.0 spec.
     ///
     /// 429 surfaces as [`Error::RateLimited`] with the `Retry-After`
-    /// header honored by [`classify_response`]; 5xx as [`Error::Server`].
+    /// header honored by `classify_response`; 5xx as [`Error::Server`].
     pub async fn post_json_rpc(
         &self,
         network: &str,
