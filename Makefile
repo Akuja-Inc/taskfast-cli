@@ -42,7 +42,7 @@ semver:
 coverage:
 	cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
 
-supply-chain: audit deny
+supply-chain: audit deny machete
 
 # Same gate the pre-push hook runs. Handy for manual verification.
 ci: fmt-check clippy test doc

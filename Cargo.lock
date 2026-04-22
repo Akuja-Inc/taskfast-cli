@@ -3749,7 +3749,6 @@ dependencies = [
  "alloy-signer",
  "alloy-signer-local",
  "alloy-sol-types",
- "anyhow",
  "chrono",
  "futures",
  "hex",
@@ -3787,7 +3786,6 @@ dependencies = [
  "alloy-primitives",
  "alloy-signer-local",
  "alloy-sol-types",
- "anyhow",
  "chrono",
  "clap",
  "dialoguer",
@@ -3819,7 +3817,6 @@ dependencies = [
 name = "taskfast-client"
 version = "0.3.0"
 dependencies = [
- "anyhow",
  "base64",
  "bytes",
  "chrono",
@@ -4953,8 +4950,6 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
- "serde",
- "serde_json",
  "serde_yaml",
  "toml_edit",
 ]
