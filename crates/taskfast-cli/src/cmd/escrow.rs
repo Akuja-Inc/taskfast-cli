@@ -335,7 +335,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     // server-returned escrow params). The proxy URL is sanity-checked to
     // live under the authenticated api_base — catches a misconfigured (or
     // malicious) deployment returning an off-host upstream.
-    let (rpc_url, via_proxy) = if let Some(ref url) = args.rpc_url {
+    let (rpc_url, _via_proxy) = if let Some(ref url) = args.rpc_url {
         (url.clone(), false)
     } else {
         let cfg = client.fetch_network_config().await.map_err(|e| {
@@ -401,13 +401,11 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     let total_required = deposit
         .checked_add(platform_fee)
         .ok_or_else(|| CmdError::Decode("deposit + platform_fee overflow U256".into()))?;
-    // Proxy path reuses the authenticated reqwest::Client (X-API-Key header
-    // attached); override path uses a fresh client for the bare upstream.
-    let http = if via_proxy {
-        client.http_client()
-    } else {
-        reqwest::Client::new()
-    };
+    // Pick the http client by URL prefix (any URL on `{api_base}/api/rpc/`
+    // is our authenticated proxy and needs `X-API-Key`); see
+    // `Ctx::rpc_http_client` for the rationale. A `--rpc-url` override that
+    // happens to point at the proxy still gets the authenticated client.
+    let http = ctx.rpc_http_client(&client, &rpc_url);
     let rpc = TempoRpcClient::new(http, rpc_url.clone());
     let mut approval_tx_hex: Option<String> = None;
     if !args.skip_allowance_check {

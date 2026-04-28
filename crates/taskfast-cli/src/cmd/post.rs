@@ -303,7 +303,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     // `GET /api/config/network` (public). Override path: user supplied
     // `--rpc-url` / `TEMPO_RPC_URL` and must also pass
     // `--allow-custom-endpoints`.
-    let (rpc_url, via_proxy) = resolve_rpc_url(&client, &args, ctx).await?;
+    let (rpc_url, _via_proxy) = resolve_rpc_url(&client, &args, ctx).await?;
 
     // Phase 1 — prepare. Server returns ERC-20 transfer calldata + draft_id.
     let prep = match client.inner().prepare_task_draft(&prep_body).await {
@@ -346,14 +346,13 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         )));
     }
 
-    // Default (via_proxy=true) path reuses the authenticated reqwest::Client
-    // so the per-request `X-API-Key` header lands on the proxy. Override
-    // path hits a bare upstream RPC — no TaskFast auth header to attach.
-    let http = if via_proxy {
-        client.http_client()
-    } else {
-        reqwest::Client::new()
-    };
+    // Pick the http client by URL, not by resolution branch: any URL
+    // landing on `{api_base}/api/rpc/` is the authenticated proxy and
+    // needs `X-API-Key` (set as a default header on `client.http_client()`).
+    // A `--rpc-url`/`TEMPO_RPC_URL` override that points at the proxy
+    // hit this same path; the prior `via_proxy` flag missed that case
+    // and dropped the header, returning 401 "missing API key".
+    let http = ctx.rpc_http_client(&client, &rpc_url);
     let rpc = TempoRpcClient::new(http, rpc_url.clone());
 
     // F1: consult the chain's own `eth_chainId` (not anything the server

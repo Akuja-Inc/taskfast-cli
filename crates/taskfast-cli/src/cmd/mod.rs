@@ -208,6 +208,26 @@ impl Ctx {
         TaskFastClient::from_api_key(self.base_url(), key).map_err(CmdError::from)
     }
 
+    /// Pick the reqwest client to use for a JSON-RPC URL.
+    ///
+    /// Any URL whose prefix is `{api_base}/api/rpc/` is this deployment's
+    /// authenticated proxy and **must** be hit with the X-API-Key-bearing
+    /// client; otherwise the proxy short-circuits with 401 "missing API key"
+    /// before reaching the upstream RPC. Anything else (a bare upstream
+    /// Tempo gateway via `--rpc-url`/`TEMPO_RPC_URL`) gets a fresh client
+    /// with no TaskFast headers.
+    ///
+    /// This is selected by URL prefix, not by which resolution branch the
+    /// URL came from, so a user who points `--rpc-url` / `TEMPO_RPC_URL`
+    /// at the proxy still gets the authenticated client.
+    pub fn rpc_http_client(&self, client: &TaskFastClient, rpc_url: &str) -> reqwest::Client {
+        if is_proxy_rpc_url(rpc_url, self.base_url()) {
+            client.http_client()
+        } else {
+            reqwest::Client::new()
+        }
+    }
+
     /// Fail-closed budget gate. When `confirm_above_budget` is set in the
     /// config, any mutation whose budget exceeds it must be opted into via
     /// `--yes`. By design there's no TTY prompt — automation-first stays
@@ -247,6 +267,14 @@ impl Ctx {
         }
         Ok(())
     }
+}
+
+/// True when `rpc_url` lives under this deployment's `{api_base}/api/rpc/`
+/// proxy. Used to decide whether the authenticated reqwest client (with the
+/// `X-API-Key` default header) is required for the call.
+pub(crate) fn is_proxy_rpc_url(rpc_url: &str, base_url: &str) -> bool {
+    let prefix = format!("{}/api/rpc/", base_url.trim_end_matches('/'));
+    rpc_url.starts_with(&prefix)
 }
 
 /// F2 endpoint-override guard. Refuses to run when the effective
@@ -511,6 +539,36 @@ mod tests {
             Some(Duration::from_secs(30))
         );
         assert!(sample("auth").retry_after().is_none());
+    }
+
+    #[test]
+    fn is_proxy_rpc_url_recognises_authenticated_proxy() {
+        let base = "https://staging.api.taskfast.app";
+        // Proxy URL — must use authenticated client.
+        assert!(is_proxy_rpc_url(
+            "https://staging.api.taskfast.app/api/rpc/testnet",
+            base
+        ));
+        // Trailing slash on base must not break the prefix match.
+        assert!(is_proxy_rpc_url(
+            "https://staging.api.taskfast.app/api/rpc/mainnet",
+            "https://staging.api.taskfast.app/"
+        ));
+        // Bare upstream Tempo gateway — bare client is correct (no
+        // TaskFast auth header to leak).
+        assert!(!is_proxy_rpc_url("https://rpc.moderato.tempo.xyz", base));
+        // Same host but a different path is NOT the proxy — don't
+        // attach the API key on unrelated routes.
+        assert!(!is_proxy_rpc_url(
+            "https://staging.api.taskfast.app/api/task_drafts",
+            base
+        ));
+        // Different host, even one that pretends to be a proxy path,
+        // must not pick up the authenticated client.
+        assert!(!is_proxy_rpc_url(
+            "https://attacker.example/api/rpc/testnet",
+            base
+        ));
     }
 
     #[test]
