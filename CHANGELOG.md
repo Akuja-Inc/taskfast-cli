@@ -12,6 +12,19 @@ that is the authoritative changelog.
 
 ### ⚠ BREAKING
 
+- **Env is the single source of truth for `api_base` and `network`.** Both
+  derived from `--env` / `TASKFAST_ENV` via total functions on `Environment`
+  (`prod→mainnet`, `staging→testnet`, `local→testnet`). Removed: the
+  `--network` CLI flag (on `init` and `post`), the `TEMPO_NETWORK` env
+  binding, and the `api_base` / `network` keys in `.taskfast/config.json`
+  (config schema bumped to v2). The `--api-base` flag survives as an
+  ad-hoc, never-persisted override; non-well-known values still need
+  `--allow-custom-endpoints`. Existing configs that carry the removed keys
+  hard-error on load with a remediation hint — run `taskfast config migrate`
+  to strip them. A new runtime invariant rejects deployments whose
+  `/api/config/network` advertises a network other than the env's expected
+  one (server-side enforcement of the one-network-per-deployment rule
+  tracked in #62).
 - **F2 endpoint guard.** `api_base` and `tempo_rpc_url` values that aren't
   one of the well-known TaskFast defaults (prod/staging/local for the API;
   canonical `rpc.tempo.xyz` / `rpc.moderato.tempo.xyz` for the RPC) now
