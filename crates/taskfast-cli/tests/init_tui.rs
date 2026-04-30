@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use taskfast_cli::cmd::init::{run_with_prompter, Args, Network};
+use taskfast_cli::cmd::init::{run_with_prompter, Args};
 use taskfast_cli::cmd::init_tui::{Prompter, WalletMode};
 use taskfast_cli::cmd::{CmdError, Ctx};
 use taskfast_cli::config::Config;
@@ -116,7 +116,6 @@ fn base_args() -> Args {
         generate_wallet: false,
         wallet_password_file: None,
         keystore_path: None,
-        network: Network::Testnet,
         skip_wallet: false,
         fund: false,
         human_api_key: None,
@@ -138,7 +137,7 @@ fn envelope_value(envelope: &Envelope) -> serde_json::Value {
 
 async fn mount_users_me(server: &MockServer, name: &str, email: &str) {
     Mock::given(method("GET"))
-        .and(path("/api/users/me"))
+        .and(path("/users/me"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "name": name,
             "email": email,
@@ -149,7 +148,7 @@ async fn mount_users_me(server: &MockServer, name: &str, email: &str) {
 
 async fn mount_users_me_404(server: &MockServer) {
     Mock::given(method("GET"))
-        .and(path("/api/users/me"))
+        .and(path("/users/me"))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({
             "error": "not_found",
             "message": "endpoint not deployed",
@@ -160,7 +159,7 @@ async fn mount_users_me_404(server: &MockServer) {
 
 async fn mount_post_agents(server: &MockServer) {
     Mock::given(method("POST"))
-        .and(path("/api/agents"))
+        .and(path("/agents"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": MINTED_AGENT_ID,
             "api_key": MINTED_KEY,
@@ -173,7 +172,7 @@ async fn mount_post_agents(server: &MockServer) {
 
 async fn mount_profile_active(server: &MockServer) {
     Mock::given(method("GET"))
-        .and(path("/api/agents/me"))
+        .and(path("/agents/me"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": MINTED_AGENT_ID,
             "name": "taskfast-agent",
@@ -186,13 +185,17 @@ async fn mount_profile_active(server: &MockServer) {
 
 async fn mount_readiness(server: &MockServer, wallet_status: &str, ready_to_work: bool) {
     Mock::given(method("GET"))
-        .and(path("/api/agents/me/readiness"))
+        .and(path("/agents/me/readiness"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "ready_to_work": ready_to_work,
             "checks": {
                 "api_key": {"status": "complete"},
                 "wallet": {"status": wallet_status},
                 "webhook": {"status": "not_configured", "required": false},
+            },
+            "settlement_domain": {
+                "chain_id": 42431,
+                "verifying_contract": "0x0000000000000000000000000000000000000000",
             },
         })))
         .mount(server)
@@ -201,7 +204,7 @@ async fn mount_readiness(server: &MockServer, wallet_status: &str, ready_to_work
 
 async fn mount_post_wallet(server: &MockServer, address: &str) {
     Mock::given(method("POST"))
-        .and(path("/api/agents/me/wallet"))
+        .and(path("/agents/me/wallet"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "tempo_wallet_address": address,
             "payout_method": "tempo_wallet",
@@ -346,7 +349,7 @@ async fn interactive_generate_wallet_uses_prompted_password() {
     mount_profile_active(&server).await;
     mount_readiness(&server, "missing", false).await;
     Mock::given(method("POST"))
-        .and(path("/api/agents/me/wallet"))
+        .and(path("/agents/me/wallet"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "tempo_wallet_address": "0x0000000000000000000000000000000000000000",
             "payout_method": "tempo_wallet",

@@ -27,7 +27,7 @@ use clap::Parser;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{CmdError, CmdResult, Ctx};
+use super::{validate_override_rpc_url, CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_agent::tempo_rpc::{sign_and_broadcast_erc20_transfer, TempoRpcClient};
@@ -38,52 +38,6 @@ use taskfast_client::api::types::{
     TaskDraftSubmitRequestSignature,
 };
 use taskfast_client::{map_api_error, TaskFastClient};
-
-/// True when the host is a loopback literal (`localhost`, `127.0.0.1`,
-/// `[::1]`). Used to carve out a bypass for the mainnet-HTTPS-enforce
-/// check when developers run against a local anvil/hardhat node.
-fn is_loopback_url(url: &str) -> bool {
-    match url::Url::parse(url) {
-        Ok(u) => matches!(
-            u.host_str(),
-            Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
-        ),
-        Err(_) => false,
-    }
-}
-
-/// F2 RPC-URL guard for an **override** (`--rpc-url` / `TEMPO_RPC_URL`).
-///
-/// The default path now flows through `{api_base}/api/rpc/{network}`, which
-/// inherits the `api_base` endpoint-guard already enforced by
-/// [`enforce_endpoint_guard`] — nothing to re-check there. This function
-/// only runs when the caller supplies a custom URL:
-///
-///   * Refuses any custom URL unless `allow_custom_endpoints` is set.
-///   * Refuses plain-HTTP on mainnet unless the host is loopback.
-fn validate_override_rpc_url(
-    url: &str,
-    network: Network,
-    allow_custom: bool,
-) -> Result<&str, CmdError> {
-    if !allow_custom {
-        return Err(CmdError::Usage(format!(
-            "refusing to use custom tempo_rpc_url {url:?}: pass \
-             --allow-custom-endpoints (or set \
-             TASKFAST_ALLOW_CUSTOM_ENDPOINTS=1) to override. The default \
-             path routes RPC through `{{api_base}}/api/rpc/{{network}}` \
-             which inherits the api_base endpoint guard."
-        )));
-    }
-    if matches!(network, Network::Mainnet) && url.starts_with("http://") && !is_loopback_url(url) {
-        return Err(CmdError::Usage(format!(
-            "refusing plain-HTTP mainnet tempo_rpc_url {url:?}: MITM on a \
-             mainnet RPC can observe the poster wallet and inflate gas \
-             price. Use HTTPS or point at loopback for local testing."
-        )));
-    }
-    Ok(url)
-}
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -154,13 +108,10 @@ pub struct Args {
     #[arg(long, env = "TASKFAST_WALLET_PASSWORD_FILE")]
     pub wallet_password_file: Option<PathBuf>,
 
-    /// Tempo RPC endpoint. Defaults to the canonical URL for `--network`.
+    /// Tempo RPC endpoint. Defaults to the canonical proxy URL the
+    /// deployment advertises for the env's network.
     #[arg(long, env = "TEMPO_RPC_URL")]
     pub rpc_url: Option<String>,
-
-    /// Network selector for the default RPC URL.
-    #[arg(long, default_value = "mainnet", env = "TEMPO_NETWORK")]
-    pub network: Network,
 
     /// Acknowledge oversized budgets. Required when the budget exceeds
     /// `confirm_above_budget` in the config. No-op when the gate is unset
@@ -190,22 +141,6 @@ impl From<AssignmentType> for TaskDraftPrepareRequestAssignmentType {
         match a {
             AssignmentType::Open => Self::Open,
             AssignmentType::Direct => Self::Direct,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum Network {
-    Mainnet,
-    Testnet,
-}
-
-impl Network {
-    /// Key into the `GET /api/config/network` response map.
-    fn name(self) -> &'static str {
-        match self {
-            Self::Mainnet => "mainnet",
-            Self::Testnet => "testnet",
         }
     }
 }
@@ -270,14 +205,15 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     // Dry-run must perform zero HTTP. Predict the proxy URL locally so the
     // envelope still reports what the real path would have used.
     if ctx.dry_run {
+        let network = ctx.environment.network();
         let rpc_url = if let Some(ref override_url) = args.rpc_url {
-            validate_override_rpc_url(override_url, args.network, ctx.allow_custom_endpoints)?;
+            validate_override_rpc_url(override_url, network, ctx.allow_custom_endpoints)?;
             override_url.clone()
         } else {
             format!(
-                "{}/api/rpc/{}",
+                "{}/rpc/{}",
                 ctx.base_url().trim_end_matches('/'),
-                args.network.name()
+                network.as_str()
             )
         };
         return Ok(Envelope::success(
@@ -300,10 +236,10 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     let client = ctx.client()?;
 
     // Resolve the RPC URL. Default path: pull it from the deployment's
-    // `GET /api/config/network` (public). Override path: user supplied
+    // `GET /config/network` (public). Override path: user supplied
     // `--rpc-url` / `TEMPO_RPC_URL` and must also pass
     // `--allow-custom-endpoints`.
-    let (rpc_url, via_proxy) = resolve_rpc_url(&client, &args, ctx).await?;
+    let (rpc_url, _via_proxy) = resolve_rpc_url(&client, &args, ctx).await?;
 
     // Phase 1 — prepare. Server returns ERC-20 transfer calldata + draft_id.
     let prep = match client.inner().prepare_task_draft(&prep_body).await {
@@ -346,14 +282,13 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         )));
     }
 
-    // Default (via_proxy=true) path reuses the authenticated reqwest::Client
-    // so the per-request `X-API-Key` header lands on the proxy. Override
-    // path hits a bare upstream RPC — no TaskFast auth header to attach.
-    let http = if via_proxy {
-        client.http_client()
-    } else {
-        reqwest::Client::new()
-    };
+    // Pick the http client by URL, not by resolution branch: any URL
+    // landing on `{api_base}/rpc/` is the authenticated proxy and
+    // needs `X-API-Key` (set as a default header on `client.http_client()`).
+    // A `--rpc-url`/`TEMPO_RPC_URL` override that points at the proxy
+    // hit this same path; the prior `via_proxy` flag missed that case
+    // and dropped the header, returning 401 "missing API key".
+    let http = ctx.rpc_http_client(&client, &rpc_url);
     let rpc = TempoRpcClient::new(http, rpc_url.clone());
 
     // F1: consult the chain's own `eth_chainId` (not anything the server
@@ -448,8 +383,8 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
 ///   * `(override, false)` — user supplied `--rpc-url` / `TEMPO_RPC_URL`,
 ///     passed the custom-endpoint guard, and will hit a bare upstream RPC.
 ///   * `(proxy_url, true)` — default path: the deployment's
-///     `/api/config/network` entry for the selected network points the CLI
-///     at `{api_base}/api/rpc/{network}`, which the server proxies to its
+///     `/config/network` entry for the selected network points the CLI
+///     at `{api_base}/rpc/{network}`, which the server proxies to its
 ///     own Tempo upstream (Alchemy by default). The caller should carry
 ///     the authenticated reqwest::Client through to `TempoRpcClient`.
 async fn resolve_rpc_url(
@@ -457,8 +392,9 @@ async fn resolve_rpc_url(
     args: &Args,
     ctx: &Ctx,
 ) -> Result<(String, bool), CmdError> {
+    let network = ctx.environment.network();
     if let Some(ref override_url) = args.rpc_url {
-        validate_override_rpc_url(override_url, args.network, ctx.allow_custom_endpoints)?;
+        validate_override_rpc_url(override_url, network, ctx.allow_custom_endpoints)?;
         return Ok((override_url.clone(), false));
     }
     let cfg = client.fetch_network_config().await.map_err(|e| match e {
@@ -467,7 +403,40 @@ async fn resolve_rpc_url(
         }
         other => CmdError::from(other),
     })?;
-    let name = args.network.name();
+    // Runtime invariant — issue #62 (server-side): the env's deployment must
+    // advertise exactly its one network, and nothing else.
+    //
+    // Today's deployments still advertise multiple networks per response;
+    // until #62 lands, a `len != 1` mismatch logs a warn and continues.
+    // Set TASKFAST_STRICT_ENV_NETWORK=1 to fail-closed.
+    // `--allow-custom-endpoints` and `Environment::Local` bypass entirely
+    // (matches `enforce_endpoint_guard`).
+    let name = network.as_str();
+    if !ctx.allow_custom_endpoints
+        && ctx.environment != crate::Environment::Local
+        && cfg.networks.len() != 1
+    {
+        let advertised: Vec<&str> = cfg.networks.keys().map(String::as_str).collect();
+        let strict = std::env::var("TASKFAST_STRICT_ENV_NETWORK")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        if strict {
+            return Err(CmdError::Server(format!(
+                "deployment at {} advertises networks {advertised:?}; env {} requires \
+                 exactly [{name}]. Server-side fix tracked in issue #62. Unset \
+                 TASKFAST_STRICT_ENV_NETWORK or pass --allow-custom-endpoints to bypass.",
+                ctx.base_url(),
+                ctx.environment.as_str(),
+            )));
+        }
+        tracing::warn!(
+            api_base = %ctx.base_url(),
+            env = ctx.environment.as_str(),
+            expected = name,
+            advertised = ?advertised,
+            "deployment advertises additional networks; server-side fix tracked in #62. \
+             Set TASKFAST_STRICT_ENV_NETWORK=1 to fail-closed."
+        );
+    }
     let entry = cfg.entry(name).map_err(|e| {
         CmdError::Server(format!(
             "deployment at {} does not advertise network `{name}`: {e}",
@@ -482,7 +451,7 @@ async fn resolve_rpc_url(
     // (b) a compromised backend trying to steer RPC traffic off-host —
     // minus a full MITM on api_base itself (which has its own F5/F6
     // defenses).
-    let expected_prefix = format!("{}/api/rpc/", ctx.base_url().trim_end_matches('/'));
+    let expected_prefix = format!("{}/rpc/", ctx.base_url().trim_end_matches('/'));
     if !entry.rpc_url.starts_with(&expected_prefix) {
         return Err(CmdError::Server(format!(
             "deployment at {} returned rpc_url {:?} for network `{name}`, \
@@ -546,6 +515,7 @@ fn decode_0x_bytes(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Network;
 
     #[test]
     fn validate_override_rejects_without_opt_in() {
@@ -588,7 +558,9 @@ mod tests {
 
     #[test]
     fn network_name_matches_config_map_keys() {
-        assert_eq!(Network::Mainnet.name(), "mainnet");
-        assert_eq!(Network::Testnet.name(), "testnet");
+        // The lookup key into `GET /config/network`'s `networks` map.
+        // Must stay in sync with what the deployment advertises.
+        assert_eq!(Network::Mainnet.as_str(), "mainnet");
+        assert_eq!(Network::Testnet.as_str(), "testnet");
     }
 }
