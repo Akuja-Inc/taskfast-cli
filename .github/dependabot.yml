@@ -12,6 +12,14 @@ updates:
       minor:
         patterns: ["*"]
         update-types: ["minor"]
+    # rand 0.9 bumps rand_core 0.6 -> 0.9. alloy-signer-local v1 / eth-keystore
+    # 0.5 still take a rand_core 0.6 RNG in `PrivateKeySigner::encrypt_keystore`
+    # (see crates/taskfast-agent/src/keystore.rs), so a 0.9 RNG can't satisfy
+    # that bound — the bump can't compile until we migrate to alloy v2. Re-bump
+    # manually then. (gh#25)
+    ignore:
+      - dependency-name: "rand"
+        versions: [">=0.9"]
     labels:
       - dependencies
       - triage
