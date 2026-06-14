@@ -123,6 +123,44 @@ async fn external_backer_forwards_wallet() {
 }
 
 #[tokio::test]
+async fn external_backer_trims_wallet_whitespace() {
+    // A copy-pasted address with surrounding whitespace/newline must be
+    // trimmed before it reaches the wire — not forwarded verbatim into a 422.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/stake")))
+        .and(body_partial_json(json!({ "wallet_address": WALLET })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "task_id": TASK_ID,
+            "status": "assigned",
+        })))
+        .mount(&server)
+        .await;
+
+    run(
+        &ctx_for(&server, Some("test-key")),
+        args(StakeSource::ExternalBacker, Some(&format!("  {WALLET}\n"))),
+    )
+    .await
+    .expect("padded wallet should be trimmed and accepted");
+}
+
+#[tokio::test]
+async fn external_backer_malformed_wallet_is_usage_error_without_any_http() {
+    let server = MockServer::start().await; // no mocks mounted — must not call out
+    let err = run(
+        &ctx_for(&server, Some("test-key")),
+        args(StakeSource::ExternalBacker, Some("0xnot-an-address")),
+    )
+    .await
+    .expect_err("malformed wallet must fail locally");
+    match err {
+        CmdError::Usage(m) => assert!(m.contains("--wallet"), "unexpected: {m}"),
+        other => panic!("expected Usage, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn dry_run_skips_http_and_echoes_request() {
     let server = MockServer::start().await; // no mocks mounted
     let mut ctx = ctx_for(&server, Some("test-key"));

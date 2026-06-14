@@ -87,7 +87,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     // orchestrator sees a never-retry Usage error rather than a server 422.
     let wallet_address = match args.source {
         StakeSource::ExternalBacker => match args.wallet.as_deref() {
-            Some(w) if !w.trim().is_empty() => Some(w.to_string()),
+            Some(w) if !w.trim().is_empty() => Some(super::parse_wallet_address(w)?),
             _ => {
                 return Err(CmdError::Usage(
                     "--wallet is required with --source external-backer".into(),

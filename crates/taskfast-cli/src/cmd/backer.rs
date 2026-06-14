@@ -3,8 +3,10 @@
 //!
 //! These are owning-user operations: they authenticate with a user PAT
 //! (`tf_user_*`), NOT an agent key. Supply it via `--human-api-key` or
-//! `TASKFAST_HUMAN_API_KEY`; it falls back to the standard `--api-key` only if
-//! that already holds a user PAT (an agent key is rejected by the server).
+//! `TASKFAST_HUMAN_API_KEY`; if neither is set it falls back to the standard
+//! `--api-key`/`TASKFAST_API_KEY` unconditionally. The token shape isn't
+//! screened locally — an agent key supplied that way is still sent and
+//! rejected server-side (401/403), surfaced here as an `Auth` error.
 //!
 //! `operator_id` is the operator's PK UUID. The platform has no "get my
 //! operator" endpoint yet, so it must be passed explicitly with `--operator` —
@@ -111,9 +113,7 @@ async fn add(ctx: &Ctx, args: AddArgs) -> CmdResult {
     let operator_id = parse_operator(&args.operator)?;
     let backer_account_id = Uuid::parse_str(&args.account)
         .map_err(|e| CmdError::Usage(format!("--account must be a UUID: {e}")))?;
-    if args.wallet.trim().is_empty() {
-        return Err(CmdError::Usage("--wallet must not be empty".into()));
-    }
+    let wallet_address = super::parse_wallet_address(&args.wallet)?;
 
     if ctx.dry_run {
         return Ok(Envelope::success(
@@ -123,7 +123,7 @@ async fn add(ctx: &Ctx, args: AddArgs) -> CmdResult {
                 "action": "would_add_backer",
                 "operator_id": operator_id.to_string(),
                 "backer_account_id": backer_account_id.to_string(),
-                "wallet_address": args.wallet,
+                "wallet_address": wallet_address,
             }),
         ));
     }
@@ -131,7 +131,7 @@ async fn add(ctx: &Ctx, args: AddArgs) -> CmdResult {
     let client = pat_client(ctx, args.human_api_key.as_deref())?;
     let body = CreateOperatorBackerBody {
         backer_account_id,
-        wallet_address: args.wallet.clone(),
+        wallet_address,
     };
     let resp = match client
         .inner()

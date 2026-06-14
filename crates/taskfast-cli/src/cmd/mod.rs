@@ -322,6 +322,19 @@ pub(crate) fn validate_override_rpc_url(
     Ok(url)
 }
 
+/// Trim and validate a user-supplied EVM wallet address, returning the
+/// trimmed form to forward to the server. Mirrors the `--wallet-address`
+/// preflight in `post`/`escrow`/`settle`: a malformed address is a
+/// never-retry [`CmdError::Usage`], and trimming keeps a copy-pasted
+/// trailing newline/space from turning into a server-side 422.
+pub(crate) fn parse_wallet_address(raw: &str) -> Result<String, CmdError> {
+    let trimmed = raw.trim();
+    let _: alloy_primitives::Address = trimmed
+        .parse()
+        .map_err(|e| CmdError::Usage(format!("--wallet is not a valid EVM address: {e}")))?;
+    Ok(trimmed.to_string())
+}
+
 pub(crate) fn network_policy_for_chain_id(chain_id: u64) -> Network {
     if chain_id == TEMPO_MAINNET_CHAIN_ID {
         Network::Mainnet

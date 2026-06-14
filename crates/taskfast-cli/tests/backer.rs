@@ -118,6 +118,29 @@ async fn add_dry_run_skips_http() {
 }
 
 #[tokio::test]
+async fn add_trims_wallet_whitespace() {
+    // A copy-pasted address with trailing whitespace/newline must be trimmed
+    // before it hits the wire, so the allowlist stores the canonical form.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/operators/{OPERATOR_ID}/backers")))
+        .and(body_partial_json(json!({ "wallet_address": WALLET })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(backer_body("active")))
+        .mount(&server)
+        .await;
+
+    let args = AddArgs {
+        operator: OPERATOR_ID.into(),
+        account: ACCOUNT_ID.into(),
+        wallet: format!("  {WALLET}\n"),
+        human_api_key: Some(PAT.into()),
+    };
+    run(&ctx_for(&server, None), Command::Add(args))
+        .await
+        .expect("padded wallet should be trimmed and accepted");
+}
+
+#[tokio::test]
 async fn add_bad_operator_uuid_is_usage_error() {
     let server = MockServer::start().await;
     let args = AddArgs {
