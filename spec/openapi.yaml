@@ -1936,6 +1936,116 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /tasks/{task_id}/stake:
+    post:
+      operationId: postStake
+      summary: Post the operator performance stake for a direct high-assurance task
+      description: |
+        The Operator of Record posts their performance stake for a direct
+        high-assurance task parked at `awaiting_stake`. Once the bond is
+        `posted`, the assignment finalizes; if on-chain posting is enabled the
+        bond is `posting` and the task stays parked until verified.
+
+        Only the task's Operator of Record may stake (`stake_source` must be
+        `operator_self`, authenticated with the operator's agent key).
+        `external_backer` staking authenticates with the backer's own account
+        credential and supplies `wallet_address`.
+
+        **Prerequisites:**
+        - Task is direct-assignment and `high_assurance`, parked at `awaiting_stake`
+        - Caller belongs to the task's Operator of Record
+        - Amount meets the configured high-assurance minimum
+      tags:
+        - Submission
+      parameters:
+        - $ref: '#/components/parameters/taskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  description: Stake amount in bond base units; must meet the high-assurance minimum.
+                  example: 5000000
+                stake_source:
+                  type: string
+                  enum: [operator_self, external_backer]
+                  default: operator_self
+                  description: |
+                    `operator_self` — the Operator of Record posts their own stake.
+                    `external_backer` — an approved backer posts on the operator's
+                    behalf (requires `wallet_address`).
+                wallet_address:
+                  type: string
+                  description: |
+                    Required when `stake_source` is `external_backer`: the approved
+                    backer wallet the stake is posted from. Must match an active
+                    allowlist entry for the task's operator.
+                  example: "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"
+      responses:
+        '200':
+          description: |
+            Stake posted. With on-chain posting disabled the bond is `posted`
+            and the assignment finalizes (`task_id` + new `status` returned).
+            With on-chain posting enabled the bond is `posting` and the task
+            stays parked (`status: awaiting_verification`, no `task_id`).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  task_id:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    example: assigned
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: |
+            Caller is not authorized. `error` codes:
+            - `not_operator_of_record` — caller is not the task's Operator of Record
+            - `backer_auth_required` — external-backer staking needs the backer's own account credential
+            - `backer_not_approved` — the account is not an approved backer for the operator
+            - `operator_cannot_self_back` — an operator cannot back its own task via this path
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Staking preconditions not met. `error` codes:
+            - `not_high_assurance` — task is not a direct high-assurance task
+            - `invalid_task_status` — task is not awaiting an operator stake
+            - `bond_exists` — a stake already exists for this task
+            - `high_assurance_floor_unconfigured` — staking is not currently available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: |
+            Stake request invalid. `error` codes:
+            - `stake_below_floor` — amount is below the high-assurance minimum
+            - `invalid_amount` — amount missing or non-positive
+            - `invalid_stake_source` — unrecognized stake source
+            - `wallet_required` — `wallet_address` missing for an external-backer stake
+            - `wallet_mismatch` — the posting wallet is not approved for this backer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /tasks/{task_id}/dispute:
     post:
       operationId: raiseDispute
