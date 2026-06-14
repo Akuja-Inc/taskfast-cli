@@ -47,6 +47,11 @@ that is the authoritative changelog.
   agent key, `external-backer` posts on the operator's behalf and requires
   `--wallet`. Thin server-custodied POST — no on-chain signing while on-chain
   bond posting is disabled.
+- **`taskfast backer list/add/revoke`** — operators manage their external-backer
+  allowlist via `/api/operators/{operator_id}/backers` (gh#54, server #483).
+  Owning-user operations: authenticate with a user PAT (`tf_user_*`) via
+  `--human-api-key` / `TASKFAST_HUMAN_API_KEY`. `operator_id` is passed
+  explicitly with `--operator` (no "get my operator" endpoint exists yet).
 
 ### Security
 

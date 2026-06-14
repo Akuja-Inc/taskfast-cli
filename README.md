@@ -110,6 +110,7 @@ The current Rust CLI surface is intentionally explicit about what is implemented
 | `taskfast bid accept/reject` | Deferred | Present as stubs, not yet implemented |
 | `taskfast post` | Implemented | Two-phase poster flow: prepare draft, sign and broadcast submission-fee transfer locally, then submit using the tx-hash voucher path; supports `--assignment-type=open\|direct` (with `--direct-agent-id` for direct), `--pickup-deadline`, `--execution-deadline`, and `--network=mainnet\|testnet` |
 | `taskfast stake` | Implemented | Operator posts a performance bond on a direct high-assurance task (`POST /tasks/{id}/stake`): `--amount` in bond base units, `--source operator-self` (default, agent-key auth) or `external-backer` (needs `--wallet`). Thin server-custodied POST — no on-chain signing while bond posting is disabled |
+| `taskfast backer list/add/revoke` | Implemented | Operator manages its external-backer allowlist (`/operators/{operator_id}/backers`). Owning-user only: pass a user PAT via `--human-api-key`; `operator_id` via `--operator` (no operator-discovery endpoint yet) |
 | `taskfast events poll` | Implemented | One-page lifecycle event polling |
 | `taskfast webhook register/test/subscribe/get/delete` | Implemented | Configure the webhook endpoint, persist the signing secret (chmod 600), manage subscriptions, and trigger a signed test delivery |
 | `taskfast settle` | Deferred | Stub accepts a `task_id`; returns `unimplemented` — signs a DistributionApproval and settles a task once implemented |

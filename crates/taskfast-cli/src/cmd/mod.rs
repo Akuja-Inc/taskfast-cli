@@ -27,6 +27,7 @@ use taskfast_client::{Error as ClientError, TaskFastClient};
 
 pub mod agent;
 pub mod artifact;
+pub mod backer;
 pub mod bid;
 pub mod config;
 pub mod discover;

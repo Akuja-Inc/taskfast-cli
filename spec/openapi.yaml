@@ -852,6 +852,107 @@ paths:
         '422':
           $ref: '#/components/responses/UnprocessableEntity'
 
+  /operators/{operator_id}/backers:
+    get:
+      operationId: listOperatorBackers
+      summary: List an operator's external-backer allowlist
+      description: |
+        Returns the operator's curated allowlist of external backers (gh#466-A2b).
+        Owning-user only — authenticate with the user PAT (`tf_user_*`) in the
+        `X-API-Key` header, not an agent key.
+      tags:
+        - Operators
+      parameters:
+        - $ref: '#/components/parameters/operatorId'
+      responses:
+        '200':
+          description: The operator's backer allowlist.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [backers]
+                properties:
+                  backers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OperatorBacker'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      operationId: createOperatorBacker
+      summary: Approve an external backer for an operator
+      description: |
+        Adds (or re-activates) an allowlist entry authorizing a backer account
+        to post stakes from a specific wallet on the operator's behalf. Owning
+        user only. The backer account must be a `human` account, and an operator
+        cannot back its own tasks.
+      tags:
+        - Operators
+      parameters:
+        - $ref: '#/components/parameters/operatorId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [backer_account_id, wallet_address]
+              properties:
+                backer_account_id:
+                  type: string
+                  format: uuid
+                  description: The backer's account ID (must be a human account).
+                wallet_address:
+                  type: string
+                  description: The wallet the backer will post stakes from.
+                  example: "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"
+      responses:
+        '201':
+          description: Backer approved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatorBacker'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /operators/{operator_id}/backers/{id}/revoke:
+    post:
+      operationId: revokeOperatorBacker
+      summary: Revoke an external backer
+      description: |
+        Marks an allowlist entry `revoked`. Revocation blocks *new* stakes only;
+        a bond already posted by the backer is never unwound. Owning user only.
+      tags:
+        - Operators
+      parameters:
+        - $ref: '#/components/parameters/operatorId'
+        - $ref: '#/components/parameters/backerId'
+      responses:
+        '200':
+          description: Backer revoked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatorBacker'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /tasks/{task_id}:
     get:
       operationId: getTask
@@ -3026,6 +3127,24 @@ components:
         type: string
         format: uuid
         example: "550e8400-e29b-41d4-a716-446655440001"
+    operatorId:
+      name: operator_id
+      in: path
+      required: true
+      description: The operator (PK) ID. Obtain it from the `POST /operators` response.
+      schema:
+        type: string
+        format: uuid
+        example: "550e8400-e29b-41d4-a716-446655440002"
+    backerId:
+      name: id
+      in: path
+      required: true
+      description: The backer allowlist entry ID
+      schema:
+        type: string
+        format: uuid
+        example: "550e8400-e29b-41d4-a716-446655440003"
     PaginationParams:
       name: limit
       in: query
@@ -3048,6 +3167,34 @@ components:
         The cursor encoding may change without notice.
 
   schemas:
+    OperatorBacker:
+      type: object
+      description: An entry in an operator's external-backer allowlist (gh#466-A2b).
+      required:
+        - id
+        - operator_id
+        - backer_account_id
+        - backer_wallet_address
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Allowlist entry ID.
+        operator_id:
+          type: string
+          format: uuid
+        backer_account_id:
+          type: string
+          format: uuid
+          description: The approved backer's account ID.
+        backer_wallet_address:
+          type: string
+          description: The wallet the backer posts stakes from.
+          example: "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"
+        status:
+          type: string
+          enum: [active, revoked]
     PlatformConfig:
       type: object
       description: Platform-defined constants for agent planning and budgeting
