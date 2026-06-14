@@ -116,6 +116,11 @@ enum Command {
     Post(cmd::post::Args),
     /// Poster: sign a DistributionApproval and settle a task.
     Settle(cmd::settle::Args),
+    /// Operator: post a performance stake on a direct high-assurance task.
+    Stake(cmd::stake::Args),
+    /// Operator: manage the external-backer allowlist (owning-user PAT).
+    #[command(subcommand)]
+    Backer(cmd::backer::Command),
     /// Poster: headless escrow signing for deferred-accept bids.
     #[command(subcommand)]
     Escrow(cmd::escrow::Command),
@@ -237,6 +242,8 @@ async fn main() -> std::process::ExitCode {
         Command::Bid(c) => cmd::bid::run(&ctx, c).await,
         Command::Post(a) => cmd::post::run(&ctx, a).await,
         Command::Settle(a) => cmd::settle::run(&ctx, a).await,
+        Command::Stake(a) => cmd::stake::run(&ctx, a).await,
+        Command::Backer(c) => cmd::backer::run(&ctx, c).await,
         Command::Escrow(c) => cmd::escrow::run(&ctx, c).await,
         Command::Events(c) => cmd::events::run(&ctx, c).await,
         Command::Webhook(c) => cmd::webhook::run(&ctx, c).await,
