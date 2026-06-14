@@ -55,6 +55,16 @@ if [[ "${TASKFAST_FULL_GATE:-0}" == "1" ]]; then
         echo "pre-push: TASKFAST_FULL_GATE=1 but cargo-deny not installed; skipping."
         echo "pre-push:   cargo install cargo-deny"
     fi
+
+    # Catches unused workspace deps before CI. Flags generated-code false
+    # positives too — silence via [package.metadata.cargo-machete] ignored.
+    if command -v cargo-machete >/dev/null 2>&1; then
+        step "cargo machete"
+        cargo machete
+    else
+        echo "pre-push: TASKFAST_FULL_GATE=1 but cargo-machete not installed; skipping."
+        echo "pre-push:   cargo install cargo-machete --locked"
+    fi
 fi
 
 echo

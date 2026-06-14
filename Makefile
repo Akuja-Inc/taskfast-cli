@@ -1,4 +1,4 @@
-.PHONY: hooks fmt fmt-check clippy test doc ci audit deny machete semver supply-chain ci-full bump-patch bump-minor bump-major
+.PHONY: hooks fmt fmt-check clippy test doc ci audit deny machete semver coverage supply-chain ci-full bump-patch bump-minor bump-major skill-validate skill-preview
 
 hooks:
 	./.githooks/install.sh
@@ -37,7 +37,12 @@ machete:
 semver:
 	cargo semver-checks --package taskfast-cli
 
-supply-chain: audit deny
+# Line coverage via cargo-llvm-cov. Produces lcov.info.
+# Requires: cargo install cargo-llvm-cov; rustup component add llvm-tools-preview
+coverage:
+	cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+
+supply-chain: audit deny machete
 
 # Same gate the pre-push hook runs. Handy for manual verification.
 ci: fmt-check clippy test doc
@@ -54,3 +59,18 @@ bump-minor:
 
 bump-major:
 	cargo xtask bump major
+
+# Validate the bundled taskfast-agent skill against the vercel-labs/skills
+# installer. Run before opening any PR that touches skills/taskfast-agent.
+skill-validate:
+	./scripts/validate-skill.sh
+
+# Preview what `npx skills add Akuja-Inc/taskfast-cli --skill taskfast-agent`
+# will write into a user's project, using the local working tree as the source.
+skill-preview:
+	@tmp=$$(mktemp -d); \
+		trap "rm -rf $$tmp" EXIT; \
+		echo "skill-preview: installing into $$tmp"; \
+		(cd $$tmp && DISABLE_TELEMETRY=1 npx -y -p skills add-skill add "$(CURDIR)" \
+			--skill taskfast-agent --agent claude-code --copy -y); \
+		find $$tmp -type f | sort

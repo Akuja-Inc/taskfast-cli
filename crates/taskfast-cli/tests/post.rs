@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use taskfast_cli::cmd::post::{run, Args, AssignmentType, Network};
+use taskfast_cli::cmd::post::{run, Args, AssignmentType};
 use taskfast_cli::cmd::{CmdError, Ctx};
 use taskfast_cli::{Envelope, Environment};
 
@@ -52,9 +52,40 @@ fn base_args(wallet_address: Option<String>, keystore: Option<String>) -> Args {
         keystore,
         wallet_password_file: None,
         rpc_url: None,
-        network: Network::Testnet,
         yes: false,
     }
+}
+
+/// Mount `GET /config/network` so the runtime path's fetch of the
+/// deployment's proxy URL succeeds. Returns the testnet rpc_url that will
+/// be picked (i.e. `<api_base>/rpc/testnet`) so callers can point the
+/// RPC proxy mocks at it if they need to.
+async fn mount_network_config_mock(server: &MockServer) -> String {
+    let uri = server.uri();
+    let payload = json!({
+        "networks": {
+            "testnet": {
+                "chain_id": 42431,
+                "rpc_url": format!("{uri}/rpc/testnet"),
+                "wss_url": "wss://testnet.example.invalid",
+                "explorer_url": "https://explorer-testnet.example.invalid",
+                "default_stablecoin": "PathUSD"
+            },
+            "mainnet": {
+                "chain_id": 4217,
+                "rpc_url": format!("{uri}/rpc/mainnet"),
+                "wss_url": "wss://mainnet.example.invalid",
+                "explorer_url": "https://explorer.example.invalid",
+                "default_stablecoin": null
+            }
+        }
+    });
+    Mock::given(method("GET"))
+        .and(path("/config/network"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(payload))
+        .mount(server)
+        .await;
+    format!("{uri}/rpc/testnet")
 }
 
 /// Mount all four JSON-RPC methods the sign-and-broadcast path needs.
@@ -111,6 +142,8 @@ async fn post_happy_path_end_to_end() {
     let password_path = tmp.path().join("pw");
     std::fs::write(&password_path, b"pw").unwrap();
 
+    let _ = mount_network_config_mock(&api_server).await;
+
     let draft_id = uuid::Uuid::new_v4();
     let task_id = uuid::Uuid::new_v4();
     // Real-looking ERC-20 `transfer(address,uint256)` calldata: 4b selector + 32b addr + 32b amount.
@@ -124,7 +157,7 @@ async fn post_happy_path_end_to_end() {
     let tx_hash_hex = format!("0x{}", "aa".repeat(32));
 
     Mock::given(method("POST"))
-        .and(path("/api/task_drafts"))
+        .and(path("/task_drafts"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "draft_id": draft_id,
             "payload_to_sign": calldata_hex,
@@ -134,7 +167,7 @@ async fn post_happy_path_end_to_end() {
         .await;
 
     Mock::given(method("POST"))
-        .and(path(format!("/api/task_drafts/{draft_id}/submit")))
+        .and(path(format!("/task_drafts/{draft_id}/submit")))
         .and(body_partial_json(
             json!({ "signature": tx_hash_hex.clone() }),
         ))
@@ -188,7 +221,16 @@ async fn post_dry_run_short_circuits_without_any_http() {
     assert_eq!(v["data"]["draft_id"], Value::Null);
     assert_eq!(v["data"]["title"], "test task");
     assert_eq!(v["data"]["assignment_type"], "open");
-    assert!(v["data"]["rpc_url"].as_str().unwrap().contains("tempo.xyz"));
+    // Dry-run predicts the proxy URL locally (no HTTP); shape is
+    // `{api_base}/rpc/{network}`.
+    assert!(
+        v["data"]["rpc_url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/rpc/testnet"),
+        "dry-run rpc_url: {}",
+        v["data"]["rpc_url"]
+    );
 }
 
 #[tokio::test]
@@ -238,8 +280,9 @@ async fn post_direct_without_agent_id_is_usage_error() {
 #[tokio::test]
 async fn post_prepare_401_surfaces_as_auth_error() {
     let api_server = MockServer::start().await;
+    let _ = mount_network_config_mock(&api_server).await;
     Mock::given(method("POST"))
-        .and(path("/api/task_drafts"))
+        .and(path("/task_drafts"))
         .respond_with(ResponseTemplate::new(401).set_body_json(json!({
             "error": "invalid_api_key",
             "message": "bad key",
@@ -263,12 +306,13 @@ async fn post_prepare_401_surfaces_as_auth_error() {
 #[tokio::test]
 async fn post_keystore_address_mismatch_is_usage_error() {
     let api_server = MockServer::start().await;
+    let _ = mount_network_config_mock(&api_server).await;
 
     // Server returns a happy prepare; our signer won't match --wallet-address.
     let draft_id = uuid::Uuid::new_v4();
     let calldata_hex = format!("0x{}", "00".repeat(4 + 64));
     Mock::given(method("POST"))
-        .and(path("/api/task_drafts"))
+        .and(path("/task_drafts"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "draft_id": draft_id,
             "payload_to_sign": calldata_hex,
@@ -310,13 +354,14 @@ async fn post_rejects_non_allowlisted_fee_token() {
     // server named.
     let api_server = MockServer::start().await;
     let rpc_server = MockServer::start().await;
+    let _ = mount_network_config_mock(&api_server).await;
 
     let draft_id = uuid::Uuid::new_v4();
     let calldata_hex = format!("0x{}", "00".repeat(4 + 64));
     let attacker_token = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 
     Mock::given(method("POST"))
-        .and(path("/api/task_drafts"))
+        .and(path("/task_drafts"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "draft_id": draft_id,
             "payload_to_sign": calldata_hex,
@@ -377,6 +422,7 @@ async fn post_missing_api_key_errors_before_any_http() {
 async fn post_forwards_completion_criteria() {
     let api_server = MockServer::start().await;
     let rpc_server = MockServer::start().await;
+    let _ = mount_network_config_mock(&api_server).await;
 
     let signer = PrivateKeySigner::random();
     let wallet_addr = format!("{:#x}", signer.address());
@@ -400,7 +446,7 @@ async fn post_forwards_completion_criteria() {
     // body_partial_json matches on a subset — this asserts the field is
     // present with the expected check_type without over-constraining order.
     Mock::given(method("POST"))
-        .and(path("/api/task_drafts"))
+        .and(path("/task_drafts"))
         .and(body_partial_json(json!({
             "completion_criteria": [{"check_type": "regex"}]
         })))
@@ -413,7 +459,7 @@ async fn post_forwards_completion_criteria() {
         .await;
 
     Mock::given(method("POST"))
-        .and(path(format!("/api/task_drafts/{draft_id}/submit")))
+        .and(path(format!("/task_drafts/{draft_id}/submit")))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": task_id,
             "status": "open",
@@ -504,7 +550,7 @@ async fn post_criteria_file_merges_with_inline() {
 
     // File entry goes first, inline second — assert both land in order.
     Mock::given(method("POST"))
-        .and(path("/api/task_drafts"))
+        .and(path("/task_drafts"))
         .and(body_partial_json(json!({
             "completion_criteria": [
                 {"check_type": "file_exists", "description": "from file"},
@@ -519,7 +565,7 @@ async fn post_criteria_file_merges_with_inline() {
         .mount(&api_server)
         .await;
     Mock::given(method("POST"))
-        .and(path(format!("/api/task_drafts/{draft_id}/submit")))
+        .and(path(format!("/task_drafts/{draft_id}/submit")))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": task_id,
             "status": "open",

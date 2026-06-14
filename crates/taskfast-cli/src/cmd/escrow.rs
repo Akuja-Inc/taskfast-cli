@@ -28,7 +28,7 @@ use clap::Parser;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{CmdError, CmdResult, Ctx};
+use super::{network_policy_for_chain_id, validate_override_rpc_url, CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_agent::bootstrap;
@@ -40,12 +40,9 @@ use taskfast_client::api::types::{
 };
 use taskfast_client::map_api_error;
 
-/// Canonical Tempo RPC endpoints — mirrors `cmd::post`. Kept in sync with
-/// `lib/task_fast/payments/tempo_constants.ex`.
-const TEMPO_MAINNET_RPC: &str = "https://rpc.tempo.xyz";
-const TEMPO_TESTNET_RPC: &str = "https://rpc.moderato.tempo.xyz";
-
 /// Tempo chain IDs — must match `DistributionDomain::mainnet`/`testnet`.
+/// Used by the network-aware receipt-timeout default. RPC URLs are no
+/// longer hardcoded here; they come from `GET /config/network`.
 const TEMPO_MAINNET_CHAIN_ID: i64 = 4217;
 const TEMPO_TESTNET_CHAIN_ID: i64 = 42_431;
 
@@ -68,6 +65,7 @@ const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 fn default_receipt_timeout(chain_id: i64) -> Duration {
     match chain_id {
         TEMPO_MAINNET_CHAIN_ID => DEFAULT_RECEIPT_TIMEOUT_MAINNET,
+        TEMPO_TESTNET_CHAIN_ID => DEFAULT_RECEIPT_TIMEOUT_TESTNET,
         _ => DEFAULT_RECEIPT_TIMEOUT_TESTNET,
     }
 }
@@ -97,8 +95,9 @@ pub struct SignArgs {
     #[arg(long, env = "TEMPO_WALLET_ADDRESS")]
     pub wallet_address: Option<String>,
 
-    /// Tempo RPC override. Defaults to the canonical URL for the inferred
-    /// `chain_id` (mainnet 4217 → rpc.tempo.xyz, testnet 42431 → moderato).
+    /// Tempo RPC override. Defaults to the deployment's authenticated
+    /// proxy URL for `params.chain_id` (reverse-looked-up in the
+    /// `GET /config/network` map returned by the backend).
     #[arg(long, env = "TEMPO_RPC_URL")]
     pub rpc_url: Option<String>,
 
@@ -152,28 +151,14 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     let readiness = bootstrap::get_readiness(&client)
         .await
         .map_err(CmdError::from)?;
-    let domain_spec = readiness.settlement_domain.ok_or_else(|| {
-        CmdError::Usage(
-            "readiness has no settlement_domain — server is not configured for settlement".into(),
-        )
-    })?;
+    let domain_spec = readiness.settlement_domain;
     if domain_spec.chain_id != params.chain_id {
         return Err(CmdError::Decode(format!(
             "readiness chain_id={} disagrees with escrow params chain_id={}",
             domain_spec.chain_id, params.chain_id
         )));
     }
-    let verifying_contract_str = domain_spec
-        .verifying_contract
-        .as_ref()
-        .map(|v| v.to_string())
-        .ok_or_else(|| {
-            CmdError::Usage(
-                "readiness.settlement_domain.verifying_contract is null; \
-                 server has no TaskEscrow contract configured"
-                    .into(),
-            )
-        })?;
+    let verifying_contract_str = domain_spec.verifying_contract.to_string();
     let verifying_contract: Address = verifying_contract_str.parse().map_err(|e| {
         CmdError::Decode(format!(
             "readiness returned invalid verifying_contract `{verifying_contract_str}`: {e}"
@@ -330,10 +315,43 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         .into()
     };
 
-    let rpc_url = args
-        .rpc_url
-        .clone()
-        .unwrap_or_else(|| default_rpc_for(params.chain_id).to_string());
+    // Resolve RPC URL. Override flows to a bare upstream gateway; default
+    // path pulls the deployment's proxy URL from `GET /config/network`
+    // (reverse-lookup by chain_id, so the selected entry matches the
+    // server-returned escrow params). The proxy URL is sanity-checked to
+    // live under the authenticated api_base — catches a misconfigured (or
+    // malicious) deployment returning an off-host upstream.
+    let (rpc_url, _via_proxy) = if let Some(ref url) = args.rpc_url {
+        validate_override_rpc_url(
+            url,
+            network_policy_for_chain_id(chain_id_u64),
+            ctx.allow_custom_endpoints,
+        )?;
+        (url.clone(), false)
+    } else {
+        let cfg = client.fetch_network_config().await.map_err(|e| {
+            CmdError::Server(format!("fetch network config from {}: {e}", ctx.base_url()))
+        })?;
+        let (_name, entry) = cfg.entry_by_chain_id(params.chain_id).map_err(|e| {
+            CmdError::Server(format!(
+                "deployment at {} does not advertise chain_id={}: {e}",
+                ctx.base_url(),
+                params.chain_id
+            ))
+        })?;
+        let expected_prefix = format!("{}/rpc/", ctx.base_url().trim_end_matches('/'));
+        if !entry.rpc_url.starts_with(&expected_prefix) {
+            return Err(CmdError::Server(format!(
+                "deployment at {} returned rpc_url {:?} for chain_id={}, \
+                 which does not live under `{expected_prefix}…`. Refusing \
+                 to route RPC traffic off-host.",
+                ctx.base_url(),
+                entry.rpc_url,
+                params.chain_id,
+            )));
+        }
+        (entry.rpc_url.clone(), true)
+    };
 
     if ctx.dry_run {
         return Ok(Envelope::success(
@@ -374,7 +392,12 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     let total_required = deposit
         .checked_add(platform_fee)
         .ok_or_else(|| CmdError::Decode("deposit + platform_fee overflow U256".into()))?;
-    let rpc = TempoRpcClient::new(reqwest::Client::new(), rpc_url.clone());
+    // Pick the http client by URL prefix (any URL on `{api_base}/rpc/`
+    // is our authenticated proxy and needs `X-API-Key`); see
+    // `Ctx::rpc_http_client` for the rationale. A `--rpc-url` override that
+    // happens to point at the proxy still gets the authenticated client.
+    let http = ctx.rpc_http_client(&client, &rpc_url);
+    let rpc = TempoRpcClient::new(http, rpc_url.clone());
     let mut approval_tx_hex: Option<String> = None;
     if !args.skip_allowance_check {
         let balance = erc20_balance_of(&rpc, token_address, signer.address()).await?;
@@ -459,17 +482,6 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             "deadline": deadline_unix,
         }),
     ))
-}
-
-/// `chain_id` → canonical Tempo RPC. Unknown IDs fall back to testnet to keep
-/// dev chains (e.g. anvil-on-top-of-Tempo) on a non-mainnet endpoint; the
-/// caller can always override via `--rpc-url` / `TEMPO_RPC_URL`.
-fn default_rpc_for(chain_id: i64) -> &'static str {
-    match chain_id {
-        TEMPO_MAINNET_CHAIN_ID => TEMPO_MAINNET_RPC,
-        TEMPO_TESTNET_CHAIN_ID => TEMPO_TESTNET_RPC,
-        _ => TEMPO_TESTNET_RPC,
-    }
 }
 
 async fn erc20_balance_of(
@@ -573,11 +585,12 @@ mod tests {
     }
 
     #[test]
-    fn default_rpc_table_pins_chain_ids() {
-        assert_eq!(default_rpc_for(4217), TEMPO_MAINNET_RPC);
-        assert_eq!(default_rpc_for(42_431), TEMPO_TESTNET_RPC);
-        // Unknown chain ⇒ testnet, never mainnet — safer default for dev chains.
-        assert_eq!(default_rpc_for(31_337), TEMPO_TESTNET_RPC);
+    fn chain_id_constants_match_tempo_protocol() {
+        // Pinned against server truth (`lib/task_fast/payments/tempo_constants.ex`)
+        // and the `DistributionDomain` domain-separator consumer. Drift here
+        // would desync the EIP-712 signing domain from the on-chain verifier.
+        assert_eq!(TEMPO_MAINNET_CHAIN_ID, 4_217);
+        assert_eq!(TEMPO_TESTNET_CHAIN_ID, 42_431);
     }
 
     #[test]

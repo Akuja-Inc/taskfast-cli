@@ -25,3 +25,10 @@ wallet.json
 .dolt/
 *.db
 .beads/dolt-monitor.pid.lock
+# Python eval harness
+evaluation/**/__pycache__/
+evaluation/**/.venv/
+.claude/scheduled_tasks.lock
+.beads/.beads-credential-key
+.beads/export-state.json
+.beads/interactions.jsonl

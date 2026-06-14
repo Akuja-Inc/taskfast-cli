@@ -3805,7 +3805,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "taskfast-agent"
-version = "0.2.7"
+version = "0.6.1"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -3813,7 +3813,6 @@ dependencies = [
  "alloy-signer",
  "alloy-signer-local",
  "alloy-sol-types",
- "anyhow",
  "chrono",
  "futures",
  "hex",
@@ -3846,12 +3845,11 @@ dependencies = [
 
 [[package]]
 name = "taskfast-cli"
-version = "0.2.7"
+version = "0.6.1"
 dependencies = [
  "alloy-primitives",
  "alloy-signer-local",
  "alloy-sol-types",
- "anyhow",
  "chrono",
  "clap",
  "dialoguer",
@@ -3883,7 +3881,6 @@ dependencies = [
 name = "taskfast-client"
 version = "0.3.0"
 dependencies = [
- "anyhow",
  "base64",
  "bytes",
  "chrono",
@@ -5013,12 +5010,10 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.2.7"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "clap",
- "serde",
- "serde_json",
  "serde_yaml",
  "toml_edit",
 ]

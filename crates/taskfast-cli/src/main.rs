@@ -48,8 +48,9 @@ struct Cli {
     #[arg(long, global = true, env = "TASKFAST_ENV")]
     env: Option<Environment>,
 
-    /// Override the resolved base URL (bypasses env → URL mapping). Useful
-    /// for pointing at a local dev server without touching prod defaults.
+    /// Ad-hoc override for the env-derived API base URL. Never persisted.
+    /// Non-well-known values require `--allow-custom-endpoints`; the guard
+    /// blocks a malicious config from silently redirecting traffic.
     #[arg(long, global = true, env = "TASKFAST_API")]
     api_base: Option<String>,
 
@@ -115,6 +116,11 @@ enum Command {
     Post(cmd::post::Args),
     /// Poster: sign a DistributionApproval and settle a task.
     Settle(cmd::settle::Args),
+    /// Operator: post a performance stake on a direct high-assurance task.
+    Stake(cmd::stake::Args),
+    /// Operator: manage the external-backer allowlist (owning-user PAT).
+    #[command(subcommand)]
+    Backer(cmd::backer::Command),
     /// Poster: headless escrow signing for deferred-accept bids.
     #[command(subcommand)]
     Escrow(cmd::escrow::Command),
@@ -236,6 +242,8 @@ async fn main() -> std::process::ExitCode {
         Command::Bid(c) => cmd::bid::run(&ctx, c).await,
         Command::Post(a) => cmd::post::run(&ctx, a).await,
         Command::Settle(a) => cmd::settle::run(&ctx, a).await,
+        Command::Stake(a) => cmd::stake::run(&ctx, a).await,
+        Command::Backer(c) => cmd::backer::run(&ctx, c).await,
         Command::Escrow(c) => cmd::escrow::run(&ctx, c).await,
         Command::Events(c) => cmd::events::run(&ctx, c).await,
         Command::Webhook(c) => cmd::webhook::run(&ctx, c).await,

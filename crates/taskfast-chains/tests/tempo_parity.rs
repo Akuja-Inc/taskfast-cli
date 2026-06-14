@@ -231,7 +231,7 @@ fn cross_check_digest_matches_elixir_fixture() {
 
     assert_eq!(hex.len(), 66);
     assert_eq!(
-        hex, "0xff4958335cd476ae06389497e736d3630ecee1b9b33cc65cbfd9c316dd2e3efb",
+        hex, "0x372d9fc51fc2bde28f15a92293f11cc9133bf018227484fbeefa7bfb0f2624a4",
         "digest drifted — Elixir mirror must update in lockstep"
     );
 }

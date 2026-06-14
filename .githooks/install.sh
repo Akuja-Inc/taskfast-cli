@@ -45,7 +45,7 @@ fi
 
 # Only warn about audit/deny when the user opts into the full gate.
 if [[ "${TASKFAST_FULL_GATE:-0}" == "1" ]]; then
-    for bin in cargo-audit cargo-deny; do
+    for bin in cargo-audit cargo-deny cargo-machete; do
         if ! command -v "$bin" >/dev/null 2>&1; then
             echo "hooks: note — '$bin' not installed (TASKFAST_FULL_GATE=1)."
             echo "hooks:        cargo install $bin"

@@ -4,6 +4,10 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    # Monday 07:00 UTC — minimal-versions weekly health check.
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -97,20 +101,151 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo install cargo-machete --locked
+      # Pin version: unpinned installs latest, and a machete false-positive
+      # rule change can break CI overnight. Bump deliberately via Dependabot
+      # or a manual PR, not silently.
+      - run: cargo install cargo-machete --locked --version 0.9.2
       - run: cargo machete
 
   semver:
-    # Detects breaking public-API changes in published crates vs. the
-    # last published version on crates.io. Only taskfast-cli is
-    # published; the others are `publish = false`. On PRs only — baseline
-    # would be the same commit on push to main.
+    # Detects breaking public-API changes in taskfast-cli. Uses git
+    # baseline (PR base SHA) instead of crates.io — the crate is not
+    # yet published, so registry lookup fails. Switch to the default
+    # crates.io baseline after first publish.
     name: cargo-semver-checks
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo install cargo-semver-checks --locked
-      - run: cargo semver-checks --package taskfast-cli
+      - env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: cargo semver-checks --package taskfast-cli --baseline-rev "$BASE_SHA"
+
+  coverage:
+    # Reports line coverage with llvm-cov. Artifact uploaded as
+    # lcov.info; wire up Codecov later with CODECOV_TOKEN secret.
+    name: coverage
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo install cargo-llvm-cov --locked
+      - run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          retention-days: 14
+
+  minimal-versions:
+    # Catches under-pinned semver ranges. Pulls the oldest version
+    # satisfying each `^` constraint and tries to build. Runs weekly
+    # (schedule) or on manual dispatch — flaps too often for PR gate.
+    name: minimal-versions
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo +nightly update -Z minimal-versions
+      - run: cargo +nightly build --workspace --locked
+
+  spec-drift:
+    # Regenerates the OpenAPI-derived client and fails if checked-in
+    # files drift from what the spec would produce. Prevents silent
+    # divergence between spec/openapi.yaml and taskfast-client.
+    name: spec-drift
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo xtask sync-spec
+      - name: Ensure no drift
+        run: |
+          if ! git diff --exit-code; then
+            echo "::error::taskfast-client drifted from spec/openapi.yaml. Run: cargo xtask sync-spec"
+            exit 1
+          fi
+
+  notify-discord:
+    # Posts a single consolidated run result to Discord. Mirrors the
+    # pattern in docker.yml. Skipped for pull_request events to avoid
+    # spam — PR status is already visible in the GitHub checks UI.
+    name: Notify Discord
+    if: ${{ always() && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    needs:
+      - fmt
+      - clippy
+      - test
+      - doc
+      - audit
+      - deny
+      - typos
+      - machete
+      - semver
+      - coverage
+      - minimal-versions
+      - spec-drift
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+    env:
+      DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+      CI_RESULT: ${{ (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) && 'failure' || 'success' }}
+    steps:
+      - name: Compute run summary
+        id: summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          format_duration() {
+            local total_seconds=$1
+            local hours=$((total_seconds / 3600))
+            local minutes=$(((total_seconds % 3600) / 60))
+            local seconds=$((total_seconds % 60))
+            printf '%02dh %02dm %02ds' "$hours" "$minutes" "$seconds"
+          }
+
+          run_started_at=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq '.run_started_at')
+          start_epoch=$(date -d "$run_started_at" +%s)
+          now_epoch=$(date +%s)
+          duration=$(format_duration $((now_epoch - start_epoch)))
+
+          if [[ "$CI_RESULT" == "success" ]]; then
+            status="passed"
+            emoji="✅"
+          else
+            status="failed"
+            emoji="❌"
+          fi
+
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "emoji=$emoji" >> "$GITHUB_OUTPUT"
+          echo "duration=$duration" >> "$GITHUB_OUTPUT"
+          echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Actions for Discord
+        if: ${{ env.DISCORD_WEBHOOK != '' }}
+        uses: Ilshidur/action-discord@0.4.0
+        env:
+          DISCORD_WEBHOOK: ${{ env.DISCORD_WEBHOOK }}
+        with:
+          args: |
+            ${{ steps.summary.outputs.emoji }} CI ${{ steps.summary.outputs.status }} for `${{ github.repository }}`
+            `Branch  :` [${{ github.ref_name }}](https://github.com/${{ github.repository }}/tree/${{ github.ref_name }})
+            `SHA     :` [`${{ steps.summary.outputs.sha_short }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+            `Event   :` `${{ github.event_name }}`
+            `Duration:` `${{ steps.summary.outputs.duration }}`
+            Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
