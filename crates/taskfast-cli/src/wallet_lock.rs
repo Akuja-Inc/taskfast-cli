@@ -22,7 +22,7 @@
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use fs4::fs_std::FileExt;
+use fs4::FileExt;
 
 use crate::cmd::CmdError;
 
@@ -45,7 +45,10 @@ pub fn acquire(keystore_path: &Path) -> Result<WalletGuard, CmdError> {
         .truncate(false)
         .open(&lock_path)
         .map_err(|e| CmdError::Usage(format!("open wallet lock {}: {e}", lock_path.display())))?;
-    FileExt::lock_exclusive(&f).map_err(|e| {
+    // fs4 1.0 renamed `lock_exclusive` -> `lock` to mirror std's stabilized
+    // file-locking API; semantics are identical (blocking exclusive lock).
+    // UFCS keeps this on fs4's trait rather than std's inherent `File::lock`.
+    FileExt::lock(&f).map_err(|e| {
         CmdError::Usage(format!("acquire wallet lock {}: {e}", lock_path.display()))
     })?;
     Ok(WalletGuard(f))
