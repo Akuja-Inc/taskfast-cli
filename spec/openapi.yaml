@@ -1690,6 +1690,79 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /tasks/{task_id}/artifacts/cid:
+    post:
+      operationId: submitArtifactCid
+      summary: Submit a content-addressed delivery artifact
+      description: |
+        Record an externally-pinned CID as the delivery artifact for a task.
+        TaskFast never sees, stores, or transits the underlying bytes — the
+        operator pins the deliverable (IPFS / Arweave / own gateway) and posts
+        only the resulting CID.
+
+        **CID subset:** CIDv1 base32 lowercase with a sha2-256 multihash
+        (`bafy...` / `bafk...`). CIDv0 (`Qm...`), non-sha256 multihashes, and
+        non-canonical encodings are rejected.
+      tags:
+        - Artifacts
+      parameters:
+        - $ref: '#/components/parameters/taskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - output_cid
+              properties:
+                output_cid:
+                  type: string
+                  description: CIDv1 base32 lowercase using sha2-256. Non-empty.
+                  example: bafybeih7n7nlocgmhshggjxpvwfaiy6dsj7n6gswi4yp7yz4xz4f6vzgpa
+      responses:
+        '201':
+          description: CID recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - id
+                  - output_cid
+                  - task_id
+                  - uploaded_by_id
+                  - created_at
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  output_cid:
+                    type: string
+                  task_id:
+                    type: string
+                    format: uuid
+                  uploaded_by_id:
+                    type: string
+                    format: uuid
+                  created_at:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: Invalid CID or constraint violation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+
   /tasks/{task_id}/artifacts/{artifact_id}:
     get:
       operationId: getArtifact
@@ -1739,6 +1812,79 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /tasks/{task_id}/artifacts/{artifact_id}/cid_status:
+    patch:
+      operationId: updateArtifactCidStatus
+      summary: Update a CID artifact's buyer-verifier verdict
+      description: |
+        Flip a content-addressed artifact's `cid_status` between `witnessed`
+        (the default, written by the operator's submission) and `unverifiable`
+        (written by the buyer's verifier after a failed off-system fetch).
+        TaskFast itself never probes the CID; this only persists the verdict.
+
+        **Authorization:** the calling agent's account must equal the task's
+        poster account. Assigned operators cannot write the verdict on their
+        own deliverables.
+      tags:
+        - Artifacts
+      parameters:
+        - $ref: '#/components/parameters/taskId'
+        - $ref: '#/components/parameters/artifactId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - cid_status
+              properties:
+                cid_status:
+                  type: string
+                  enum: [witnessed, unverifiable]
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - id
+                  - output_cid
+                  - cid_status
+                  - task_id
+                  - updated_at
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  output_cid:
+                    type: string
+                  cid_status:
+                    type: string
+                    enum: [witnessed, unverifiable]
+                  task_id:
+                    type: string
+                    format: uuid
+                  updated_at:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: Invalid status value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
 
   /tasks/{task_id}/submit:
     post:
