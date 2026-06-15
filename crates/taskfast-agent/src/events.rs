@@ -74,6 +74,9 @@ pub async fn list_events_page(
     cursor: Option<&str>,
     limit: Option<i64>,
 ) -> Result<AgentEventListResponse> {
+    // progenitor 0.14 / typify generates `limit` as `Option<NonZeroU64>`
+    // (the spec's `minimum: 1` now lives in the type).
+    let limit = limit.and_then(taskfast_client::page_limit);
     match client.inner().list_agent_events(cursor, limit).await {
         Ok(v) => Ok(v.into_inner()),
         Err(e) => Err(map_api_error(e).await),

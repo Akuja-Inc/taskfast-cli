@@ -24,7 +24,7 @@ serde_json.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
-progenitor-client = "0.9"
+progenitor-client = "0.14"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
 uuid.workspace = true

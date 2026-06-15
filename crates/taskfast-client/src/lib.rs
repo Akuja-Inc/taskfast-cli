@@ -18,6 +18,19 @@ pub use client::{
 pub use errors::{Error, Result};
 pub use retry::{with_backoff, RetryPolicy};
 
+/// Re-exported so downstream crates can call the generated client's
+/// `baseurl()` / `client()` accessors — progenitor 0.11+ moved them off the
+/// inherent impl into this trait, which must be in scope at the call site.
+pub use progenitor_client::ClientInfo;
+
+/// Convert an `i64` page limit (as parsed from the CLI) into the
+/// `Option<NonZeroU64>` the generated client now requires: progenitor 0.14 /
+/// typify encodes the spec's `minimum: 1` in the type. Non-positive limits
+/// map to `None`, letting the server apply its default page size.
+pub fn page_limit(n: i64) -> Option<std::num::NonZeroU64> {
+    u64::try_from(n).ok().and_then(std::num::NonZeroU64::new)
+}
+
 /// Generated typed client + DTOs for the TaskFast OpenAPI spec.
 ///
 /// Produced by `progenitor` from `spec/openapi.yaml` at build time; see

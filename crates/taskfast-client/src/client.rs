@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::time::Duration;
 
+use progenitor_client::ClientInfo;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
@@ -321,8 +322,9 @@ pub async fn map_api_error(err: api::Error<()>) -> Error {
                     .into(),
             )
         }
-        AE::PreHookError(m) => Error::Server(format!("pre-hook: {m}")),
-        AE::PostHookError(m) => Error::Server(format!("post-hook: {m}")),
+        // progenitor 0.14 collapsed the former Pre/PostHookError variants
+        // into a single Custom variant for consumer-defined hook failures.
+        AE::Custom(m) => Error::Server(format!("hook: {m}")),
     }
 }
 

@@ -12,6 +12,7 @@ use serde_json::json;
 use super::super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
+use taskfast_client::ClientInfo;
 use taskfast_client::Error as ClientError;
 
 #[derive(Debug, Parser)]

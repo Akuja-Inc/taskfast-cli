@@ -72,7 +72,11 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
     let client = ctx.client()?;
     let resp = match client
         .inner()
-        .list_artifacts(&task_id, args.cursor.as_deref(), args.limit)
+        .list_artifacts(
+            &task_id,
+            args.cursor.as_deref(),
+            args.limit.and_then(taskfast_client::page_limit),
+        )
         .await
     {
         Ok(v) => v.into_inner(),
