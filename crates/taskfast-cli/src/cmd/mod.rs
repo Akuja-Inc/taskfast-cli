@@ -27,6 +27,7 @@ use taskfast_client::{Error as ClientError, TaskFastClient};
 
 pub mod agent;
 pub mod artifact;
+pub mod backer;
 pub mod bid;
 pub mod config;
 pub mod discover;
@@ -44,6 +45,7 @@ pub mod post;
 pub mod review;
 pub mod settle;
 pub mod skills;
+pub mod stake;
 pub mod task;
 pub mod wallet;
 pub mod wallet_args;
@@ -318,6 +320,19 @@ pub(crate) fn validate_override_rpc_url(
     }
 
     Ok(url)
+}
+
+/// Trim and validate a user-supplied EVM wallet address, returning the
+/// trimmed form to forward to the server. Mirrors the `--wallet-address`
+/// preflight in `post`/`escrow`/`settle`: a malformed address is a
+/// never-retry [`CmdError::Usage`], and trimming keeps a copy-pasted
+/// trailing newline/space from turning into a server-side 422.
+pub(crate) fn parse_wallet_address(raw: &str) -> Result<String, CmdError> {
+    let trimmed = raw.trim();
+    let _: alloy_primitives::Address = trimmed
+        .parse()
+        .map_err(|e| CmdError::Usage(format!("--wallet is not a valid EVM address: {e}")))?;
+    Ok(trimmed.to_string())
 }
 
 pub(crate) fn network_policy_for_chain_id(chain_id: u64) -> Network {

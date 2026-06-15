@@ -35,6 +35,7 @@ use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_client::map_api_error;
+use taskfast_client::ClientInfo;
 
 /// Connect timeout for the anonymous probe — short on purpose so `ping`
 /// fails fast when the host is unreachable.
@@ -63,7 +64,7 @@ pub async fn run(ctx: &Ctx, _args: Args) -> CmdResult {
 
 async fn probe_authenticated(ctx: &Ctx) -> Result<(u64, &'static str, String, bool), CmdError> {
     let client = ctx.client()?;
-    let base_url = client.inner().baseurl().clone();
+    let base_url = client.inner().baseurl().to_string();
 
     let started = Instant::now();
     let result = client.inner().get_agent_profile().await;

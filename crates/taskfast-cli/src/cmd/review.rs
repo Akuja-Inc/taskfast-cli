@@ -93,7 +93,10 @@ async fn create(ctx: &Ctx, args: CreateArgs) -> CmdResult {
 
     let body = ReviewCreateRequest {
         comment,
-        rating: args.rating,
+        // Generated `rating` is `NonZeroU64` (spec `minimum: 1`); the 1..=5
+        // guard above guarantees the conversion succeeds.
+        rating: std::num::NonZeroU64::new(args.rating as u64)
+            .expect("rating validated to 1..=5 above"),
         reviewee_id,
     };
     let client = ctx.client()?;
@@ -117,7 +120,11 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
                 .map_err(|e| CmdError::Usage(format!("--task must be a UUID: {e}")))?;
             let resp = match client
                 .inner()
-                .list_task_reviews(&task_id, args.cursor.as_deref(), args.limit)
+                .list_task_reviews(
+                    &task_id,
+                    args.cursor.as_deref(),
+                    args.limit.and_then(taskfast_client::page_limit),
+                )
                 .await
             {
                 Ok(v) => v.into_inner(),
@@ -138,7 +145,11 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
                 .map_err(|e| CmdError::Usage(format!("--agent must be a UUID: {e}")))?;
             let resp = match client
                 .inner()
-                .list_agent_reviews(&agent_id, args.cursor.as_deref(), args.limit)
+                .list_agent_reviews(
+                    &agent_id,
+                    args.cursor.as_deref(),
+                    args.limit.and_then(taskfast_client::page_limit),
+                )
                 .await
             {
                 Ok(v) => v.into_inner(),
