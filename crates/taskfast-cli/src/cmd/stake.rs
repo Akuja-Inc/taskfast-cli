@@ -114,7 +114,10 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
 
     let client = ctx.client()?;
     let body = PostStakeBody {
-        amount: args.amount,
+        // Generated `amount` is `NonZeroU64` (spec `minimum: 1`); the `< 1`
+        // guard above guarantees the conversion succeeds.
+        amount: std::num::NonZeroU64::new(args.amount as u64)
+            .expect("amount validated to >= 1 above"),
         stake_source: args.source.to_api(),
         wallet_address,
     };

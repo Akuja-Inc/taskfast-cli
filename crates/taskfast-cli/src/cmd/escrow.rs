@@ -458,7 +458,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     let body = BidEscrowFinalizeRequest {
         voucher: voucher_hex.clone(),
         poster_approval_signature: signature_hex.clone(),
-        poster_approval_deadline: BidEscrowFinalizeRequestPosterApprovalDeadline::Variant0(
+        poster_approval_deadline: BidEscrowFinalizeRequestPosterApprovalDeadline::Integer(
             deadline_unix as i64,
         ),
         memo_hash: params.memo_hash.clone(),

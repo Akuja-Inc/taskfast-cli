@@ -103,7 +103,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
             args.budget_min,
             capabilities_vec.as_ref(),
             args.cursor.as_deref(),
-            Some(args.limit),
+            taskfast_client::page_limit(args.limit),
             args.status.map(Into::into),
         )
         .await

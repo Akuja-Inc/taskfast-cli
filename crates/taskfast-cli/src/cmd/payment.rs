@@ -101,7 +101,7 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
         .list_agent_payments(
             args.cursor.as_deref(),
             args.from.as_ref(),
-            Some(args.limit),
+            taskfast_client::page_limit(args.limit),
             args.status.map(Into::into),
             args.to.as_ref(),
         )

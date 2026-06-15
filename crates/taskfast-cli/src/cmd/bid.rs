@@ -135,7 +135,10 @@ async fn list_bids(
 ) -> Result<serde_json::Value, CmdError> {
     let resp = match client
         .inner()
-        .get_agent_bids(args.cursor.as_deref(), Some(args.limit))
+        .get_agent_bids(
+            args.cursor.as_deref(),
+            taskfast_client::page_limit(args.limit),
+        )
         .await
     {
         Ok(v) => v.into_inner(),
