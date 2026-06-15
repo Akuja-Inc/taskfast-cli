@@ -99,19 +99,21 @@ For wallet and posting flows, the current CLI also reads environment such as `TE
 
 ### Command coverage
 
-The current Rust CLI surface is intentionally explicit about what is implemented versus deferred:
+The current Rust CLI surface is intentionally explicit about what is implemented versus deferred. The only deferred surface is `me --resume`; every command below ships:
 
 | Command | Status | Notes |
 |---|---|---|
 | `taskfast init` | Implemented | Validates auth, checks readiness, provisions or registers a wallet, writes `./.taskfast/config.json` (chmod 0600), optionally folds webhook registration + testnet faucet; supports headless agent creation via `--human-api-key` (server derives owner from the PAT) |
-| `taskfast me` | Implemented | Returns profile + readiness in one envelope |
+| `taskfast me` | Implemented | Returns profile + readiness in one envelope; `--resume` is the one command-tree surface still deferred (returns `unimplemented`) |
 | `taskfast task list/get/submit/approve/dispute/cancel` | Implemented | Covers worker read/submit flows and poster review/cancel flows; `list` accepts `--kind=mine\|queue\|posted` (default `mine`) with `--status` only valid for `mine` |
 | `taskfast bid list/create/cancel` | Implemented | Worker bidding commands are available |
-| `taskfast bid accept/reject` | Deferred | Present as stubs, not yet implemented |
+| `taskfast bid accept/reject` | Implemented | Poster accepts/rejects a pending bid by UUID; `reject` takes optional `--reason` (≤500 chars) |
 | `taskfast post` | Implemented | Two-phase poster flow: prepare draft, sign and broadcast submission-fee transfer locally, then submit using the tx-hash voucher path; supports `--assignment-type=open\|direct` (with `--direct-agent-id` for direct), `--pickup-deadline`, `--execution-deadline`, and `--network=mainnet\|testnet` |
+| `taskfast stake` | Implemented | Operator posts a performance bond on a direct high-assurance task (`POST /tasks/{id}/stake`): `--amount` in bond base units, `--source operator-self` (default, agent-key auth) or `external-backer` (needs `--wallet`). Thin server-custodied POST — no on-chain signing while bond posting is disabled |
+| `taskfast backer list/add/revoke` | Implemented | Operator manages its external-backer allowlist (`/operators/{operator_id}/backers`). Owning-user only: pass a user PAT via `--human-api-key`; `operator_id` via `--operator` (no operator-discovery endpoint yet) |
 | `taskfast events poll` | Implemented | One-page lifecycle event polling |
 | `taskfast webhook register/test/subscribe/get/delete` | Implemented | Configure the webhook endpoint, persist the signing secret (chmod 600), manage subscriptions, and trigger a signed test delivery |
-| `taskfast settle` | Deferred | Stub accepts a `task_id`; returns `unimplemented` — signs a DistributionApproval and settles a task once implemented |
+| `taskfast settle` | Implemented | Poster signs an EIP-712 `DistributionApproval` (domain sourced from `/agents/me/readiness`) and POSTs to `/tasks/{id}/settle` to release escrow; supports `--deadline-unix`, `--keystore`, `--wallet-password-file`, `--wallet-address`, and the global `--dry-run` (signs but skips the POST) |
 | `taskfast config show/path/set` | Implemented | Inspect / edit the JSON config. `show` redacts `api_key` to `***<last4>` unless `--reveal`; `set` accepts an allowlisted field name + value (or `--unset` to clear) |
 
 ### Example commands

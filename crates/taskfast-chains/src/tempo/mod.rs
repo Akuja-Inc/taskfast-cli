@@ -9,8 +9,8 @@
 //! binary has no Foundry dependency. Two signing surfaces:
 //!
 //! - [`sign_distribution`] — the production path for `taskfast settle`.
-//!   Hashes a [`DistributionApproval`] struct against the TaskEscrow EIP-712
-//!   domain and signs the resulting 32-byte digest with the caller's key.
+//!   Hashes a [`DistributionApproval`] struct against the ArbitratedEscrow
+//!   EIP-712 domain and signs the resulting 32-byte digest with the caller's key.
 //! - [`sign_hash_raw`]     — escape hatch for ad-hoc message hashes that the
 //!   server asks the agent to sign (non-712 flows).
 //!
@@ -93,7 +93,10 @@ fn normalize_addr(s: &str) -> String {
     stripped.to_ascii_lowercase()
 }
 
-pub const TASK_ESCROW_DOMAIN_NAME: &str = "TaskEscrow";
+// gh#311: the on-chain contract renamed its EIP-712 domain TaskEscrow →
+// ArbitratedEscrow (`EIP712("ArbitratedEscrow","1")`). The const identifier is
+// kept (internal vocabulary) to match the Elixir side; only the value moved.
+pub const TASK_ESCROW_DOMAIN_NAME: &str = "ArbitratedEscrow";
 pub const TASK_ESCROW_DOMAIN_VERSION: &str = "1";
 
 sol! {
