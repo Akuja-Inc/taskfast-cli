@@ -9,6 +9,8 @@ ignore = [
     "RUSTSEC-2024-0436",
     # rand 0.8 — unsound only under custom-logger + thread_rng reseed race; not triggered here
     "RUSTSEC-2026-0097",
+    # proc-macro-error2 — unmaintained; build-time transitive of the clap/typify macro tree (no runtime exposure)
+    "RUSTSEC-2026-0173",
 ]
 
 [licenses]

@@ -39,6 +39,20 @@ that is the authoritative changelog.
   (i.e. `--env prod`) is refused unless the host is loopback. Local
   anvil/hardhat forks still work.
 
+### Added
+
+- **`taskfast stake`** — operators post a performance bond on a direct
+  high-assurance task via `POST /tasks/{id}/stake` (gh#54). `--amount` is in
+  bond base units; `--source operator-self` (default) authenticates with the
+  agent key, `external-backer` posts on the operator's behalf and requires
+  `--wallet`. Thin server-custodied POST — no on-chain signing while on-chain
+  bond posting is disabled.
+- **`taskfast backer list/add/revoke`** — operators manage their external-backer
+  allowlist via `/operators/{operator_id}/backers` (gh#54, server #483).
+  Owning-user operations: authenticate with a user PAT (`tf_user_*`) via
+  `--human-api-key` / `TASKFAST_HUMAN_API_KEY`. `operator_id` is passed
+  explicitly with `--operator` (no "get my operator" endpoint exists yet).
+
 ### Security
 
 - **F1 PathUSD fee-token allowlist.** `taskfast post` now fetches
