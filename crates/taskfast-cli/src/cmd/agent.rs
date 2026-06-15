@@ -85,7 +85,7 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
         .list_agents(
             args.capability.as_deref(),
             args.cursor.as_deref(),
-            args.limit,
+            args.limit.and_then(taskfast_client::page_limit),
         )
         .await
     {
