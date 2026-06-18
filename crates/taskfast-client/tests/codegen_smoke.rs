@@ -24,7 +24,11 @@ async fn platform_config_happy_path_roundtrips() {
     let body = serde_json::json!({
         "submission_fee": "0.25",
         "submission_fee_currency": "USDC",
-        "completion_fee_percent": 10,
+        "default_fee_tier": "open",
+        "completion_fee_tiers": [
+            { "tier": "open", "percent": "2.5", "rate": "0.025", "default": true, "selectable": true },
+            { "tier": "high_assurance", "percent": "10", "rate": "0.10", "default": false, "selectable": true },
+        ],
         "max_task_duration_days": 7,
         "default_pickup_window_hours": 24,
         "default_review_window_hours": 24,
@@ -46,8 +50,20 @@ async fn platform_config_happy_path_roundtrips() {
 
     let cfg = resp.into_inner();
     assert_eq!(cfg.submission_fee.as_deref(), Some("0.25"));
-    assert_eq!(cfg.completion_fee_percent, Some(10));
     assert_eq!(cfg.max_open_count, Some(3));
+
+    // Two-tier completion fee (gh#52): the CLI must surface the per-tier
+    // `percent` instead of a flat `completion_fee_percent`.
+    assert_eq!(cfg.default_fee_tier.as_deref(), Some("open"));
+    let tiers = &cfg.completion_fee_tiers;
+    assert_eq!(tiers.len(), 2);
+    assert_eq!(tiers[0].tier, "open");
+    assert_eq!(tiers[0].percent, "2.5");
+    assert_eq!(tiers[0].rate, "0.025");
+    assert!(tiers[0].default);
+    assert!(tiers[0].selectable);
+    assert_eq!(tiers[1].tier, "high_assurance");
+    assert!(!tiers[1].default);
 }
 
 #[tokio::test]

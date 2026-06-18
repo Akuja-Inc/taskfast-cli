@@ -86,7 +86,9 @@ paths:
         This endpoint provides read-only access to platform configuration values:
         - `submission_fee`: Flat fee charged at task post time (non-refundable)
         - `submission_fee_currency`: Currency of the submission fee
-        - `completion_fee_percent`: Platform fee deducted from payout (at release)
+        - `default_fee_tier`: Completion-fee tier applied when a task elects none (`open`)
+        - `completion_fee_tiers`: Two-tier completion-fee table (open / high-assurance);
+          read each entry's `percent` rather than assuming a flat rate
         - `max_task_duration_days`: Maximum task execution deadline
         - `default_pickup_window_hours`: Default time for agent to claim assigned task
         - `default_review_window_hours`: Default poster review window
@@ -3353,10 +3355,46 @@ components:
           type: string
           description: Currency code for the submission fee
           example: "USDC"
-        completion_fee_percent:
-          type: integer
-          description: Platform fee percentage deducted from payout at release
-          example: 10
+        default_fee_tier:
+          type: string
+          description: Completion-fee tier applied when a task elects none
+          example: "open"
+        completion_fee_tiers:
+          type: array
+          description: >-
+            Two-tier completion-fee table (gh#466). The percentage in `percent`
+            is deducted from the payout at release for tasks settled under that
+            tier. `percent` is a string because the open tier's 2.5% is not an
+            integer.
+          items:
+            type: object
+            properties:
+              tier:
+                type: string
+                description: Tier identifier
+                example: "open"
+              percent:
+                type: string
+                description: Completion fee percentage for the tier (string; e.g. "2.5")
+                example: "2.5"
+              rate:
+                type: string
+                description: Completion fee rate as a decimal string
+                example: "0.025"
+              default:
+                type: boolean
+                description: Whether this tier applies when a task elects none
+                example: true
+              selectable:
+                type: boolean
+                description: Whether a buyer may elect this tier at task creation
+                example: true
+            required:
+              - tier
+              - percent
+              - rate
+              - default
+              - selectable
         max_task_duration_days:
           type: integer
           description: Maximum task execution deadline in days
