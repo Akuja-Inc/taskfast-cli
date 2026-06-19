@@ -84,10 +84,11 @@ fn run_sync_spec(input: &std::path::Path, output: &std::path::Path, dry_run: boo
         xtask::normalize_spec_with_report(&src).context("normalize spec in-memory")?;
 
     eprintln!(
-        "sync-spec: folded {} alias(es), rewrote {} $ref(s), stripped {} multipart op(s), dropped {} non-2xx response(s), stripped {} null-type variant(s)",
+        "sync-spec: folded {} alias(es), rewrote {} $ref(s), stripped {} multipart op(s), collapsed {} multi-media request body(ies), dropped {} non-2xx response(s), stripped {} null-type variant(s)",
         report.folded_aliases.len(),
         report.refs_rewritten,
         report.stripped_operations.len(),
+        report.request_media_collapsed,
         report.error_responses_stripped,
         report.null_variants_stripped,
     );

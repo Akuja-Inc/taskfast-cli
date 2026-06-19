@@ -29,7 +29,7 @@ use crate::envelope::Envelope;
 
 use taskfast_agent::bootstrap;
 use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
-use taskfast_client::api::types::{SettleTaskBody, SettleTaskBodySignature};
+use taskfast_client::api::types::SettleTaskBody;
 use taskfast_client::map_api_error;
 
 #[derive(Debug, Parser)]
@@ -212,14 +212,13 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         ));
     }
 
-    // 10. Live POST. The regex-validated newtype rejects anything that
-    //     doesn't match the spec's `^0x[0-9a-fA-F]{130}$` pattern — a
-    //     failure here means `sign_distribution` regressed (crypto-layer
-    //     bug), not a network/server issue.
-    let signature: SettleTaskBodySignature = signature_hex
-        .parse()
-        .map_err(|e| CmdError::Signing(format!("signer produced malformed signature hex: {e}")))?;
-    let body = SettleTaskBody { signature };
+    // 10. Live POST. `signature` is a plain string in the current spec; the
+    //     `0x`-prefixed 65-byte EIP-712 shape is validated server-side. A
+    //     malformed value here would mean `sign_distribution` regressed
+    //     (crypto-layer bug), not a network/server issue.
+    let body = SettleTaskBody {
+        signature: signature_hex,
+    };
     let resp = match client.inner().settle_task(&task_id, &body).await {
         Ok(v) => v.into_inner(),
         Err(e) => return Err(map_api_error(e).await.into()),

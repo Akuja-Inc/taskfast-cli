@@ -41,6 +41,19 @@
 //! The removed operationIds are reported via [`Report::stripped_operations`]
 //! so callers can verify nothing unexpected disappeared.
 //!
+//! ## Multi-media-type request collapse
+//!
+//! progenitor 0.x panics (`more media types than expected`) when a request
+//! body declares more than one `content` media type. The OAuth endpoints
+//! (`POST /oauth2/token`, `POST /oauth2/revoke`) accept both
+//! `application/json` and `application/x-www-form-urlencoded`, each pointing
+//! at the *same* request schema. The normalizer collapses such bodies to a
+//! single preferred media type (`application/json` when present, else the
+//! first declared), which is lossless here because the variants share a
+//! schema. Runs *after* the multipart strip so multipart-bearing operations
+//! are already gone and never get collapsed instead of removed. Count surfaced
+//! via [`Report::request_media_collapsed`].
+//!
 //! ## Error response strip
 //!
 //! progenitor 0.9 asserts `response_types.len() <= 1` for both the success
@@ -61,7 +74,15 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_yaml::{Mapping, Value};
 
 /// Schemas known to be structural clones of `#/components/schemas/Error`.
-pub const ERROR_ALIASES: &[&str] = &["WalletBalanceNotFoundError", "WebhookNoWebhookError"];
+///
+/// Empty since the server's `Error` schema grew optional envelope fields
+/// (`details`, `status`, `fallback`, `errors`) that the minimal
+/// `WalletBalanceNotFoundError` / `WebhookNoWebhookError` shapes don't carry.
+/// Those two are still `{error, message}`-only and are referenced solely from
+/// non-2xx responses, which the error-response strip pass removes before
+/// progenitor — so they no longer need folding. Re-add a name here if a future
+/// schema is a byte-for-byte structural clone of `Error`.
+pub const ERROR_ALIASES: &[&str] = &[];
 
 const NULL_VARIANT_SCHEMA_KEYS: &[&str] = &["oneOf", "anyOf"];
 
@@ -70,17 +91,23 @@ const NULL_VARIANT_SCHEMA_KEYS: &[&str] = &["oneOf", "anyOf"];
 /// Returns the rewritten YAML as a string. Idempotent: running it on already
 /// normalized output is a no-op (aliases are absent, so nothing rewrites).
 pub fn normalize_spec(yaml: &str) -> Result<String> {
-    let mut doc: Value = serde_yaml::from_str(yaml).context("parse spec YAML")?;
-    let report = normalize_in_place(&mut doc)?;
-    let out = serde_yaml::to_string(&doc).context("re-serialize normalized spec")?;
+    let (out, report) = normalize_with_aliases(yaml, ERROR_ALIASES)?;
     tracing_nothing(&report); // suppress unused_variable warning when no tracing is wired
     Ok(out)
 }
 
 /// As [`normalize_spec`] but also returns a summary of what changed.
 pub fn normalize_spec_with_report(yaml: &str) -> Result<(String, Report)> {
+    normalize_with_aliases(yaml, ERROR_ALIASES)
+}
+
+/// Core of [`normalize_spec`], parameterized on the alias list. Production
+/// callers pass [`ERROR_ALIASES`] (currently empty); the unit tests pass an
+/// explicit list so the fold and drift-check passes stay covered regardless of
+/// what the live spec needs today.
+fn normalize_with_aliases(yaml: &str, aliases: &[&str]) -> Result<(String, Report)> {
     let mut doc: Value = serde_yaml::from_str(yaml).context("parse spec YAML")?;
-    let report = normalize_in_place(&mut doc)?;
+    let report = normalize_in_place(&mut doc, aliases)?;
     let out = serde_yaml::to_string(&doc).context("re-serialize normalized spec")?;
     Ok((out, report))
 }
@@ -102,9 +129,13 @@ pub struct Report {
     /// arrays anywhere in the document (progenitor 0.9 doesn't support
     /// the OpenAPI 3.1 nullable-via-null-type pattern).
     pub null_variants_stripped: usize,
+    /// Count of request bodies whose multiple `content` media types were
+    /// collapsed to a single preferred type (progenitor 0.x can't pick among
+    /// `>1` request media types — "more media types than expected").
+    pub request_media_collapsed: usize,
 }
 
-fn normalize_in_place(doc: &mut Value) -> Result<Report> {
+fn normalize_in_place(doc: &mut Value, aliases: &[&str]) -> Result<Report> {
     let mut report = Report::default();
 
     let schemas_path = ["components", "schemas"];
@@ -119,7 +150,7 @@ fn normalize_in_place(doc: &mut Value) -> Result<Report> {
     let present_aliases: Vec<String> = {
         let schemas = get_mapping_path(doc, &schemas_path)
             .ok_or_else(|| anyhow!("components.schemas not a mapping"))?;
-        ERROR_ALIASES
+        aliases
             .iter()
             .copied()
             .filter(|a| schemas.contains_key(Value::from(*a)))
@@ -160,6 +191,11 @@ fn normalize_in_place(doc: &mut Value) -> Result<Report> {
 
     // Pass 4: strip multipart-only operations (progenitor 0.9 limitation).
     report.stripped_operations = strip_multipart_only_operations(doc);
+
+    // Pass 4b: collapse request bodies with >1 media type to a single
+    // preferred type. Must run after the multipart strip so multipart ops are
+    // already removed rather than collapsed onto their JSON variant.
+    report.request_media_collapsed = collapse_multi_media_request_bodies(doc);
 
     // Pass 5: strip non-2xx responses from every surviving operation
     // (progenitor 0.9 extract_responses assertion, error side).
@@ -262,6 +298,62 @@ fn strip_multipart_only_operations(doc: &mut Value) -> Vec<String> {
         }
     }
     stripped
+}
+
+/// Collapse any `requestBody.content` mapping with more than one media type
+/// down to a single preferred entry: `application/json` if present, otherwise
+/// the first declared media type (insertion order preserved). Returns the
+/// number of request bodies collapsed.
+///
+/// progenitor 0.x cannot pick among multiple request media types and panics
+/// with `more media types than expected`. Today the only affected operations
+/// are the OAuth endpoints, whose JSON and form-urlencoded variants reference
+/// the same schema, so the collapse is lossless. Multipart-bearing operations
+/// must already be stripped before this runs (see [`strip_multipart_only_operations`]).
+fn collapse_multi_media_request_bodies(doc: &mut Value) -> usize {
+    let mut collapsed = 0usize;
+    let Some(paths) = doc
+        .as_mapping_mut()
+        .and_then(|m| m.get_mut(Value::from("paths")))
+        .and_then(Value::as_mapping_mut)
+    else {
+        return 0;
+    };
+
+    const HTTP_VERBS: &[&str] = &["get", "put", "post", "delete", "patch", "options", "head"];
+    for (_path_key, path_item) in paths.iter_mut() {
+        let Some(ops) = path_item.as_mapping_mut() else {
+            continue;
+        };
+        for verb in HTTP_VERBS {
+            let Some(content) = ops
+                .get_mut(Value::from(*verb))
+                .and_then(Value::as_mapping_mut)
+                .and_then(|op| op.get_mut(Value::from("requestBody")))
+                .and_then(Value::as_mapping_mut)
+                .and_then(|body| body.get_mut(Value::from("content")))
+                .and_then(Value::as_mapping_mut)
+            else {
+                continue;
+            };
+            if content.len() <= 1 {
+                continue;
+            }
+            let keep = if content.contains_key(Value::from("application/json")) {
+                "application/json".to_string()
+            } else {
+                content
+                    .keys()
+                    .next()
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .expect("content has >1 entry")
+            };
+            content.retain(|k, _| k.as_str() == Some(keep.as_str()));
+            collapsed += 1;
+        }
+    }
+    collapsed
 }
 
 /// For each operation under `paths.*.<verb>.responses`, remove every entry
@@ -491,7 +583,8 @@ components:
 
     #[test]
     fn normalize_folds_alias_refs_and_drops_schema() {
-        let (out, report) = normalize_spec_with_report(BASE_SPEC).unwrap();
+        let (out, report) =
+            normalize_with_aliases(BASE_SPEC, &["WalletBalanceNotFoundError"]).unwrap();
         assert_eq!(
             report.folded_aliases,
             vec!["WalletBalanceNotFoundError".to_string()]
@@ -529,7 +622,7 @@ components:
             "WalletBalanceNotFoundError:\n      type: object\n      required:\n        - error\n        - message",
             "WalletBalanceNotFoundError:\n      type: object\n      required:\n        - error\n        - message\n        - drift_field",
         );
-        let err = normalize_spec(&drifted).unwrap_err();
+        let err = normalize_with_aliases(&drifted, &["WalletBalanceNotFoundError"]).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("drifted from canonical"), "got: {msg}");
     }
@@ -593,6 +686,69 @@ components:
         // Error codes are gone.
         assert!(!out.contains("'404':"), "404 not stripped:\n{out}");
         assert!(!out.contains("'503':"), "503 not stripped:\n{out}");
+    }
+
+    #[test]
+    fn multi_media_request_body_collapses_to_json() {
+        const SPEC: &str = r#"
+openapi: 3.0.0
+info: { title: test, version: 0.0.0 }
+paths:
+  /oauth2/token:
+    post:
+      operationId: oauthToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Tok' }
+          application/x-www-form-urlencoded:
+            schema: { $ref: '#/components/schemas/Tok' }
+      responses:
+        '200': { description: ok }
+  /forms:
+    post:
+      operationId: formOnly
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema: { type: object }
+          text/plain:
+            schema: { type: string }
+      responses:
+        '200': { description: ok }
+components:
+  schemas:
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error: { type: string }
+        message: { type: string }
+    Tok:
+      type: object
+"#;
+        let (out, report) = normalize_spec_with_report(SPEC).unwrap();
+        // Both multi-media request bodies collapse to a single type.
+        assert_eq!(report.request_media_collapsed, 2);
+        // oauthToken: JSON preferred — exactly one json media type remains
+        // (its form variant is gone).
+        assert_eq!(
+            out.matches("application/json:").count(),
+            1,
+            "expected oauth body kept as json:\n{out}"
+        );
+        // formOnly: no JSON, so the first declared type (form) wins and the
+        // text/plain variant is dropped.
+        assert_eq!(
+            out.matches("application/x-www-form-urlencoded:").count(),
+            1,
+            "expected form-only body kept as form-urlencoded:\n{out}"
+        );
+        assert!(
+            !out.contains("text/plain"),
+            "lower-priority text/plain variant not collapsed:\n{out}"
+        );
     }
 
     #[test]
