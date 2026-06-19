@@ -1,0 +1,53 @@
+[package]
+name = "taskfast-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+# Fuzzed crates. `taskfast-chains` keeps its default `tempo` feature so the
+# chain-id / fee-token validators compile in.
+taskfast-cli = { path = "../crates/taskfast-cli" }
+taskfast-chains = { path = "../crates/taskfast-chains" }
+taskfast-client = { path = "../crates/taskfast-client" }
+
+[[bin]]
+name = "config_parse"
+path = "fuzz_targets/config_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chain_validation"
+path = "fuzz_targets/chain_validation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "response_decode"
+path = "fuzz_targets/response_decode.rs"
+test = false
+doc = false
+bench = false
+
+# Keep this crate OUT of the parent workspace. cargo-fuzz builds it under a
+# nightly toolchain with sanitizer RUSTFLAGS, while the workspace pins stable
+# 1.95 and sets `-D warnings`. An empty [workspace] table makes `fuzz/` its
+# own workspace root, so `cargo build/clippy --workspace` never touches it.
+[workspace]
+
+[profile.release]
+# Keep frame pointers / line tables so libFuzzer crash reports are legible
+# without bloating to full `debug = 2`.
+debug = 1

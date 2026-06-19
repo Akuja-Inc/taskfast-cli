@@ -1,0 +1,1 @@
+{"networks":{"tempo-mainnet":{"chain_id":4217,"rpc_url":"https://rpc.tempo.test","wss_url":"wss://rpc.tempo.test","explorer_url":"https://explorer.tempo.test","default_stablecoin":"USDC"}}}
