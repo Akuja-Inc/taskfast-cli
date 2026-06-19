@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast events stream` — long-running WebSocket tail on `/socket/agent`.
 //!
 //! # Contract

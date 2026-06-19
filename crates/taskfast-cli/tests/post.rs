@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! End-to-end tests for `taskfast post`.
 //!
 //! Two wiremock servers: one for the TaskFast API (draft prepare + submit),

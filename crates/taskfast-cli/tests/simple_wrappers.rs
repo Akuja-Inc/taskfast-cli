@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Wiremock tests for the thin-wrapper verbs: payment / dispute / agent /
 //! platform / wallet. All are read-heavy; the shared test shape is "mock
 //! an endpoint, drive the subcommand, assert envelope shape + one error

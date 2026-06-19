@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Wiremock fixtures for `taskfast_agent::wallet`.
 //!
 //! Unit tests for `decode_wei` live in `src/wallet.rs`; this file covers

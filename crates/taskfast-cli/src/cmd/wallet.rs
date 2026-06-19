@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast wallet` — on-chain balance query for the caller's agent wallet.
 //!
 //! Single verb `balance` → `GET /agents/me/wallet/balance`. Reports the

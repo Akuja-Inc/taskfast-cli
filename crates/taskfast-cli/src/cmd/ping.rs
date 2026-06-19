@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast ping` — fast liveness probe.
 //!
 //! Two modes, chosen by whether an API key is present:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Dynamic-dispatch wrapper over enabled chain features.
 //!
 //! With zero features enabled this is an empty (unconstructable) enum — matches

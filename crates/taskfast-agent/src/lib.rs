@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! TaskFast agent orchestration library.
 //!
 //! Phase 1 scaffold: module stubs only. Each module's body (bootstrap flow,

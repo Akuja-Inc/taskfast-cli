@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! TaskFast typed HTTP client.
 //!
 //! The `api` module is generated from `spec/openapi.yaml` at build time by

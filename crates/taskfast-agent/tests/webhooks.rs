@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Wiremock fixtures for `taskfast_agent::webhooks` HTTP wrappers.
 //!
 //! Signature verification tests live in `src/webhooks.rs` — they're pure

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Feature-matrix smoke: each cfg'd module type-resolves when its feature is
 //! enabled. Pairs with CI `cargo check --no-default-features --features <x>`.
 

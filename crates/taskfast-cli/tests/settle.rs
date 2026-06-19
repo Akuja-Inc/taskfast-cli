@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! End-to-end tests for `taskfast settle`.
 //!
 //! Wires three mocked server endpoints together (`GET /tasks/{id}`,

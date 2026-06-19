@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Wallet keygen, registration with TaskFast, and balance polling.
 //!
 //! Replaces `cast wallet new` + the `scripts/init.sh` wallet provisioning

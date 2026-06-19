@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast dispute` — fetch the dispute record on a task.
 //!
 //! Thin wrapper over `GET /tasks/{id}/dispute`. Useful for reading the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Wiremock tests for `taskfast artifact`.
 
 use std::io::Write;

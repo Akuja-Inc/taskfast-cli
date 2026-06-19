@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! JSON output envelope — uniform across success/error/dry-run.
 //!
 //! Shape (success):

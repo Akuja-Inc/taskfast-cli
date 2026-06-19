@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Webhook registration + HMAC-SHA256 signature verification.
 //!
 //! Six HTTP wrappers around `/agents/me/webhooks*` plus one offline

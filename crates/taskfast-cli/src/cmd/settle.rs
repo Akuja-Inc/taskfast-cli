@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast settle` — poster signs an EIP-712 `DistributionApproval` and
 //! POSTs it to `/tasks/{id}/settle` to release escrowed funds.
 //!

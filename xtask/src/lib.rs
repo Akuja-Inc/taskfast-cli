@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // TODO: doc the public surface; xtask is internal so keep this deferred.
 #![allow(missing_docs, clippy::doc_markdown)]
 

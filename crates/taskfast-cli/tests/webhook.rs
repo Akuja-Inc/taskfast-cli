@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! End-to-end wiremock tests for `taskfast webhook`.
 //!
 //! Exercises the full pipeline for each subcommand: clap args → Ctx →

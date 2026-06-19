@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast me` — profile + readiness in one envelope.
 //!
 //! Combines `GET /agents/me` and `GET /agents/me/readiness` so orchestrators

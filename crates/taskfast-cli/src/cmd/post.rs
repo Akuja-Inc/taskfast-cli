@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast post` — two-phase task creation (prepare → sign+broadcast → submit).
 //!
 //! Supersedes the `scripts/post-task` shell flow whose defect chain is tracked

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast events` — lifecycle event read/stream/ack + AsyncAPI schema.
 //!
 //! Subcommands:

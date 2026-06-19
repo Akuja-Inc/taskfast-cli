@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast events ack <id>` — advance server-side event cursor.
 //!
 //! Written as a raw reqwest POST rather than a progenitor-generated call

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Throwaway: probe why `TaskEscrow.openWithMemo` reverts on moderato testnet
 //! for the pending-escrow bid, by narrowing down the inputs via `eth_call`.
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #![no_main]
 //! Fuzz the Tempo chain-id + fee-token validators.
 //!

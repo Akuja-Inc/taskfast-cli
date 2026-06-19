@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #![no_main]
 //! Fuzz decoding of untrusted API response bodies.
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! End-to-end tests for `taskfast backer` (gh#54 Stream B, server #483).
 //!
 //! Stands up a wiremock server, drives `cmd::backer::run` directly, and asserts

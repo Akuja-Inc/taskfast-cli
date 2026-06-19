@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast review` — post-task reputation messages.
 //!
 //! `create` writes a 1–5 star review (with comment) for the opposite party

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast-cli` library surface.
 //!
 //! The crate ships primarily as the `taskfast` binary (see `src/main.rs`),

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Wiremock fixtures for `taskfast_agent::bootstrap`.
 //!
 //! Each test covers one entry point's happy path plus one failure mode that

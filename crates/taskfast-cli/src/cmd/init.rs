@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast init` — the onboarding command.
 //!
 //! Replaces `init.sh`'s step 1-9 orchestration with a non-interactive,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! End-to-end tests for `taskfast stake` (gh#54, server #482).
 //!
 //! Each test stands up a wiremock server, drives `cmd::stake::run` directly,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! End-to-end tests for the interactive `taskfast init` branch.
 //!
 //! Uses a scripted [`Prompter`] so the PAT / wallet-mode / address /

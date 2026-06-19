@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast platform` — read global platform configuration.
 //!
 //! Single verb `config` → `GET /platform/config`. Surface the

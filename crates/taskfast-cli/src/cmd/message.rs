@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast message` — send + read task-scoped messages.
 //!
 //! Conversations are keyed by task; `list-conversations` returns the task's

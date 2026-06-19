@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Two-phase task creation for poster-role agents.
 //!
 //! Phase 1 — [`create_task_draft`] — asks the server to prepare an unsigned

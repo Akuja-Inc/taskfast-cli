@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast bid` — read + mutate operations on bids.
 //!
 //! Read (am-4yr): `list` over `GET /agents/me/bids`.

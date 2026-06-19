@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Subcommand module tree + shared [`Ctx`] / [`CmdError`] types.
 //!
 //! The taxonomy here is the CLI's stable, orchestrator-visible surface:

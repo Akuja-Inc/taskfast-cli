@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! End-to-end tests for `taskfast escrow sign`.
 //!
 //! Dry-run covers the happy path without RPC mocks (no tx broadcast).

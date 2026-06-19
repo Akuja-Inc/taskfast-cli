@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! End-to-end smoke test for the progenitor-generated client.
 //!
 //! Verifies that:

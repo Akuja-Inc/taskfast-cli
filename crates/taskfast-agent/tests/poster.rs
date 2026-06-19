@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Wiremock fixtures for `taskfast_agent::poster`.
 //!
 //! Covers the two-phase task-creation flow: `prepare_task_draft` (returns

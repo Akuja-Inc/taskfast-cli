@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Cursor-paginated event polling exposed as a `futures::Stream`.
 //!
 //! Two entry points:

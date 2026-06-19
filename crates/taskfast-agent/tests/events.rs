@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Wiremock fixtures for `taskfast_agent::events`.
 //!
 //! Exercises cursor discipline (the generated client passes `cursor=` and

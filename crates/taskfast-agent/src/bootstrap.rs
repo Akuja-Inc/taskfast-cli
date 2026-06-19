@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Agent onboarding: auth validation, headless creation, readiness gate.
 //!
 //! Mirrors the legacy `packages/agent/src/bootstrap.ts` shape (pre-Rust

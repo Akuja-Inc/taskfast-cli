@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! E2E sanity: `config set` then `config show` round-trips through the
 //! same JSON file, and redaction survives that round-trip.
 

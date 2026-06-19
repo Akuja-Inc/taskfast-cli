@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Operation-level retry loops for business-layer flows (balance polling,
 //! faucet waits, bid submission races, etc.).
 //!

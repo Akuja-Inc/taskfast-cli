@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Authenticated TaskFast client.
 //!
 //! [`TaskFastClient`] wraps the progenitor-generated [`crate::api::Client`]

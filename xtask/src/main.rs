@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `cargo xtask <cmd>` — repo automation entrypoint.
 
 #![allow(missing_docs, clippy::doc_markdown)]

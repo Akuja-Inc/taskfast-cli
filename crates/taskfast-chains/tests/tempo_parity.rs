@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Parity suite ported from `taskfast-agent/src/signing.rs` tests (beads
 //! am-6v7b.4). Byte-equality of the Elixir cross-check fixture is the critical
 //! invariant — any drift forks signature recoverability.
