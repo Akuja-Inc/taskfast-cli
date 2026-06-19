@@ -57,13 +57,21 @@ async fn platform_config_happy_path_roundtrips() {
     assert_eq!(cfg.default_fee_tier.as_deref(), Some("open"));
     let tiers = &cfg.completion_fee_tiers;
     assert_eq!(tiers.len(), 2);
-    assert_eq!(tiers[0].tier, "open");
-    assert_eq!(tiers[0].percent, "2.5");
-    assert_eq!(tiers[0].rate, "0.025");
-    assert!(tiers[0].default);
-    assert!(tiers[0].selectable);
-    assert_eq!(tiers[1].tier, "high_assurance");
-    assert!(!tiers[1].default);
+    // Look tiers up by `tier` id rather than array position — the response
+    // array order is not contractually guaranteed.
+    let find = |id: &str| {
+        tiers
+            .iter()
+            .find(|t| t.tier == id)
+            .unwrap_or_else(|| panic!("tier {id} present"))
+    };
+    let open = find("open");
+    assert_eq!(open.percent, "2.5");
+    assert_eq!(open.rate, "0.025");
+    assert!(open.default);
+    assert!(open.selectable);
+    let high = find("high_assurance");
+    assert!(!high.default);
 }
 
 #[tokio::test]
