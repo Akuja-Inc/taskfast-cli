@@ -1,4 +1,4 @@
-.PHONY: hooks fmt fmt-check clippy test doc ci audit deny machete semver coverage supply-chain ci-full bump-patch bump-minor bump-major skill-validate skill-preview
+.PHONY: hooks fmt fmt-check clippy test doc ci audit deny machete semver coverage mutants supply-chain ci-full bump-patch bump-minor bump-major skill-validate skill-preview
 
 hooks:
 	./.githooks/install.sh
@@ -41,6 +41,14 @@ semver:
 # Requires: cargo install cargo-llvm-cov; rustup component add llvm-tools-preview
 coverage:
 	cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+
+# Mutation testing — flips conditionals / drops returns / replaces values in
+# source, then re-runs tests. Surviving mutants = assertions the suite is
+# missing. Scope + test-package live in .cargo/mutants.toml (currently
+# taskfast-cli config.rs). Diagnostic, not a gate. Matches the weekly
+# mutants.yml job. Requires: cargo install cargo-mutants --locked
+mutants:
+	cargo mutants
 
 supply-chain: audit deny machete
 

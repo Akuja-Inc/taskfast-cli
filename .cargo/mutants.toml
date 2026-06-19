@@ -1,0 +1,29 @@
+# cargo-mutants configuration — mutation-testing baseline.
+#
+# cargo-mutants reads this file from `.cargo/mutants.toml` by default, so
+# `cargo mutants` (and `make mutants`) need no extra flags. See
+# https://mutants.rs, the `mutants` target in the Makefile, and the weekly
+# `.github/workflows/mutants.yml` job.
+#
+# What this buys us: line coverage proves a line *ran*; mutation testing
+# proves a line is *asserted on*. cargo-mutants flips conditionals, drops
+# `return`s, and replaces values, then re-runs the suite. A surviving mutant
+# means tests passed despite the injected bug — a gap coverage can't see.
+# This is a weekly diagnostic, not a PR gate (see CONTRIBUTING.md, gh#31).
+
+# Scope: start with one high-value, security-critical module — CLI config
+# parsing. Widen this list as the suite's strength on other modules is
+# understood. The glob contains a path separator, so it matches from the
+# source-tree root.
+examine_globs = ["crates/taskfast-cli/src/config.rs"]
+
+# Only run the tests of the crate that owns the mutated code. config.rs's
+# unit tests and its `tests/config.rs` integration tests both live in
+# taskfast-cli, and nothing depends on the top-level binary crate, so no
+# other crate's tests could catch these mutants. Skipping the rest of the
+# workspace's tests per mutant keeps the run tractable.
+test_package = ["taskfast-cli"]
+
+# Match the rest of CI (`cargo test --workspace --locked`): pin to the
+# committed lockfile so a mutation run never silently updates Cargo.lock.
+additional_cargo_test_args = ["--locked"]
