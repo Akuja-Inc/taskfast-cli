@@ -29,6 +29,7 @@ read_toml() { sed -n "s/^$1[[:space:]]*=[[:space:]]*\"\(.*\)\"\$/\1/p" "$prov_fi
 recorded_sha="$(read_toml sha256)"
 spec_url="$(read_toml source)"
 [[ -n "$recorded_sha" ]] || { echo "::error::no sha256 in $prov_file"; exit 2; }
+[[ -n "$spec_url" ]] || { echo "::error::no source in $prov_file"; exit 2; }
 
 if [[ "$mode" == "upstream" ]]; then
   tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
