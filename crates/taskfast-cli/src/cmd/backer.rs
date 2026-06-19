@@ -19,7 +19,7 @@ use uuid::Uuid;
 use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
-use taskfast_client::api::types::CreateOperatorBackerBody;
+use taskfast_client::api::types::OperatorBackerCreateRequest;
 use taskfast_client::{map_api_error, TaskFastClient};
 
 #[derive(Debug, Subcommand)]
@@ -129,13 +129,16 @@ async fn add(ctx: &Ctx, args: AddArgs) -> CmdResult {
     }
 
     let client = pat_client(ctx, args.human_api_key.as_deref())?;
-    let body = CreateOperatorBackerBody {
+    // The request schema is an `anyOf` over the wallet key; send the canonical
+    // `backer_wallet_address` variant (the `wallet_address` alias is the same
+    // shape server-side).
+    let body = OperatorBackerCreateRequest::Variant0 {
         backer_account_id,
-        wallet_address,
+        backer_wallet_address: wallet_address,
     };
     let resp = match client
         .inner()
-        .create_operator_backer(&operator_id, &body)
+        .approve_operator_backer(&operator_id, &body)
         .await
     {
         Ok(v) => v.into_inner(),

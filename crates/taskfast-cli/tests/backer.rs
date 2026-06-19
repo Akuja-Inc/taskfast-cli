@@ -78,7 +78,7 @@ async fn add_happy_path_posts_account_and_wallet() {
         .and(header("x-api-key", PAT))
         .and(body_partial_json(json!({
             "backer_account_id": ACCOUNT_ID,
-            "wallet_address": WALLET,
+            "backer_wallet_address": WALLET,
         })))
         .respond_with(ResponseTemplate::new(201).set_body_json(backer_body("active")))
         .mount(&server)
@@ -124,7 +124,9 @@ async fn add_trims_wallet_whitespace() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(format!("/operators/{OPERATOR_ID}/backers")))
-        .and(body_partial_json(json!({ "wallet_address": WALLET })))
+        .and(body_partial_json(
+            json!({ "backer_wallet_address": WALLET }),
+        ))
         .respond_with(ResponseTemplate::new(201).set_body_json(backer_body("active")))
         .mount(&server)
         .await;
