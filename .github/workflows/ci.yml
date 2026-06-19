@@ -76,6 +76,13 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # Transitive advisories we cannot remove (deep in the alloy / ark-*
+          # crypto stack). Kept in sync with deny.toml [advisories].ignore.
+          #   RUSTSEC-2024-0388  derivative         unmaintained; via ark-ff
+          #   RUSTSEC-2024-0436  paste              unmaintained; via alloy-primitives / ark-*
+          #   RUSTSEC-2026-0097  rand 0.8           unsound only under custom-logger reseed; not triggered here
+          #   RUSTSEC-2026-0173  proc-macro-error2  unmaintained; via alloy-sol-macro, no safe upgrade
+          ignore: RUSTSEC-2024-0388,RUSTSEC-2024-0436,RUSTSEC-2026-0097,RUSTSEC-2026-0173
 
   deny:
     name: cargo-deny
