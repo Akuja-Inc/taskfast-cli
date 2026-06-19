@@ -1,0 +1,44 @@
+name: Fuzz
+
+# Coverage-guided fuzzing (cargo-fuzz / libFuzzer) of the untrusted-input
+# parsers. Not on the PR critical path — runs weekly and on demand. Each
+# target is time-boxed; a crash fails the job and uploads the reproducer.
+on:
+  workflow_dispatch:
+  schedule:
+    # Monday 05:23 UTC — off the :00 mark and ahead of the 07:00 CI cron.
+    - cron: '23 5 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [config_parse, chain_validation, response_decode]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # cargo-fuzz builds a separate, sanitizer-instrumented target dir.
+          workspaces: ". -> target\nfuzz -> fuzz/target"
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run ${{ matrix.target }}
+        # Seed from the checked-in corpus; cap each run so the job stays bounded.
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=300 -timeout=10
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

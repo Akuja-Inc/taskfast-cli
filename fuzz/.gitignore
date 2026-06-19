@@ -1,0 +1,6 @@
+# Build output + libFuzzer crash artifacts. The `corpus/` seeds are tracked
+# on purpose (minimal inputs that bootstrap coverage), so it is NOT ignored.
+/target
+/artifacts
+/coverage
+*.profraw

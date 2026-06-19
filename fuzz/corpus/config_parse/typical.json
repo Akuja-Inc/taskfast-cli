@@ -1,0 +1,1 @@
+{"schema_version":2,"api_key":"tf_live_example","wallet_address":"0x0000000000000000000000000000000000000000","keystore_path":".taskfast/keystore.json","agent_id":"agent_example","webhook_url":"https://example.test/hook","confirm_above_budget":"1000","log_format":"json","approval_horizon":"7d","receipt_timeout":"3min"}
