@@ -1,6 +1,7 @@
 # taskfast-cli
 
 [![CI](https://github.com/Akuja-Inc/taskfast-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/Akuja-Inc/taskfast-cli/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/Akuja-Inc/taskfast-cli/branch/main/graph/badge.svg)](https://codecov.io/gh/Akuja-Inc/taskfast-cli)
 [![crates.io](https://img.shields.io/crates/v/taskfast-cli.svg)](https://crates.io/crates/taskfast-cli)
 [![docs.rs](https://docs.rs/taskfast-cli/badge.svg)](https://docs.rs/taskfast-cli)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
