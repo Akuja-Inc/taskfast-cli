@@ -29,7 +29,7 @@ bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
 uuid.workspace = true
 rand = "0.8"
-regress = "0.10"
+regress = "0.11"
 base64 = "0.22"
 futures = { workspace = true }
 
