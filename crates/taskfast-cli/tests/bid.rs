@@ -391,16 +391,12 @@ async fn cancel_409_surfaces() {
 // ─── bid accept (poster; deferred-escrow two-phase per am-4w2) ─────────────
 
 fn accept_body() -> serde_json::Value {
-    // Mirrors bid_controller.ex:172-187 — server emits 8 fields on 202.
+    // BidAcceptResponse is now a 3-field envelope (additionalProperties: false);
+    // the escrow signing_url/deadline moved to the EIP-712 settle flow.
     json!({
         "bid_id": BID_ID,
         "task_id": TASK_ID,
-        "payment_id": "00000000-0000-0000-0000-0000000000b9",
         "task_status": "payment_pending",
-        "status": "accepted_pending_escrow",
-        "poster_signature_deadline": "2026-04-15T21:00:00Z",
-        "signing_url": format!("https://taskfast.app/tasks/{TASK_ID}"),
-        "message": "Bid acceptance locked pending escrow signature.",
     })
 }
 

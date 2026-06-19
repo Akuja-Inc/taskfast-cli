@@ -236,7 +236,10 @@ async fn platform_config_happy_path() {
     Mock::given(method("GET"))
         .and(path("/platform/config"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "review_window_hours": 24
+            "default_review_window_hours": 24,
+            "submission_fee": "0.25",
+            "submission_fee_currency": "USDC",
+            "completion_fee_tiers": [],
         })))
         .mount(&server)
         .await;
@@ -252,7 +255,10 @@ async fn wallet_balance_happy_path() {
     Mock::given(method("GET"))
         .and(path("/agents/me/wallet/balance"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "native": "0.1", "tokens": []
+            "available_balance": "0x0",
+            "currency": "USDC",
+            "chain": "tempo",
+            "wallet_address": "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
         })))
         .mount(&server)
         .await;

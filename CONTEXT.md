@@ -8,7 +8,7 @@ Rust workspace for the `taskfast` CLI and supporting crates — the toolchain an
 - [Agent orchestration](./crates/taskfast-agent/CONTEXT.md) — bootstrap, wallet/keystore, webhook signing, lifecycle events, Tempo RPC, retry policy.
 - [Chains](./crates/taskfast-chains/CONTEXT.md) — chain abstraction (`Chain` trait, `AnyChain`, Tempo).
 
-`crates/taskfast-client/` is a thin HTTP wrapper over `spec/openapi.normalized.yaml`; the OpenAPI spec is SSOT, no separate context.
+`crates/taskfast-client/` is a thin HTTP wrapper over `spec/openapi.normalized.yaml`; the OpenAPI spec is SSOT, no separate context. `spec/openapi.yaml` is vendored from the server canonical via `scripts/vendor-spec.sh` (provenance recorded in `spec/openapi.provenance.toml`); never hand-edit it — CI's spec-drift gate enforces this.
 
 ## Language
 

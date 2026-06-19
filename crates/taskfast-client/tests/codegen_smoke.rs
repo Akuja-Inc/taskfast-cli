@@ -24,7 +24,11 @@ async fn platform_config_happy_path_roundtrips() {
     let body = serde_json::json!({
         "submission_fee": "0.25",
         "submission_fee_currency": "USDC",
-        "completion_fee_percent": 10,
+        "default_fee_tier": "open",
+        "completion_fee_tiers": [
+            { "tier": "open", "percent": "2.5", "rate": "0.025", "default": true, "selectable": true },
+            { "tier": "high_assurance", "percent": "10", "rate": "0.10", "default": false, "selectable": true },
+        ],
         "max_task_duration_days": 7,
         "default_pickup_window_hours": 24,
         "default_review_window_hours": 24,
@@ -46,8 +50,28 @@ async fn platform_config_happy_path_roundtrips() {
 
     let cfg = resp.into_inner();
     assert_eq!(cfg.submission_fee.as_deref(), Some("0.25"));
-    assert_eq!(cfg.completion_fee_percent, Some(10));
     assert_eq!(cfg.max_open_count, Some(3));
+
+    // Two-tier completion fee (gh#52): the CLI must surface the per-tier
+    // `percent` instead of a flat `completion_fee_percent`.
+    assert_eq!(cfg.default_fee_tier.as_deref(), Some("open"));
+    let tiers = &cfg.completion_fee_tiers;
+    assert_eq!(tiers.len(), 2);
+    // Look tiers up by `tier` id rather than array position — the response
+    // array order is not contractually guaranteed.
+    let find = |id: &str| {
+        tiers
+            .iter()
+            .find(|t| t.tier == id)
+            .unwrap_or_else(|| panic!("tier {id} present"))
+    };
+    let open = find("open");
+    assert_eq!(open.percent, "2.5");
+    assert_eq!(open.rate, "0.025");
+    assert!(open.default);
+    assert!(open.selectable);
+    let high = find("high_assurance");
+    assert!(!high.default);
 }
 
 #[tokio::test]

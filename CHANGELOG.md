@@ -52,6 +52,27 @@ that is the authoritative changelog.
   Owning-user operations: authenticate with a user PAT (`tf_user_*`) via
   `--human-api-key` / `TASKFAST_HUMAN_API_KEY`. `operator_id` is passed
   explicitly with `--operator` (no "get my operator" endpoint exists yet).
+- **OpenAPI spec drift-check (gh#56).** `spec/openapi.yaml` now carries a
+  `spec/openapi.provenance.toml` marker (source URL, server commit, sha256)
+  written by the new `scripts/vendor-spec.sh`, which is the only supported way
+  to refresh the vendored spec. CI gained an offline provenance gate (the file
+  can't be hand-edited without re-vendoring) and a scheduled `spec-upstream-drift`
+  job that fetches the live server spec and fails when the vendored copy goes
+  stale — the root-cause guard for the silent drift behind gh#51.
+
+### Changed
+
+- **Re-vendored the OpenAPI spec from the server canonical (gh#51).** The
+  vendored copy had drifted far behind the server (5781 → 7324 lines). The
+  regenerated client picks up new endpoints (operator backers/activation,
+  OAuth2 token/revoke, escrow params/finalize) and updated schemas. Notable
+  client-surface changes: `create_operator_backer` → `approve_operator_backer`
+  (`OperatorBackerCreateRequest`), `SettleTaskBody.signature` is now a plain
+  string, the `BidAcceptResponse` envelope shrank to `bid_id`/`task_id`/
+  `task_status`, the wallet-balance and platform-config response shapes
+  changed, and the escrow-params response gained `arbitrator_address`. The spec
+  normalizer also learned to collapse multi-media-type request bodies (the
+  OAuth endpoints) for progenitor.
 
 ### Security
 
