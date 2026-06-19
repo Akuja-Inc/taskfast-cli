@@ -1,0 +1,49 @@
+name: mutants
+
+# Mutation testing via cargo-mutants. Mutates source (flips conditionals,
+# drops returns, replaces constants) and re-runs the suite; surviving mutants
+# expose assertions the tests are missing. Runs can take a while, so this is a
+# weekly diagnostic + on-demand only — never a PR gate (gh#31).
+on:
+  schedule:
+    # Sunday 08:00 UTC — distinct from CI's Monday 07:00 weekly slot.
+    - cron: '0 8 * * 0'
+  workflow_dispatch:
+
+# No RUSTFLAGS=-D warnings here (unlike ci.yml): mutated code routinely emits
+# warnings (e.g. dead code after a dropped return), and -D warnings would mark
+# those mutants "unviable" instead of testing them, skewing the caught/missed
+# ratio.
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    name: cargo-mutants
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # Pin the version: an unpinned install pulls latest, and a mutation-rule
+      # change upstream can shift the caught/missed baseline overnight. Bump
+      # deliberately via Dependabot or a manual PR. (Same rationale as the
+      # cargo-machete pin in ci.yml.)
+      - run: cargo install cargo-mutants --locked --version 27.1.0
+      # Scope, test-package, and locked test args come from .cargo/mutants.toml.
+      # --in-place builds in the checked-out tree so rust-cache applies (the
+      # runner is ephemeral, so mutating it in place is safe).
+      # continue-on-error: diagnostic, not blocking — surviving mutants are
+      # reviewed from the uploaded artifact, they don't fail the build.
+      - name: Run cargo-mutants
+        continue-on-error: true
+        run: cargo mutants --in-place
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutants-out
+          path: mutants.out
+          retention-days: 14

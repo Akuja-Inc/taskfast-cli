@@ -48,6 +48,46 @@ Run once after cloning to enable the same gates CI uses:
 Bypass a hook with `--no-verify` (CI will still block).
 `make ci` runs the standard gate; `make ci-full` adds audit + deny.
 
+## Mutation testing
+
+A green test suite proves the tests don't _complain_, not that they'd _catch a
+regression_. [`cargo-mutants`](https://mutants.rs) mutates the source — flips
+conditionals, drops `return`s, replaces constants — and re-runs the suite. A
+mutant that's **caught** (some test fails) is good; one that **survives**
+("missed") means no assertion exercised that change. It's the gap line coverage
+can't show you.
+
+```bash
+cargo install cargo-mutants --locked   # one-time
+make mutants                           # reads .cargo/mutants.toml
+```
+
+This is a **diagnostic, not a gate** — runs can take a while, so CI runs it
+weekly + on demand (`.github/workflows/mutants.yml`), `continue-on-error`, with
+results uploaded as the `mutants-out` artifact. It does not block PRs.
+
+Scope lives in `.cargo/mutants.toml`. We start narrow on one high-value,
+security-critical module — `crates/taskfast-cli/src/config.rs` — and widen
+`examine_globs` as each module's suite strength is understood.
+
+### Baseline (2026-06-19, cargo-mutants 27.1.0)
+
+`config.rs`: **17 mutants → 10 caught, 5 missed, 2 unviable** (67% catch rate on
+the 15 viable). The 5 survivors (see `mutants.out/missed.txt` after a run) point
+at real gaps, not noise:
+
+- The non-`NotFound` branch of `Config::load`'s read-error match — no test
+  forces a read error other than a missing file (e.g. a permission-denied open).
+- The `schema_version > CURRENT_SCHEMA_VERSION` comparison (3 mutants): the
+  newer-version test asserts the file still loads, but the branch's only effect
+  is a `tracing::warn!`, so flipping the comparison changes nothing observable.
+- `Config::default_path()`'s return value is never asserted against
+  `DEFAULT_CONFIG_PATH`.
+
+Closing these (asserting `default_path()`, capturing the warn, exercising a
+real IO error) is tracked as follow-up — kill the survivors before widening
+scope to other modules.
+
 ## Commit style — Conventional Commits
 
 Every commit on `main` must follow [Conventional Commits](https://www.conventionalcommits.org/):
