@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Testnet faucet client. Wraps the public Tempo moderato faucet at
 //! `POST https://docs.tempo.xyz/api/faucet`, which returns `{"data": [{tx...}]}`
 //! with one entry per token dispensed (gas token + USDC).

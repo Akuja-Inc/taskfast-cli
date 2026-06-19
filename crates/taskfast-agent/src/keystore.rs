@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Encrypted wallet persistence.
 //!
 //! Default: Web3 Secret Storage v3 JSON (Foundry/Geth/MetaMask-interoperable),

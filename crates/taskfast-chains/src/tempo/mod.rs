@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Tempo chain — EIP-712 typed-data + raw payload signing.
 //!
 //! Moved verbatim from `taskfast-agent/src/signing.rs` (beads am-6v7b.4) behind

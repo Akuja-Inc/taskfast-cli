@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast backer` — manage an operator's external-backer allowlist
 //! (gh#54 Stream B, server #483 `OperatorBackerController`).
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! End-to-end tests for `taskfast bid` read path (list).
 //!
 //! Each test stands up a wiremock server, drives `cmd::bid::run` directly,

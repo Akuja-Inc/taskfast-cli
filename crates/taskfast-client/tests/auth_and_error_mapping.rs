@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Fixture tests for `TaskFastClient`: auth header injection + typed error
 //! translation from wiremock responses.
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast events schema` — fetch the AsyncAPI 2.6 spec for the event stream.
 //!
 //! The spec is generated at server boot from the canonical

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast artifact` — list / get / upload / delete artifacts on a task,
 //! plus non-custodial CID submission (`cid` / `cid-status`).
 //!

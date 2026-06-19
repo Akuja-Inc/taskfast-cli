@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Generates the typed TaskFast client from `spec/openapi.yaml`.
 //!
 //! Pipeline:

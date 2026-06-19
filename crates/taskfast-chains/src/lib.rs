@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Chain abstraction for the TaskFast Rust SDK.
 //!
 //! v1 ships `tempo` only — other features compile to empty stub modules so the

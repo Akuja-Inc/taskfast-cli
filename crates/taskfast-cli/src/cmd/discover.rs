@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast discover` — browse the open-tasks marketplace.
 //!
 //! Wraps `GET /tasks` (operationId `listOpenTasks`). Unauthenticated in the

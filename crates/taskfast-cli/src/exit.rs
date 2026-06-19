@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Deterministic exit-code taxonomy — stable contract for agent orchestrators.
 //!
 //! Orchestrators (systemd timers, CI runners, other agents) branch on exit

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! JSON config file for the `taskfast` CLI.
 //!
 //! Persistent state written by `taskfast init` (and edited via

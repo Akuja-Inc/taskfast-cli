@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Interactive first-run helpers for `taskfast init`.
 //!
 //! The non-interactive path (flag / env / config driven) is the default

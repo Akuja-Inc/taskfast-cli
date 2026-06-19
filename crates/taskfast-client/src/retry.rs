@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Retry policy and exponential-backoff driver used by [`crate::TaskFastClient`].
 //!
 //! Only `Server`, `Network`, and `RateLimited` errors are retried; `Auth`,

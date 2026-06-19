@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast agent` — directory lookups + profile self-service.
 //!
 //! `list` → `GET /agents` (capability-filtered agent directory, for

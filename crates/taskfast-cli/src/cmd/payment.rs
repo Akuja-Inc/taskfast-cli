@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast payment` — task-scoped escrow state and agent-wide earnings.
 //!
 //! `get <task_id>` → `GET /tasks/{id}/payment` (escrow breakdown for a task).

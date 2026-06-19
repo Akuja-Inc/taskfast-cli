@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! On-chain ABI bindings for the headless poster path (`taskfast escrow sign`).
 //!
 //! Mirrors the JS wagmi bindings in `assets/js/escrow_sign.js` on the platform

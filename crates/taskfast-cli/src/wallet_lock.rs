@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! F9: exclusive file-lock guarding wallet-signing operations against
 //! concurrent `taskfast post` invocations sharing the same keystore.
 //!

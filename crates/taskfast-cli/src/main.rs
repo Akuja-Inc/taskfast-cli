@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast` binary entry point.
 //!
 //! Global flag parsing + dispatch to [`cmd`] modules. Every subcommand

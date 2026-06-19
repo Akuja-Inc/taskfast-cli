@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast escrow sign <bid_id>` — headless poster escrow signing.
 //!
 //! Replaces the web-UI-only wagmi + passkey path at `assets/js/escrow_sign.js`.

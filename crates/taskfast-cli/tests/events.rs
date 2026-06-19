@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! End-to-end tests for `taskfast events poll` (single-page read).
 //!
 //! Stands up a wiremock server, drives `cmd::events::run` directly, and

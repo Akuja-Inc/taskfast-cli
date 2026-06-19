@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast config` — inspect / edit the project-local JSON config.
 //!
 //! Three operations, each shaped around the orchestrator JSON envelope:

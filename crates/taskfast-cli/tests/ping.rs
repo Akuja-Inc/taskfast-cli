@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! End-to-end wiremock test for `taskfast ping`.
 //!
 //! Pins the liveness-probe contract: single round-trip, pong + latency on

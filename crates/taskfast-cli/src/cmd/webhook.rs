@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast webhook` — configure, test, subscribe, inspect, delete.
 //!
 //! Replaces `scripts/webhook-setup.sh`. All HTTP work lives in

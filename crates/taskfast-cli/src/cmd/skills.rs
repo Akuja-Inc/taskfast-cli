@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast skills` — install the bundled TaskFast agent skill locally.
 //!
 //! The command copies the embedded `taskfast-agent` skill tree into both

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! End-to-end wiremock test for `taskfast me`.
 //!
 //! Exercises the full pipeline: Ctx → Ctx::client() → bootstrap::{validate_auth,

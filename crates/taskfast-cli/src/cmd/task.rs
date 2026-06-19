@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast task` — read + mutate operations on tasks.
 //!
 //! Read (am-e3u.4): `list` + `get`. Worker mutation (am-edc): `submit`.

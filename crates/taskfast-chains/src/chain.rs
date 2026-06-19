@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `trait Chain` — identity + associated-type seats for per-chain primitives.
 //!
 //! Deliberately identity-only in v1. Signing / approval-codec surfaces stay as

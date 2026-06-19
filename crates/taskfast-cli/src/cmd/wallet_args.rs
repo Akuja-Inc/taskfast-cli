@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Shared keystore + password resolution for `post` / `settle` / `escrow`.
 //!
 //! All three subcommands accept the same triad (`--keystore`,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast stake <task_id>` — operator posts a performance stake on a
 //! direct high-assurance task (gh#54, server #482 `POST /tasks/{id}/stake`).
 //!

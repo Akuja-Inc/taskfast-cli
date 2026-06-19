@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Cross-cutting error type for the typed client.
 //!
 //! Variants mirror the orchestrator-centric exit-code buckets used by

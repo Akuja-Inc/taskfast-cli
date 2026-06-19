@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! End-to-end tests for `taskfast init`.
 //!
 //! Covers the full command pipeline (api-key resolution, validate,

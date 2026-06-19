@@ -91,6 +91,17 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: crate-ci/typos@37bb98842b0d8c4ffebdb75301a13db0267cef89 # v1.47.2
 
+  spdx:
+    # Every tracked .rs file must carry an SPDX-License-Identifier header so
+    # downstream license scanners (REUSE, ScanCode, FOSSA) detect licensing
+    # per file. Pure bash + git, no toolchain. Fix locally with:
+    #   scripts/check-spdx.sh --fix
+    name: spdx-headers
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: scripts/check-spdx.sh
+
   machete:
     # Detects unused workspace dependencies. Add ignores via
     # [package.metadata.cargo-machete] ignored = [...] in the offending
@@ -212,6 +223,7 @@ jobs:
       - audit
       - deny
       - typos
+      - spdx
       - machete
       - semver
       - coverage

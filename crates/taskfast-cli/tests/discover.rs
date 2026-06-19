@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Wiremock tests for `taskfast discover`.
 
 use serde_json::json;

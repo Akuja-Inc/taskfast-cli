@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `taskfast events poll` — single-page read over `GET /agents/me/events`.
 //!
 //! The SDK also offers `stream_events` (long-running cursor chase);

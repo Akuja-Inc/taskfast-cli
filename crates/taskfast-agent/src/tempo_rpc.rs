@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Minimal Tempo JSON-RPC client for the submission-fee voucher flow.
 //!
 //! `taskfast post` needs to:
