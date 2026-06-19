@@ -26,6 +26,7 @@ const TASK_ESCROW: &str = "0x0000000000000000000000000000000000000001";
 const TOKEN_ADDR: &str = "0x0000000000000000000000000000000000000002";
 const WORKER_ADDR: &str = "0x0000000000000000000000000000000000000003";
 const PLATFORM_WALLET: &str = "0x0000000000000000000000000000000000000004";
+const ARBITRATOR_ADDR: &str = "0x0000000000000000000000000000000000000005";
 const CHAIN_ID: u64 = 42_431;
 
 fn ctx_for(server: &MockServer, key: Option<&str>) -> Ctx {
@@ -91,6 +92,7 @@ fn escrow_params_json_with_chain_id(chain_id: u64) -> Value {
         "amount": "75.00",
         "platform_fee_amount": "3.75",
         "worker_address": WORKER_ADDR,
+        "arbitrator_address": ARBITRATOR_ADDR,
         "task_escrow_contract": TASK_ESCROW,
         "token_address": TOKEN_ADDR,
         "platform_wallet": PLATFORM_WALLET,

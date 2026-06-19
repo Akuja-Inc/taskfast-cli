@@ -132,7 +132,7 @@ enum Command {
     Webhook(cmd::webhook::Command),
     /// Worker: browse open-market tasks (GET /tasks).
     Discover(cmd::discover::Args),
-    /// Artifacts: list / get / upload / delete on a task.
+    /// Artifacts: list / get / upload / delete + CID submit / status on a task.
     #[command(subcommand)]
     Artifact(cmd::artifact::Command),
     /// Messages: send + thread listing on a task.

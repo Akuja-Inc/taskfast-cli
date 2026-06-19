@@ -90,8 +90,9 @@ fn balance_body(hex: &str) -> serde_json::Value {
     serde_json::json!({
         "available_balance": hex,
         "currency": "USDC",
-        "payment_method": "tempo_wallet",
-        "tempo_wallet_address": "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
+        "chain": "tempo",
+        "wallet_address": "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
+        "checked_at": "2026-03-25T12:00:00Z",
     })
 }
 
