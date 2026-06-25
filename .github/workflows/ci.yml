@@ -4,10 +4,13 @@ on:
   pull_request:
   push:
     branches: [main]
-  schedule:
-    # Monday 07:00 UTC — minimal-versions weekly health check.
-    - cron: '0 7 * * 1'
   workflow_dispatch:
+
+# Advisory scheduled health checks (minimal-versions, spec-upstream-drift)
+# live in .github/workflows/ci-scheduled.yml. They are intentionally NOT run
+# here: they flap on ancient transitive crates / staging reachability and a
+# flaky advisory job was turning this gating workflow's badge red even when
+# every PR/push check passed.
 
 env:
   CARGO_TERM_COLOR: always
@@ -176,20 +179,6 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
 
-  minimal-versions:
-    # Catches under-pinned semver ranges. Pulls the oldest version
-    # satisfying each `^` constraint and tries to build. Runs weekly
-    # (schedule) or on manual dispatch — flaps too often for PR gate.
-    name: minimal-versions
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo +nightly update -Z minimal-versions
-      - run: cargo +nightly build --workspace --locked
-
   spec-drift:
     # Two offline guards on the vendored OpenAPI spec:
     #   1. provenance gate — spec/openapi.yaml must match the sha256 recorded in
@@ -215,26 +204,12 @@ jobs:
             exit 1
           fi
 
-  spec-upstream-drift:
-    # Fetches the live server OpenAPI spec and fails if the vendored copy has
-    # gone stale against it. Scheduled/dispatch only — never gates PRs, so a
-    # server-side deploy can't turn unrelated CLI PRs red, and the job doesn't
-    # depend on staging being reachable during PR review. Drift here means the
-    # server moved ahead: re-vendor with scripts/vendor-spec.sh. This is the
-    # proactive half of the gh#51 stale-spec guard.
-    name: spec-upstream-drift
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - run: scripts/check-spec-drift.sh --upstream
-
   notify-discord:
     # Posts a single consolidated run result to Discord. Mirrors the
     # pattern in docker.yml. Skipped for pull_request events to avoid
     # spam — PR status is already visible in the GitHub checks UI.
     name: Notify Discord
-    if: ${{ always() && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     needs:
       - fmt
       - clippy
@@ -247,9 +222,7 @@ jobs:
       - machete
       - semver
       - coverage
-      - minimal-versions
       - spec-drift
-      - spec-upstream-drift
     runs-on: ubuntu-22.04
     permissions:
       actions: read
