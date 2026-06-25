@@ -22,7 +22,7 @@ enum Cmd {
     /// Normalize the OpenAPI spec and write the result next to the input.
     ///
     /// Reads `spec/openapi.yaml`, folds structurally-identical error schemas
-    /// (see `xtask::ERROR_ALIASES`) into `#/components/schemas/Error`, and
+    /// (see `taskfast_codegen::ERROR_ALIASES`) into `#/components/schemas/Error`, and
     /// writes the result to `spec/openapi.normalized.yaml`. The on-disk
     /// authoritative spec is not modified.
     SyncSpec {
@@ -82,7 +82,7 @@ fn run_sync_spec(input: &std::path::Path, output: &std::path::Path, dry_run: boo
         .with_context(|| format!("read spec from {}", input.display()))?;
 
     let (normalized, report) =
-        xtask::normalize_spec_with_report(&src).context("normalize spec in-memory")?;
+        taskfast_codegen::normalize_spec_with_report(&src).context("normalize spec in-memory")?;
 
     eprintln!(
         "sync-spec: folded {} alias(es), rewrote {} $ref(s), stripped {} multipart op(s), collapsed {} multi-media request body(ies), dropped {} non-2xx response(s), stripped {} null-type variant(s)",

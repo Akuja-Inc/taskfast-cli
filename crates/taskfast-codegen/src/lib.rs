@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// TODO: doc the public surface; xtask is internal so keep this deferred.
+// TODO: doc the public surface; taskfast-codegen is published but internal-priority so keep this deferred.
 #![allow(missing_docs, clippy::doc_markdown)]
 
 //! TaskFast OpenAPI spec tooling.
@@ -13,7 +13,7 @@
 //! untouched.
 //!
 //! Consumers:
-//!  - `cargo xtask sync-spec` — writes a normalized artifact for inspection.
+//!  - `cargo xtask sync-spec` (binary) — writes a normalized artifact for inspection.
 //!  - `taskfast-client/build.rs` — pipes the normalized YAML into progenitor.
 //!
 //! ## Rewrite rules

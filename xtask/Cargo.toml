@@ -4,13 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Repo automation + shared spec tooling. Binary: `cargo xtask <cmd>`. Library: spec normalizer consumed by taskfast-client/build.rs."
+description = "Repo automation binary: `cargo xtask <cmd>`. Spec normalization lives in the published `taskfast-codegen` crate; this crate is the thin CLI wrapper plus repo-specific commands (version bump, etc.)."
 
 [lints]
 workspace = true
-
-[lib]
-path = "src/lib.rs"
 
 [[bin]]
 name = "xtask"
@@ -18,6 +15,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-serde_yaml.workspace = true
 clap.workspace = true
+taskfast-codegen.workspace = true
 toml_edit.workspace = true

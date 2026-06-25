@@ -4,6 +4,7 @@ members = [
     "crates/taskfast-client",
     "crates/taskfast-chains",
     "crates/taskfast-agent",
+    "crates/taskfast-codegen",
     "crates/taskfast-cli",
     "xtask",
 ]
@@ -50,6 +51,7 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "cloc
 toml_edit = "0.25"
 rust_decimal = { version = "1", default-features = false, features = ["std"] }
 
+taskfast-codegen = { path = "crates/taskfast-codegen", version = "0.1.0" }
 taskfast-client = { path = "crates/taskfast-client", version = "0.3.0" }
 taskfast-chains = { path = "crates/taskfast-chains", version = "0.1.0", default-features = false }
 taskfast-agent = { path = "crates/taskfast-agent", version = "0.7.0" }

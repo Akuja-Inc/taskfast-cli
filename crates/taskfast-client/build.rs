@@ -3,9 +3,9 @@
 //!
 //! Pipeline:
 //!   1. Read the authoritative spec (`spec/openapi.yaml` at workspace root).
-//!   2. Normalize in-memory via `xtask::normalize_spec` — folds structurally
-//!      identical error aliases into `#/components/schemas/Error` so progenitor
-//!      emits a single `Error` type instead of duplicates.
+//!   2. Normalize in-memory via `taskfast_codegen::normalize_spec` — folds
+//!      structurally identical error aliases into `#/components/schemas/Error`
+//!      so progenitor emits a single `Error` type instead of duplicates.
 //!   3. Feed the normalized spec to `progenitor::Generator`.
 //!   4. Write the rendered Rust to `$OUT_DIR/codegen.rs`; `src/lib.rs` uses
 //!      `include!` to pull it into the crate.
@@ -29,7 +29,7 @@ fn main() {
         .unwrap_or_else(|e| panic!("read spec at {}: {e}", spec_path.display()));
 
     let normalized =
-        xtask::normalize_spec(&raw).unwrap_or_else(|e| panic!("normalize spec: {e:#}"));
+        taskfast_codegen::normalize_spec(&raw).unwrap_or_else(|e| panic!("normalize spec: {e:#}"));
 
     // progenitor consumes `openapiv3::OpenAPI`. It also accepts JSON via
     // serde_json::Value round-trip — cheapest path from our YAML normalizer
