@@ -1,0 +1,115 @@
+# Publishes the workspace crates to crates.io in dependency (topological) order.
+#
+# Why a separate workflow (not dist's release.yml):
+#   cargo-dist 0.31 has no native crates.io-publish host step (its publish-jobs
+#   cover homebrew/npm only). release.yml ships binary release artifacts; this
+#   workflow handles the registry side so `cargo install taskfast-cli` works.
+#   Mirrors the repo's existing pattern of hand-augmenting dist CI.
+#
+# Publish order is load-bearing — cargo publish drops path overrides and
+# resolves version reqs against crates.io, so each crate's workspace deps must
+# already be on the registry:
+#
+#   taskfast-codegen -> taskfast-client -> taskfast-agent -> taskfast-cli
+#   taskfast-chains  (independent)
+#
+# Triggers:
+#   * workflow_dispatch (manual) — use for the first publish and any re-run.
+#     A `dry_run` input lets you validate packaging + metadata without uploading.
+#   * push of a version tag (taskfast-cli-v* or bare vX.Y.Z) — automates the
+#     registry publish on each release, alongside the binary release.yml run.
+#
+# Requires the CARGO_REGISTRY_TOKEN repo secret (crates.io publish token,
+# scoped by a maintainer). Without it the job fails with a clear message.
+
+name: publish-crates
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Validate packaging/metadata without uploading (cargo publish --dry-run)"
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'taskfast-cli-v*'
+      - 'v*'
+
+jobs:
+  publish:
+    name: publish to crates.io
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Guard — CARGO_REGISTRY_TOKEN present (non-dry-run)
+        if: ${{ !inputs.dry_run && env.CARGO_REGISTRY_TOKEN == '' }}
+        run: |
+          echo "::error::CARGO_REGISTRY_TOKEN secret is not set. Add it in repo Settings -> Secrets (crates.io publish token), then re-run."
+          exit 1
+
+      # Publish helper: idempotent. A re-run after a partial/complete success
+      # must not fail just because a version is already on the registry —
+      # cargo publish errors with "already exists" in that case. We tolerate
+      # exactly that and propagate every other failure.
+      - name: Publish taskfast-codegen
+        run: |
+          set +e
+          cargo publish -p taskfast-codegen --locked ${{ inputs.dry_run && '--dry-run' || '' }}
+          s=$?
+          if [ $s -ne 0 ] && cargo publish -p taskfast-codegen --locked --dry-run >/dev/null 2>&1; then
+            echo "::notice::taskfast-codegen already published at this version; skipping"
+            exit 0
+          fi
+          exit $s
+
+      - name: Publish taskfast-client
+        run: |
+          set +e
+          cargo publish -p taskfast-client --locked ${{ inputs.dry_run && '--dry-run' || '' }}
+          s=$?
+          if [ $s -ne 0 ] && cargo publish -p taskfast-client --locked --dry-run >/dev/null 2>&1; then
+            echo "::notice::taskfast-client already published at this version; skipping"
+            exit 0
+          fi
+          exit $s
+
+      - name: Publish taskfast-chains
+        run: |
+          set +e
+          cargo publish -p taskfast-chains --locked ${{ inputs.dry_run && '--dry-run' || '' }}
+          s=$?
+          if [ $s -ne 0 ] && cargo publish -p taskfast-chains --locked --dry-run >/dev/null 2>&1; then
+            echo "::notice::taskfast-chains already published at this version; skipping"
+            exit 0
+          fi
+          exit $s
+
+      - name: Publish taskfast-agent
+        run: |
+          set +e
+          cargo publish -p taskfast-agent --locked ${{ inputs.dry_run && '--dry-run' || '' }}
+          s=$?
+          if [ $s -ne 0 ] && cargo publish -p taskfast-agent --locked --dry-run >/dev/null 2>&1; then
+            echo "::notice::taskfast-agent already published at this version; skipping"
+            exit 0
+          fi
+          exit $s
+
+      - name: Publish taskfast-cli
+        run: |
+          set +e
+          cargo publish -p taskfast-cli --locked ${{ inputs.dry_run && '--dry-run' || '' }}
+          s=$?
+          if [ $s -ne 0 ] && cargo publish -p taskfast-cli --locked --dry-run >/dev/null 2>&1; then
+            echo "::notice::taskfast-cli already published at this version; skipping"
+            exit 0
+          fi
+          exit $s

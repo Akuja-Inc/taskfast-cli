@@ -140,12 +140,10 @@ fn synced_sites() -> &'static [SyncedSite] {
             file: "Cargo.toml",
             toml_path: &["workspace", "dependencies", "taskfast-agent", "version"],
         },
-        // taskfast-client has a build-dep on xtask; xtask inherits workspace
-        // version via `version.workspace = true`, so this inline pin must match.
-        SyncedSite {
-            file: "crates/taskfast-client/Cargo.toml",
-            toml_path: &["build-dependencies", "xtask", "version"],
-        },
+        // taskfast-client's build-dep is `taskfast-codegen.workspace = true`,
+        // whose version (0.1.0) is pinned once in workspace.dependencies and
+        // versions independently of the workspace package version — so there is
+        // no per-crate inline pin to keep in sync here.
     ]
 }
 

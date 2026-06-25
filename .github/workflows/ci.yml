@@ -130,9 +130,11 @@ jobs:
 
   semver:
     # Detects breaking public-API changes in taskfast-cli. Uses git
-    # baseline (PR base SHA) instead of crates.io — the crate is not
-    # yet published, so registry lookup fails. Switch to the default
-    # crates.io baseline after first publish.
+    # baseline (PR base SHA) instead of crates.io because the crate is
+    # not yet on the registry (publish gated on tfcli-wav). Switch to the
+    # default crates.io baseline — i.e. drop the --baseline-rev arg — in
+    # the same release that runs the first `cargo publish` via
+    # publish-crates.yml. Tracking: bd tfcli-wav.
     name: cargo-semver-checks
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-22.04
