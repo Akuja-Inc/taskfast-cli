@@ -60,6 +60,7 @@ jobs:
       # cargo publish errors with "already exists" in that case. We tolerate
       # exactly that and propagate every other failure.
       - name: Publish taskfast-codegen
+        continue-on-error: ${{ inputs.dry_run }}
         run: |
           set +e
           cargo publish -p taskfast-codegen --locked ${{ inputs.dry_run && '--dry-run' || '' }}
@@ -71,6 +72,7 @@ jobs:
           exit $s
 
       - name: Publish taskfast-client
+        continue-on-error: ${{ inputs.dry_run }}
         run: |
           set +e
           cargo publish -p taskfast-client --locked ${{ inputs.dry_run && '--dry-run' || '' }}
@@ -82,6 +84,7 @@ jobs:
           exit $s
 
       - name: Publish taskfast-chains
+        continue-on-error: ${{ inputs.dry_run }}
         run: |
           set +e
           cargo publish -p taskfast-chains --locked ${{ inputs.dry_run && '--dry-run' || '' }}
@@ -93,6 +96,7 @@ jobs:
           exit $s
 
       - name: Publish taskfast-agent
+        continue-on-error: ${{ inputs.dry_run }}
         run: |
           set +e
           cargo publish -p taskfast-agent --locked ${{ inputs.dry_run && '--dry-run' || '' }}
@@ -104,6 +108,7 @@ jobs:
           exit $s
 
       - name: Publish taskfast-cli
+        continue-on-error: ${{ inputs.dry_run }}
         run: |
           set +e
           cargo publish -p taskfast-cli --locked ${{ inputs.dry_run && '--dry-run' || '' }}
@@ -113,3 +118,11 @@ jobs:
             exit 0
           fi
           exit $s
+
+      - name: Dry-run summary
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "::notice::Dry-run publish validation complete."
+          echo "Leaf crates (taskfast-codegen, taskfast-chains) should be green — they have no workspace deps."
+          echo "taskfast-client/agent/cli are EXPECTED to show as skipped/failed here until their workspace deps are actually on crates.io (the 'no matching package <dep>' error). This is normal before the first real publish."
+          echo "For the first real publish, run this workflow WITHOUT dry_run (requires CARGO_REGISTRY_TOKEN); it publishes in topological order."
