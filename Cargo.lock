@@ -4138,12 +4138,20 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "syn 2.0.118",
+ "taskfast-codegen",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid 1.23.3",
  "wiremock",
- "xtask",
+]
+
+[[package]]
+name = "taskfast-codegen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_yaml",
 ]
 
 [[package]]
@@ -5266,7 +5274,7 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
- "serde_yaml",
+ "taskfast-codegen",
  "toml_edit",
 ]
 
