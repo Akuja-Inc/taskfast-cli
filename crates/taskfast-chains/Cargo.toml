@@ -8,7 +8,6 @@ homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "Chain abstraction for TaskFast SDK: trait Chain + per-chain cargo features (tempo v1; polygon/avalanche/solana/near/stellar architecture stubs)."
-publish = false
 
 [lints]
 workspace = true

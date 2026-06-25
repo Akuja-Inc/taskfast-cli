@@ -9,7 +9,6 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Typed HTTP client for the TaskFast marketplace API (generated from spec/openapi.yaml)."
 build = "build.rs"
-publish = false
 
 [lints]
 workspace = true
