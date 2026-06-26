@@ -66,4 +66,27 @@ if ! (cd "${tmp}" && npx -y -p skills add-skill add "${ROOT}" -l 2>&1 | tee out.
   fail "skills installer did not surface '${EXPECTED_NAME}'"
 fi
 
+# Parity check: the bundled copy shipped inside the published taskfast-cli crate
+# (crates/taskfast-cli/skills/taskfast-agent) must be byte-identical to this
+# workspace source of truth. The CLI embeds these files via include_str! at
+# build time; if the bundled copy drifts, `cargo install taskfast-cli` ships a
+# stale skill. Keep them in sync by copying the workspace tree over the bundled
+# one whenever the skill is edited.
+bundled_dir="${ROOT}/crates/taskfast-cli/skills/taskfast-agent"
+if [[ -d "${bundled_dir}" ]]; then
+  while IFS= read -r f; do
+    rel="${f#${SKILL_DIR}/}"
+    if ! diff -q "${f}" "${bundled_dir}/${rel}" >/dev/null 2>&1; then
+      printf 'skill-validate: bundled skill drift: %s\n' "${rel}" >&2
+      drift=1
+    fi
+  done < <(find "${SKILL_DIR}" -type f | sort)
+  # Also catch files present in the bundle but absent from the source of truth.
+  extra="$(cd "${bundled_dir}" && find . -type f | sort)"
+  src_list="$(cd "${SKILL_DIR}" && find . -type f | sort)"
+  [[ "${extra}" == "${src_list}" ]] || { printf 'skill-validate: bundled skill file set differs from source of truth\n' >&2; drift=1; }
+  [[ "${drift:-0}" -eq 0 ]] || fail "bundled crates/taskfast-cli/skills/taskfast-agent drifted from skills/taskfast-agent — re-copy the tree"
+  info "OK: bundled skill tree matches workspace source of truth"
+fi
+
 info "OK: ${EXPECTED_NAME} is publishable"
