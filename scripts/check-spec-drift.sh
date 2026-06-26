@@ -42,17 +42,33 @@ else
   subject="vendored spec/openapi.yaml"
 fi
 
-if [[ "$actual_sha" == "$recorded_sha" ]]; then
-  echo "ok: $subject matches recorded provenance (${recorded_sha:0:16}…)"
-  exit 0
+if [[ "$actual_sha" != "$recorded_sha" ]]; then
+  echo "::error::SPEC DRIFT — $subject (${actual_sha:0:16}…) != provenance (${recorded_sha:0:16}…)"
+  if [[ "$mode" == "upstream" ]]; then
+    echo "The server's canonical spec has moved ahead of the vendored copy."
+    echo "Re-vendor: scripts/vendor-spec.sh && cargo xtask sync-spec && cargo build --workspace"
+  else
+    echo "spec/openapi.yaml was edited without updating its provenance."
+    echo "Re-vendor instead of hand-editing: scripts/vendor-spec.sh"
+  fi
+  exit 1
 fi
 
-echo "::error::SPEC DRIFT — $subject (${actual_sha:0:16}…) != provenance (${recorded_sha:0:16}…)"
-if [[ "$mode" == "upstream" ]]; then
-  echo "The server's canonical spec has moved ahead of the vendored copy."
-  echo "Re-vendor: scripts/vendor-spec.sh && cargo xtask sync-spec && cargo build --workspace"
-else
-  echo "spec/openapi.yaml was edited without updating its provenance."
-  echo "Re-vendor instead of hand-editing: scripts/vendor-spec.sh"
+# Local-only: assert the bundled copy shipped inside the published
+# taskfast-client crate (crates/taskfast-client/spec/openapi.yaml) is
+# byte-identical to the workspace source of truth. They drift when someone
+# edits one without re-running vendor-spec.sh (which now syncs both), which
+# would make `cargo publish` verification build a client against a stale spec.
+if [[ "$mode" == "local" ]]; then
+  bundled="$repo_root/crates/taskfast-client/spec/openapi.yaml"
+  bundled_sha="$(sha256sum "$bundled" | cut -d' ' -f1)"
+  if [[ "$bundled_sha" != "$recorded_sha" ]]; then
+    echo "::error::BUNDLED SPEC DRIFT — crates/taskfast-client/spec/openapi.yaml (${bundled_sha:0:16}…) != provenance (${recorded_sha:0:16}…)"
+    echo "The published-crate copy is stale. Re-sync both via: scripts/vendor-spec.sh"
+    exit 1
+  fi
+  echo "ok: bundled crates/taskfast-client/spec/openapi.yaml matches provenance"
 fi
-exit 1
+
+echo "ok: $subject matches recorded provenance (${recorded_sha:0:16}…)"
+exit 0
