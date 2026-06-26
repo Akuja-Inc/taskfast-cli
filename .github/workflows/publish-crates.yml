@@ -13,14 +13,22 @@
 #   taskfast-codegen -> taskfast-client -> taskfast-agent -> taskfast-cli
 #   taskfast-chains  (independent)
 #
+# Idempotency: each crate is checked against the crates.io sparse index BEFORE
+# publishing — if the exact version is already there, it is skipped. Real
+# publish failures are propagated honestly (never masked); a short index-
+# propagation wait follows each publish so the next crate in the chain can
+# resolve it.
+#
 # Triggers:
-#   * workflow_dispatch (manual) — use for the first publish and any re-run.
-#     A `dry_run` input lets you validate packaging + metadata without uploading.
+#   * workflow_dispatch (manual) — a `dry_run` input validates packaging +
+#     metadata without uploading. (Dependent crates will report "no matching
+#     package <dep>" until their deps are actually published — expected.)
 #   * push of a version tag (taskfast-cli-v* or bare vX.Y.Z) — automates the
 #     registry publish on each release, alongside the binary release.yml run.
 #
-# Requires the CARGO_REGISTRY_TOKEN repo secret (crates.io publish token,
-# scoped by a maintainer). Without it the job fails with a clear message.
+# Requires the CARGO_REGISTRY_TOKEN repo secret (crates.io publish token). The
+# owning crates.io account MUST have a verified email address, or every upload
+# fails with HTTP 400 "A verified email address is required".
 
 name: publish-crates
 
@@ -55,74 +63,81 @@ jobs:
           echo "::error::CARGO_REGISTRY_TOKEN secret is not set. Add it in repo Settings -> Secrets (crates.io publish token), then re-run."
           exit 1
 
-      # Publish helper: idempotent. A re-run after a partial/complete success
-      # must not fail just because a version is already on the registry —
-      # cargo publish errors with "already exists" in that case. We tolerate
-      # exactly that and propagate every other failure.
-      - name: Publish taskfast-codegen
-        continue-on-error: ${{ inputs.dry_run }}
+      # Single ordered publish step. `already_published` checks the sparse
+      # index for the exact version BEFORE attempting an upload, so re-runs
+      # skip completed crates without masking real errors. `publish` uploads,
+      # then waits a few seconds for index propagation so the next crate in
+      # the chain can resolve its just-published dependency.
+      - name: Publish crates in topological order
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          set +e
-          cargo publish -p taskfast-codegen --locked ${{ inputs.dry_run && '--dry-run' || '' }}
-          s=$?
-          if [ $s -ne 0 ] && cargo publish -p taskfast-codegen --locked --dry-run >/dev/null 2>&1; then
-            echo "::notice::taskfast-codegen already published at this version; skipping"
-            exit 0
-          fi
-          exit $s
+          set -euo pipefail
 
-      - name: Publish taskfast-client
-        continue-on-error: ${{ inputs.dry_run }}
-        run: |
-          set +e
-          cargo publish -p taskfast-client --locked ${{ inputs.dry_run && '--dry-run' || '' }}
-          s=$?
-          if [ $s -ne 0 ] && cargo publish -p taskfast-client --locked --dry-run >/dev/null 2>&1; then
-            echo "::notice::taskfast-client already published at this version; skipping"
-            exit 0
-          fi
-          exit $s
+          # crates.io sparse-index path for a crate name.
+          index_path() {
+            local name="$1"
+            case ${#name} in
+              1) echo "1/${name}" ;;
+              2) echo "2/${name}" ;;
+              3) echo "3/${name}" ;;
+              *) echo "${name:0:2}/${name:2:2}/${name}" ;;
+            esac
+          }
 
-      - name: Publish taskfast-chains
-        continue-on-error: ${{ inputs.dry_run }}
-        run: |
-          set +e
-          cargo publish -p taskfast-chains --locked ${{ inputs.dry_run && '--dry-run' || '' }}
-          s=$?
-          if [ $s -ne 0 ] && cargo publish -p taskfast-chains --locked --dry-run >/dev/null 2>&1; then
-            echo "::notice::taskfast-chains already published at this version; skipping"
-            exit 0
-          fi
-          exit $s
+          # already_published <name> <version>: true if that exact version is
+          # on the registry (queried via the public sparse index — no token).
+          already_published() {
+            local name="$1" ver="$2" path
+            path="$(index_path "$name")"
+            curl -fsSL "https://index.crates.io/${path}" 2>/dev/null \
+              | grep -q "\"vers\":\"${ver}\""
+          }
 
-      - name: Publish taskfast-agent
-        continue-on-error: ${{ inputs.dry_run }}
-        run: |
-          set +e
-          cargo publish -p taskfast-agent --locked ${{ inputs.dry_run && '--dry-run' || '' }}
-          s=$?
-          if [ $s -ne 0 ] && cargo publish -p taskfast-agent --locked --dry-run >/dev/null 2>&1; then
-            echo "::notice::taskfast-agent already published at this version; skipping"
-            exit 0
-          fi
-          exit $s
+          # publish_one <name> <version>: skip if already on the registry,
+          # otherwise upload (or dry-run) and propagate any real failure.
+          publish_one() {
+            local name="$1" ver="$2" flag=""
+            [ "${DRY_RUN}" = "true" ] && flag="--dry-run"
 
-      - name: Publish taskfast-cli
-        continue-on-error: ${{ inputs.dry_run }}
-        run: |
-          set +e
-          cargo publish -p taskfast-cli --locked ${{ inputs.dry_run && '--dry-run' || '' }}
-          s=$?
-          if [ $s -ne 0 ] && cargo publish -p taskfast-cli --locked --dry-run >/dev/null 2>&1; then
-            echo "::notice::taskfast-cli already published at this version; skipping"
-            exit 0
-          fi
-          exit $s
+            if [ "${DRY_RUN}" != "true" ] && already_published "$name" "$ver"; then
+              echo "::notice::${name} ${ver} already on crates.io; skipping"
+              return 0
+            fi
+
+            echo "::group::cargo publish -p ${name} ${flag}"
+            cargo publish -p "${name}" --locked ${flag}
+            local s=$?
+            echo "::endgroup::"
+
+            if [ $s -ne 0 ]; then
+              echo "::error::cargo publish -p ${name} failed (exit ${s})"
+              return $s
+            fi
+
+            # Give the sparse index a moment to propagate so the next crate in
+            # the chain can resolve this one. (No-op for dry-run.)
+            if [ "${DRY_RUN}" != "true" ]; then
+              echo "waiting for index propagation of ${name} ${ver}..."
+              for _ in 1 2 3 4 5 6 7 8 9 10; do
+                if already_published "$name" "$ver"; then return 0; fi
+                sleep 3
+              done
+              echo "::warning::${name} ${ver} uploaded but not yet visible on the sparse index after 30s; the next crate may fail to resolve it. Re-run the workflow if so."
+            fi
+          }
+
+          # Topological order — each crate's workspace deps precede it.
+          publish_one taskfast-codegen 0.1.0
+          publish_one taskfast-client  0.3.0
+          publish_one taskfast-chains  0.1.0
+          publish_one taskfast-agent   0.7.0
+          publish_one taskfast-cli     0.7.0
 
       - name: Dry-run summary
         if: ${{ inputs.dry_run }}
         run: |
           echo "::notice::Dry-run publish validation complete."
           echo "Leaf crates (taskfast-codegen, taskfast-chains) should be green — they have no workspace deps."
-          echo "taskfast-client/agent/cli are EXPECTED to show as skipped/failed here until their workspace deps are actually on crates.io (the 'no matching package <dep>' error). This is normal before the first real publish."
-          echo "For the first real publish, run this workflow WITHOUT dry_run (requires CARGO_REGISTRY_TOKEN); it publishes in topological order."
+          echo "taskfast-client/agent/cli are EXPECTED to fail here until their workspace deps are actually on crates.io (the 'no matching package <dep>' error). This is normal before the first real publish."
+          echo "For the first real publish, run this workflow WITHOUT dry_run (requires CARGO_REGISTRY_TOKEN + a verified email on the owning crates.io account)."
