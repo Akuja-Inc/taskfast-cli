@@ -27,22 +27,19 @@ fn main() {
     // with no workspace root to walk up to) can still run codegen. The
     // workspace path is the dev/source-of-truth location used in-tree.
     let candidates = [
-        manifest_dir.join("spec/openapi.yaml"),     // bundled (published package)
+        manifest_dir.join("spec/openapi.yaml"), // bundled (published package)
         manifest_dir.join("../../spec/openapi.yaml"), // in-tree workspace
     ];
-    let spec_path = candidates
-        .iter()
-        .find(|p| p.exists())
-        .unwrap_or_else(|| {
-            panic!(
-                "spec/openapi.yaml not found at any of: {}",
-                candidates
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        });
+    let spec_path = candidates.iter().find(|p| p.exists()).unwrap_or_else(|| {
+        panic!(
+            "spec/openapi.yaml not found at any of: {}",
+            candidates
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let out_path = out_dir.join("codegen.rs");
 
