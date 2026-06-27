@@ -28,7 +28,7 @@ use clap::Parser;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{validate_override_rpc_url, CmdError, CmdResult, Ctx};
+use super::{is_proxy_rpc_url, validate_override_rpc_url, CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_agent::tempo_rpc::{sign_and_broadcast_erc20_transfer, TempoRpcClient};
@@ -446,18 +446,18 @@ async fn resolve_rpc_url(
     })?;
     // F2-equivalent guard, minus the static allowlist: the old
     // WELL_KNOWN_TEMPO_RPCS check trusted exactly two hardcoded URLs. The
-    // replacement says "the proxy must live under the same api_base the
-    // endpoint-guard already approved". Catches (a) a misconfigured
-    // deployment returning an upstream URL instead of its own proxy, and
-    // (b) a compromised backend trying to steer RPC traffic off-host —
-    // minus a full MITM on api_base itself (which has its own F5/F6
-    // defenses).
-    let expected_prefix = format!("{}/rpc/", ctx.base_url().trim_end_matches('/'));
-    if !entry.rpc_url.starts_with(&expected_prefix) {
+    // replacement says "the proxy must live on the same host as the api_base
+    // the endpoint-guard already approved" — the path it's mounted at
+    // (`/rpc/…` or `/api/rpc/…`) is the server's choice. Catches (a) a
+    // misconfigured deployment returning an upstream URL instead of its own
+    // proxy, and (b) a compromised backend trying to steer RPC traffic
+    // off-host — minus a full MITM on api_base itself (which has its own
+    // F5/F6 defenses).
+    if !is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
         return Err(CmdError::Server(format!(
             "deployment at {} returned rpc_url {:?} for network `{name}`, \
-             which does not live under `{expected_prefix}…`. Refusing to \
-             route RPC traffic off-host.",
+             which is not on the same host. Refusing to route RPC traffic \
+             off-host.",
             ctx.base_url(),
             entry.rpc_url,
         )));

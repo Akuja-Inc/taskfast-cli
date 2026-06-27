@@ -29,7 +29,10 @@ use clap::Parser;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{network_policy_for_chain_id, validate_override_rpc_url, CmdError, CmdResult, Ctx};
+use super::{
+    is_proxy_rpc_url, network_policy_for_chain_id, validate_override_rpc_url, CmdError, CmdResult,
+    Ctx,
+};
 use crate::envelope::Envelope;
 
 use taskfast_agent::bootstrap;
@@ -340,12 +343,14 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                 params.chain_id
             ))
         })?;
-        let expected_prefix = format!("{}/rpc/", ctx.base_url().trim_end_matches('/'));
-        if !entry.rpc_url.starts_with(&expected_prefix) {
+        // Same-host guard as post::resolve_rpc_url — the proxy may be mounted
+        // at any path on api_base (`/rpc/…` or `/api/rpc/…`); only the host
+        // must match so the API key never leaves the approved deployment.
+        if !is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
             return Err(CmdError::Server(format!(
                 "deployment at {} returned rpc_url {:?} for chain_id={}, \
-                 which does not live under `{expected_prefix}…`. Refusing \
-                 to route RPC traffic off-host.",
+                 which is not on the same host. Refusing to route RPC \
+                 traffic off-host.",
                 ctx.base_url(),
                 entry.rpc_url,
                 params.chain_id,

@@ -225,9 +225,9 @@ impl Ctx {
     /// Tempo gateway via `--rpc-url`/`TEMPO_RPC_URL`) gets a fresh client
     /// with no TaskFast headers.
     ///
-    /// This is selected by URL prefix, not by which resolution branch the
-    /// URL came from, so a user who points `--rpc-url` / `TEMPO_RPC_URL`
-    /// at the proxy still gets the authenticated client.
+    /// This is selected by URL origin (same host as `api_base`), not by which
+    /// resolution branch the URL came from, so a user who points `--rpc-url` /
+    /// `TEMPO_RPC_URL` at the proxy still gets the authenticated client.
     pub fn rpc_http_client(&self, client: &TaskFastClient, rpc_url: &str) -> reqwest::Client {
         if is_proxy_rpc_url(rpc_url, self.base_url()) {
             client.http_client()
@@ -277,12 +277,25 @@ impl Ctx {
     }
 }
 
-/// True when `rpc_url` lives under this deployment's `{api_base}/rpc/`
-/// proxy. Used to decide whether the authenticated reqwest client (with the
-/// `X-API-Key` default header) is required for the call.
+/// True when `rpc_url` is served from the same origin (scheme + host + port)
+/// as this deployment's `base_url` — i.e. it is this deployment's own
+/// authenticated proxy, whatever path it is mounted at (`/rpc/…` or
+/// `/api/rpc/…`). Used both to gate off-host RPC routing and to decide
+/// whether the authenticated reqwest client (with the `X-API-Key` default
+/// header) is required for the call.
+///
+/// The path is deliberately irrelevant: every route on `base_url` is a
+/// TaskFast route that already accepts the key, so the only boundary that
+/// matters is the host — we never leak the key off-host. `Url::origin()`
+/// folds in the scheme, so an `https`→`http` downgrade is a different origin
+/// and is correctly rejected.
 pub(crate) fn is_proxy_rpc_url(rpc_url: &str, base_url: &str) -> bool {
-    let prefix = format!("{}/rpc/", base_url.trim_end_matches('/'));
-    rpc_url.starts_with(&prefix)
+    match (url::Url::parse(rpc_url), url::Url::parse(base_url)) {
+        // Two opaque origins are never equal, so a match here is always a
+        // genuine same-host tuple origin.
+        (Ok(rpc), Ok(base)) => rpc.origin() == base.origin(),
+        _ => false,
+    }
 }
 
 fn is_loopback_url(url: &str) -> bool {
@@ -673,31 +686,38 @@ mod tests {
     }
 
     #[test]
-    fn is_proxy_rpc_url_recognises_authenticated_proxy() {
+    fn is_proxy_rpc_url_matches_same_origin() {
         let base = "https://staging.api.taskfast.app";
-        // Proxy URL — must use authenticated client.
+        // Proxy mounted at /rpc/ — same origin, authenticated client.
         assert!(is_proxy_rpc_url(
             "https://staging.api.taskfast.app/rpc/testnet",
             base
         ));
-        // Trailing slash on base must not break the prefix match.
+        // Proxy mounted at /api/rpc/ (gh#79) — same origin, still ours.
+        // The path differs but the host is the one the endpoint-guard
+        // already approved, so the API key belongs here.
+        assert!(is_proxy_rpc_url(
+            "https://staging.api.taskfast.app/api/rpc/testnet",
+            base
+        ));
+        // Trailing slash on base must not break the match.
         assert!(is_proxy_rpc_url(
             "https://staging.api.taskfast.app/rpc/mainnet",
             "https://staging.api.taskfast.app/"
         ));
-        // Bare upstream Tempo gateway — bare client is correct (no
-        // TaskFast auth header to leak).
+        // Bare upstream Tempo gateway — different host, bare client is
+        // correct (no TaskFast auth header to leak off-host).
         assert!(!is_proxy_rpc_url("https://rpc.moderato.tempo.xyz", base));
-        // Same host but a different path is NOT the proxy — don't
-        // attach the API key on unrelated routes.
-        assert!(!is_proxy_rpc_url(
-            "https://staging.api.taskfast.app/task_drafts",
-            base
-        ));
         // Different host, even one that pretends to be a proxy path,
         // must not pick up the authenticated client.
         assert!(!is_proxy_rpc_url(
             "https://attacker.example/rpc/testnet",
+            base
+        ));
+        // Scheme downgrade is a *different* origin — never send the key
+        // over plaintext, even to the same host.
+        assert!(!is_proxy_rpc_url(
+            "http://staging.api.taskfast.app/rpc/testnet",
             base
         ));
     }
