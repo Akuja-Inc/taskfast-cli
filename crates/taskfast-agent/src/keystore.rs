@@ -143,17 +143,22 @@ pub fn save_signer(
     // Pre-create the target at `0600` *before* eth-keystore writes the
     // ciphertext. eth-keystore (0.5.0) writes via `File::create(dir/name)`,
     // whose `0o666` mode is honored only when the inode is *created* — so it
-    // reopens this existing `0600` inode, truncates, and rewrites without
-    // widening the mode. Relying on the post-write chmod alone leaves a
-    // window where the encrypted key is `0o666 & ~umask` (e.g. `0664` under
-    // `umask 002`) and world-readable. See gh#78.
+    // reopens this existing `0600` inode and rewrites without widening the
+    // mode. Relying on the post-write chmod alone leaves a window where the
+    // encrypted key is `0o666 & ~umask` (e.g. `0664` under `umask 002`) and
+    // world-readable. See gh#78.
+    //
+    // Note: no `.truncate(true)` here on purpose. Truncating would wipe an
+    // existing keystore before `encrypt_keystore` writes the new ciphertext,
+    // so a crash in between would leave an empty file and destroy recoverable
+    // key material. `encrypt_keystore` performs its own truncate-on-write.
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let f = fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false) // deliberate: don't wipe an existing keystore (see above)
             .mode(0o600)
             .open(&written)?;
         // `.mode()` is a no-op when the file already existed (e.g. a stale

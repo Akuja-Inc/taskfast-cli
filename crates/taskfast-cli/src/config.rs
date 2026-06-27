@@ -159,7 +159,18 @@ fn is_zero(v: &u32) -> bool {
 /// `create_new` makes this idempotent and non-destructive: an existing
 /// `.gitignore` (user-customized) is left untouched. Best-effort — any other
 /// I/O error is logged, not propagated, so it never fails the config write.
+///
+/// Scoped to the conventional `.taskfast` secrets dir only: a caller who
+/// overrides `--config ./config.json` (or `TASKFAST_CONFIG`) must not have a
+/// `.gitignore` of `*` dropped into an arbitrary directory — into the repo
+/// root that would ignore the entire working tree.
 fn ensure_dir_gitignore(dir: &Path) {
+    let expected = Path::new(DEFAULT_CONFIG_PATH)
+        .parent()
+        .and_then(Path::file_name);
+    if dir.file_name() != expected {
+        return;
+    }
     let gitignore = dir.join(".gitignore");
     match fs::OpenOptions::new()
         .write(true)
@@ -448,6 +459,23 @@ mod tests {
         sample().save(&path).expect("save");
         let gi = fs::read_to_string(cfg_dir.join(".gitignore")).expect(".gitignore written");
         assert_eq!(gi.trim(), "*");
+    }
+
+    #[test]
+    fn save_to_overridden_path_does_not_write_gitignore() {
+        // gh#78 review: `--config ./config.json` must NOT drop a `.gitignore`
+        // of `*` into an arbitrary dir (e.g. the repo root, which would
+        // ignore the whole tree). Only the conventional `.taskfast/` dir is
+        // auto-ignored.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("some-project");
+        let path = dir.join("config.json");
+        sample().save(&path).expect("save");
+        assert!(path.exists(), "config still written");
+        assert!(
+            !dir.join(".gitignore").exists(),
+            "no .gitignore in a non-.taskfast dir"
+        );
     }
 
     #[test]
