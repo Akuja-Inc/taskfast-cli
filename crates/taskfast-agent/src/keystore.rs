@@ -138,6 +138,32 @@ pub fn save_signer(
         .and_then(|s| s.to_str())
         .ok_or_else(|| KeystoreError::NotFound(path.to_path_buf()))?;
 
+    let written = parent.join(file_name);
+
+    // Pre-create the target at `0600` *before* eth-keystore writes the
+    // ciphertext. eth-keystore (0.5.0) writes via `File::create(dir/name)`,
+    // whose `0o666` mode is honored only when the inode is *created* — so it
+    // reopens this existing `0600` inode, truncates, and rewrites without
+    // widening the mode. Relying on the post-write chmod alone leaves a
+    // window where the encrypted key is `0o666 & ~umask` (e.g. `0664` under
+    // `umask 002`) and world-readable. See gh#78.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&written)?;
+        // `.mode()` is a no-op when the file already existed (e.g. a stale
+        // `0664` keystore from an older build); tighten it explicitly so the
+        // overwrite path repairs broad perms too.
+        let mut perms = f.metadata()?.permissions();
+        perms.set_mode(0o600);
+        f.set_permissions(perms)?;
+    }
+
     let mut rng = rand::thread_rng();
     // `encrypt_keystore` writes `{parent}/{name}` via eth-keystore's
     // scrypt + AES-128-CTR pipeline. We pass the already-generated key's
@@ -146,7 +172,9 @@ pub fn save_signer(
     PrivateKeySigner::encrypt_keystore(parent, &mut rng, pk_bytes, password, Some(file_name))
         .map_err(|e| KeystoreError::Signer(e.to_string()))?;
 
-    let written = parent.join(file_name);
+    // Backstop: re-assert `0600` after the write in case a future
+    // eth-keystore changes its write strategy (e.g. temp-file + rename,
+    // which would bypass the pre-created inode above).
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -167,10 +195,35 @@ pub fn generate_and_save(password: &str) -> Result<(PrivateKeySigner, PathBuf), 
     Ok((signer, path))
 }
 
+/// True when `mode`'s group/other bits are set — i.e. the file is readable
+/// (or writable) by anyone but the owner. `0o600` and `0o400` are tight;
+/// `0o640`/`0o664`/`0o644` are not.
+#[cfg(unix)]
+fn mode_is_too_open(mode: u32) -> bool {
+    mode & 0o077 != 0
+}
+
 /// Decrypts the keystore at `path` with `password` and returns the signer.
+///
+/// On unix, warns (does not repair — a read shouldn't silently mutate file
+/// modes) when the keystore is group/world-accessible, so a leak written by
+/// an older build or another tool is surfaced rather than ignored (gh#78).
 pub fn load_signer(path: &Path, password: &str) -> Result<PrivateKeySigner, KeystoreError> {
     if !path.exists() {
         return Err(KeystoreError::NotFound(path.to_path_buf()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path)?.permissions().mode() & 0o777;
+        if mode_is_too_open(mode) {
+            tracing::warn!(
+                keystore = %path.display(),
+                mode = format!("{mode:o}"),
+                "keystore is group/world-accessible (expected 0600) — \
+                 run `chmod 600` on it; it holds your encrypted private key"
+            );
+        }
     }
     PrivateKeySigner::decrypt_keystore(path, password)
         .map_err(|e| KeystoreError::Signer(e.to_string()))
@@ -253,6 +306,34 @@ mod tests {
         save_signer(&signer, &path, "pw").expect("save");
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "keyfile must be owner-only readable/writable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwriting_a_world_readable_keystore_tightens_to_0600() {
+        // A stale 0664 keystore (older build / foreign umask) must be
+        // repaired to 0600 when re-saved, not left wide. gh#78.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("wallet.json");
+        fs::write(&path, b"stale").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o664)).unwrap();
+
+        let signer = PrivateKeySigner::random();
+        save_signer(&signer, &path, "pw").expect("save over existing file");
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "overwrite must tighten 0664 -> 0600");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mode_is_too_open_flags_group_and_other_bits() {
+        assert!(!mode_is_too_open(0o600));
+        assert!(!mode_is_too_open(0o400));
+        assert!(mode_is_too_open(0o640), "group-readable is too open");
+        assert!(mode_is_too_open(0o604), "other-readable is too open");
+        assert!(mode_is_too_open(0o664), "the observed leak mode");
     }
 
     #[test]

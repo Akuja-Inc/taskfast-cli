@@ -154,6 +154,30 @@ fn is_zero(v: &u32) -> bool {
     *v == 0
 }
 
+/// Drop a `.gitignore` of `*` into the config dir so its plaintext secrets
+/// (`api_key`, keystore path, webhook secret) can't be committed by accident.
+/// `create_new` makes this idempotent and non-destructive: an existing
+/// `.gitignore` (user-customized) is left untouched. Best-effort — any other
+/// I/O error is logged, not propagated, so it never fails the config write.
+fn ensure_dir_gitignore(dir: &Path) {
+    let gitignore = dir.join(".gitignore");
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&gitignore)
+    {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(b"*\n") {
+                tracing::warn!(path = %gitignore.display(), error = %e, "could not write .taskfast/.gitignore");
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => {
+            tracing::warn!(path = %gitignore.display(), error = %e, "could not create .taskfast/.gitignore");
+        }
+    }
+}
+
 impl Config {
     /// Parse the JSON at `path`. Missing file → `Config::default()`
     /// (callers treat absence the same as an empty config). Newer
@@ -235,6 +259,10 @@ impl Config {
                         source,
                     })?;
                 }
+                // Git-ignore the whole config dir so the plaintext `api_key`
+                // can't be committed by accident from inside a repo (gh#78).
+                // Best-effort: a failure here must not fail the config write.
+                ensure_dir_gitignore(parent);
             }
         }
         let mut to_write = self.clone();
@@ -248,7 +276,22 @@ impl Config {
 
         let tmp = path.with_extension("json.tmp");
         {
-            let mut f = fs::File::create(&tmp).map_err(|source| ConfigError::Io {
+            // Create the temp at 0600 from the start (not umask-default then
+            // chmod) so the api_key is never momentarily world-readable
+            // before the rename. gh#78.
+            #[cfg(unix)]
+            let create = {
+                use std::os::unix::fs::OpenOptionsExt;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&tmp)
+            };
+            #[cfg(not(unix))]
+            let create = fs::File::create(&tmp);
+            let mut f = create.map_err(|source| ConfigError::Io {
                 path: tmp.clone(),
                 source,
             })?;
@@ -393,6 +436,30 @@ mod tests {
             ".taskfast/ must be 0700 so other users on the host can't \
              list the keystore + webhook secret + API key"
         );
+    }
+
+    #[test]
+    fn save_writes_gitignore_star_in_config_dir() {
+        // gh#78: the dir holding the plaintext api_key must be git-ignored
+        // by default so a `taskfast init` inside a repo can't leak it.
+        let tmp = TempDir::new().unwrap();
+        let cfg_dir = tmp.path().join(".taskfast");
+        let path = cfg_dir.join("config.json");
+        sample().save(&path).expect("save");
+        let gi = fs::read_to_string(cfg_dir.join(".gitignore")).expect(".gitignore written");
+        assert_eq!(gi.trim(), "*");
+    }
+
+    #[test]
+    fn save_does_not_clobber_existing_gitignore() {
+        // A user who customized .gitignore keeps it — we only create when absent.
+        let tmp = TempDir::new().unwrap();
+        let cfg_dir = tmp.path().join(".taskfast");
+        fs::create_dir_all(&cfg_dir).unwrap();
+        fs::write(cfg_dir.join(".gitignore"), "# mine\nconfig.json\n").unwrap();
+        sample().save(&cfg_dir.join("config.json")).expect("save");
+        let gi = fs::read_to_string(cfg_dir.join(".gitignore")).unwrap();
+        assert_eq!(gi, "# mine\nconfig.json\n", "existing .gitignore preserved");
     }
 
     #[test]

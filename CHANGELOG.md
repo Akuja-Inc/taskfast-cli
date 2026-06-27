@@ -89,6 +89,15 @@ that is the authoritative changelog.
 - **F4 tight `.taskfast/` parent-dir perms.** `Config::save` now chmods
   the parent directory to `0700` on unix so `.taskfast/` itself is no
   longer world-listable after `taskfast init`.
+- **Keystore + config written `0600` at creation time (gh#78).** Both the
+  wallet keystore and `.taskfast/config.json` are now created with mode
+  `0600` from the first `open` instead of inheriting the umask and being
+  chmod'd afterward — closing the window where the encrypted private key /
+  `api_key` was briefly `0o666 & ~umask` (e.g. `0664` under `umask 002`) and
+  world-readable. `load_signer` also warns when an existing keystore is
+  group/world-accessible. Additionally, `Config::save` drops a `.gitignore`
+  of `*` into `.taskfast/` so the plaintext `api_key` can't be committed by
+  accident from inside a git repo (existing `.gitignore` left untouched).
 - **F5 no HTTP redirects.** The typed client pins
   `reqwest::redirect::Policy::none()`. `X-API-Key` is a custom header
   (not `Authorization`) and would otherwise be replayed verbatim on a
