@@ -40,6 +40,7 @@ sol! {
             address worker,
             uint256 platformFeeAmount,
             address platform,
+            address arbitrator,
             bytes32 salt
         ) external returns (bytes32);
 
@@ -49,6 +50,7 @@ sol! {
             address worker,
             uint256 platformFeeAmount,
             address platform,
+            address arbitrator,
             bytes32 salt,
             bytes32 memoHash
         ) external returns (bytes32);
@@ -65,12 +67,16 @@ sol! {
     }
 }
 
-/// Predict the `escrowId` that `TaskEscrow.open` will assign to a new escrow.
+/// Predict the `escrowId` that `ArbitratedEscrow.open` will assign to a new escrow.
 ///
 /// Computed as `keccak256(abi.encode(poster, worker, token, deposit, fee,
-/// platform, salt))` — must byte-match the contract's derivation at
-/// `contracts/src/TaskEscrow.sol:409-420`. Exposed so callers can pre-sign
-/// the EIP-712 `DistributionApproval` *before* broadcasting the `open` tx.
+/// platform, arbitrator, salt))` — must byte-match the contract's derivation in
+/// `ArbitratedEscrow.computeEscrowId` (`contracts/src/ArbitratedEscrow.sol`).
+/// The `arbitrator` is part of the preimage in canonical v2, so omitting it
+/// yields the wrong id (and a no-arbitrator `open` reverts on the v2 contract).
+/// Exposed so callers can pre-sign the EIP-712 `DistributionApproval` *before*
+/// broadcasting the `open` tx.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_escrow_id(
     poster: Address,
     worker: Address,
@@ -78,6 +84,7 @@ pub fn compute_escrow_id(
     deposit: U256,
     platform_fee_amount: U256,
     platform: Address,
+    arbitrator: Address,
     salt: B256,
 ) -> B256 {
     let encoded = (
@@ -87,6 +94,7 @@ pub fn compute_escrow_id(
         deposit,
         platform_fee_amount,
         platform,
+        arbitrator,
         salt,
     )
         .abi_encode();
@@ -114,17 +122,21 @@ mod tests {
         let platform: Address = "0x0000000000000000000000000000000000000004"
             .parse()
             .unwrap();
+        let arbitrator: Address = "0x0000000000000000000000000000000000000005"
+            .parse()
+            .unwrap();
         let deposit = U256::from(1_000_000_000u64);
         let fee = U256::from(50_000_000u64);
         let mut salt_bytes = [0u8; 32];
         salt_bytes[31] = 0x42;
         let salt = B256::from(salt_bytes);
 
-        let id = compute_escrow_id(poster, worker, token, deposit, fee, platform, salt);
+        let id = compute_escrow_id(poster, worker, token, deposit, fee, platform, arbitrator, salt);
 
         // Independent re-derivation: raw abi.encode of the tuple, then
         // keccak256. Same inputs MUST yield the same 32-byte digest.
-        let manual = keccak256((poster, worker, token, deposit, fee, platform, salt).abi_encode());
+        let manual =
+            keccak256((poster, worker, token, deposit, fee, platform, arbitrator, salt).abi_encode());
         assert_eq!(id, manual);
         assert_eq!(id.len(), 32);
     }
@@ -141,8 +153,8 @@ mod tests {
         let mut salt_b = [0u8; 32];
         salt_b[31] = 0x02;
 
-        let a = compute_escrow_id(p, p, token, deposit, fee, p, B256::from(salt_a));
-        let b = compute_escrow_id(p, p, token, deposit, fee, p, B256::from(salt_b));
+        let a = compute_escrow_id(p, p, token, deposit, fee, p, p, B256::from(salt_a));
+        let b = compute_escrow_id(p, p, token, deposit, fee, p, p, B256::from(salt_b));
         assert_ne!(a, b, "distinct salts must produce distinct escrow ids");
     }
 
@@ -165,6 +177,7 @@ mod tests {
             worker: Address::ZERO,
             platformFeeAmount: U256::from(0u64),
             platform: Address::ZERO,
+            arbitrator: Address::ZERO,
             salt: B256::ZERO,
         };
         let data = call.abi_encode();

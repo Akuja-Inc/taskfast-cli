@@ -201,6 +201,15 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             params.platform_wallet
         ))
     })?;
+    // Canonical v2 ArbitratedEscrow binds the arbitrator into open/openWithMemo,
+    // the escrow-id preimage, and EscrowOpened. Omitting it reverts the open on
+    // the v2 contract and breaks server-side arbitrator validation (gh#674).
+    let arbitrator: Address = params.arbitrator_address.parse().map_err(|e| {
+        CmdError::Decode(format!(
+            "server arbitrator_address `{}` not a valid EVM address: {e}",
+            params.arbitrator_address
+        ))
+    })?;
 
     // Cross-check: the readiness domain's verifying_contract must equal the
     // task_escrow contract returned by params. A mismatch means the server
@@ -276,6 +285,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         deposit,
         platform_fee,
         platform_wallet,
+        arbitrator,
         salt,
     );
 
@@ -301,6 +311,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             worker,
             platformFeeAmount: platform_fee,
             platform: platform_wallet,
+            arbitrator,
             salt,
             memoHash: memo_hash,
         }
@@ -313,6 +324,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             worker,
             platformFeeAmount: platform_fee,
             platform: platform_wallet,
+            arbitrator,
             salt,
         }
         .abi_encode()
@@ -368,6 +380,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                 "bid_id": bid_id.to_string(),
                 "task_id": params.task_id.to_string(),
                 "escrow_id": format!("{escrow_id:#x}"),
+                "arbitrator": format!("{arbitrator:#x}"),
                 "salt": format!("{salt:#x}"),
                 "deadline": deadline_unix,
                 "signature": signature_hex,

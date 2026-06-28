@@ -727,6 +727,11 @@ impl ResolvedArtifact {
 pub(super) fn content_type_for_ext(ext: &str) -> &'static str {
     match ext {
         "txt" => "text/plain",
+        // Markdown is plain UTF-8 text; the server allow-list accepts text/plain
+        // but not text/markdown, and .md is the canonical deliverable format in
+        // the agent skill (gh#674). Without this, .md uploads fall through to
+        // application/octet-stream and the server 415s the submission.
+        "md" | "markdown" => "text/plain",
         "csv" => "text/csv",
         "json" => "application/json",
         "xml" => "application/xml",
