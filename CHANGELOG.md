@@ -10,6 +10,18 @@ that is the authoritative changelog.
 
 ## Unreleased
 
+### Fixed
+
+- **Escrow `open`/`openWithMemo` now bind the `arbitrator`** (canonical v2
+  `ArbitratedEscrow`). The ABI binding, `compute_escrow_id` preimage, the
+  signed calldata, and the dry-run evidence all include `params.arbitrator_address`.
+  Without it the `open` reverted on the v2 contract and server-side arbitrator
+  validation failed (`escrow_event_arbitrator_not_in_pool`), blocking every
+  escrow at `payment_pending`. (gh#674)
+- **`.md`/`.markdown` artifacts upload as `text/plain`** instead of
+  `application/octet-stream`, which the server's content-type allow-list
+  rejected (415) — `.md` is the canonical deliverable format in the agent skill.
+
 ### ⚠ BREAKING
 
 - **Env is the single source of truth for `api_base` and `network`.** Both

@@ -129,12 +129,14 @@ jobs:
       - run: cargo machete
 
   semver:
-    # Detects breaking public-API changes in taskfast-cli against the last
-    # published version on crates.io (the default registry baseline). taskfast-cli
-    # 0.7.0 shipped via publish-crates.yml (bd tfcli-wav); the crate now exists on
-    # the registry so the default baseline resolves. Falls back to the git
-    # baseline only if the registry lookup fails (e.g. a fresh fork without the
-    # secret) — cargo-semver-checks emits a clear error in that case.
+    # Detects breaking public-API changes against the last published version on
+    # crates.io (the default registry baseline). Both taskfast-cli and
+    # taskfast-agent are published (publish chain: codegen → client → agent →
+    # cli), so both have a registry baseline and a breaking change in either —
+    # e.g. compute_escrow_id's signature (gh#674) — must be paired with a
+    # minor/major bump. Falls back to the git baseline only if the registry
+    # lookup fails (e.g. a fresh fork without the secret) — cargo-semver-checks
+    # emits a clear error in that case.
     name: cargo-semver-checks
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-22.04
@@ -145,7 +147,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo install cargo-semver-checks --locked
-      - run: cargo semver-checks --package taskfast-cli
+      - run: cargo semver-checks --package taskfast-cli --package taskfast-agent
 
   coverage:
     # Reports line coverage with llvm-cov. lcov.info is kept as a build

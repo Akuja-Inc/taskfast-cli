@@ -36,7 +36,7 @@ use super::{
 use crate::envelope::Envelope;
 
 use taskfast_agent::bootstrap;
-use taskfast_agent::chain::{compute_escrow_id, TaskEscrow, IERC20};
+use taskfast_agent::chain::{compute_escrow_id, EscrowIdParams, TaskEscrow, IERC20};
 use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
 use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
 use taskfast_client::api::types::{
@@ -147,7 +147,27 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     // 2. Fetch escrow params — server enforces poster-auth + bid status.
     let params = match client.inner().get_bid_escrow_params(&bid_id).await {
         Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
+        Err(e) => {
+            let mapped = map_api_error(e).await;
+            // Version-skew hint: a server predating the v2 arbitrated-escrow
+            // rollout omits `arbitrator_address`, which this CLI now requires,
+            // so the 200 body fails to deserialize into a generic serde
+            // "missing field" decode error. Surface something actionable.
+            // ponytail: substring-match the stable serde message; revisit if
+            // the generated field is ever renamed.
+            if matches!(&mapped, taskfast_client::Error::Decode(_))
+                && mapped.to_string().contains("arbitrator_address")
+            {
+                return Err(CmdError::Validation {
+                    code: "server_missing_arbitrator".into(),
+                    message: "server omitted `arbitrator_address`; this deployment predates \
+                              v2 arbitrated escrow — upgrade the server or use a CLI version \
+                              that matches it"
+                        .into(),
+                });
+            }
+            return Err(mapped.into());
+        }
     };
 
     // 3. Readiness → EIP-712 domain. settlement_domain must be populated
@@ -201,6 +221,25 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             params.platform_wallet
         ))
     })?;
+    // Canonical v2 ArbitratedEscrow binds the arbitrator into open/openWithMemo,
+    // the escrow-id preimage, and EscrowOpened. Omitting it reverts the open on
+    // the v2 contract and breaks server-side arbitrator validation (gh#674).
+    let arbitrator: Address = params.arbitrator_address.parse().map_err(|e| {
+        CmdError::Decode(format!(
+            "server arbitrator_address `{}` not a valid EVM address: {e}",
+            params.arbitrator_address
+        ))
+    })?;
+    // A zero arbitrator is never valid on v2: `open` reverts with
+    // arbitrator_not_in_pool. Reject it client-side before signing/broadcast
+    // rather than burning the approve tx's gas on a doomed open (gh#674).
+    if arbitrator == Address::ZERO {
+        return Err(CmdError::Decode(
+            "server returned a zero arbitrator_address; the v2 escrow open requires a \
+             pool arbitrator and would revert (arbitrator_not_in_pool)"
+                .to_string(),
+        ));
+    }
 
     // Cross-check: the readiness domain's verifying_contract must equal the
     // task_escrow contract returned by params. A mismatch means the server
@@ -269,15 +308,16 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     //    `taskfast-agent::chain::compute_escrow_id` for the caveat on
     //    fee-on-transfer tokens.
     let salt = B256::from(rand::random::<[u8; 32]>());
-    let escrow_id = compute_escrow_id(
-        signer.address(),
+    let escrow_id = compute_escrow_id(&EscrowIdParams {
+        poster: signer.address(),
         worker,
-        token_address,
+        token: token_address,
         deposit,
-        platform_fee,
-        platform_wallet,
+        platform_fee_amount: platform_fee,
+        platform: platform_wallet,
+        arbitrator,
         salt,
-    );
+    });
 
     // 8. Sign DistributionApproval(escrowId, deadline). Deadline is absolute
     //    seconds. Horizon precedence: flag > config > 7d built-in default.
@@ -301,6 +341,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             worker,
             platformFeeAmount: platform_fee,
             platform: platform_wallet,
+            arbitrator,
             salt,
             memoHash: memo_hash,
         }
@@ -313,6 +354,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             worker,
             platformFeeAmount: platform_fee,
             platform: platform_wallet,
+            arbitrator,
             salt,
         }
         .abi_encode()
@@ -368,6 +410,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                 "bid_id": bid_id.to_string(),
                 "task_id": params.task_id.to_string(),
                 "escrow_id": format!("{escrow_id:#x}"),
+                "arbitrator": format!("{arbitrator:#x}"),
                 "salt": format!("{salt:#x}"),
                 "deadline": deadline_unix,
                 "signature": signature_hex,
