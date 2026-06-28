@@ -910,4 +910,20 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn content_type_maps_markdown_to_text_plain() {
+        // gh#674 regression guard: the server allow-list accepts text/plain but
+        // not text/markdown, so .md/.markdown must map to text/plain or the
+        // submission 415s. Dropping either arm reintroduces the bug.
+        assert_eq!(content_type_for_ext("md"), "text/plain");
+        assert_eq!(content_type_for_ext("markdown"), "text/plain");
+        // A representative non-markdown mapping and the unknown fallthrough,
+        // so a future edit to the match can't silently collapse the table.
+        assert_eq!(content_type_for_ext("json"), "application/json");
+        assert_eq!(
+            content_type_for_ext("unknownext"),
+            "application/octet-stream"
+        );
+    }
 }
