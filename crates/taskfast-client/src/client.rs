@@ -288,6 +288,11 @@ impl TaskFastClient {
 /// the ceiling — no need for a trusted `Content-Length` header (chunked
 /// bodies from a malicious server carry none).
 async fn read_body_capped(mut resp: reqwest::Response, cap: usize) -> Result<Vec<u8>> {
+    // Capture the server x-request-id for the CLI trace (gh#85). Generated
+    // methods are covered by progenitor's post-hook; the hand-rolled methods
+    // all funnel their bodies (success and error, via classify_response)
+    // through here, so this one line covers every hand-rolled path.
+    crate::corr::record_corr_response(&resp);
     let mut buf = Vec::new();
     while let Some(chunk) = resp.chunk().await? {
         if buf.len().saturating_add(chunk.len()) > cap {
