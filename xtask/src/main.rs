@@ -36,12 +36,15 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Bump the workspace version in `Cargo.toml` plus every synced inline
-    /// dep ref that pins it (see `synced_sites()`), then refresh `Cargo.lock`.
+    /// Bump every version group (see `version_groups()`) by `level`, then
+    /// refresh `Cargo.lock`.
     ///
-    /// Affects `taskfast-cli` + `taskfast-agent` + `xtask` (all use
-    /// `version.workspace = true`). Does not bump `taskfast-client` or
-    /// `taskfast-chains` — they version independently.
+    /// Bumps the workspace version (`taskfast-cli` + `taskfast-agent` + `xtask`,
+    /// all `version.workspace = true`) and, on its own version line,
+    /// `taskfast-client` — its public API is consumed by `taskfast-cli`, so it
+    /// must bump in lockstep or the crates.io publish fails (gh#85). Other
+    /// independent crates (`taskfast-chains`, `taskfast-codegen`) are not bumped;
+    /// add them to `version_groups()` if they ever gain consumed public API.
     Bump {
         /// Which semver component to increment.
         level: BumpLevel,
@@ -130,31 +133,56 @@ struct SyncedSite {
     toml_path: &'static [&'static str],
 }
 
-fn synced_sites() -> &'static [SyncedSite] {
+/// Independently-versioned crate groups. Each inner slice is a set of sites
+/// that share ONE version and bump together by the requested level; the groups
+/// themselves are on separate version lines and bump independently.
+///
+/// `taskfast-client` is its own group because it lives on a 0.x line distinct
+/// from the workspace version — but its public API is consumed by
+/// `taskfast-cli`, so it MUST bump on every release. If it is left stale, a
+/// crates.io publish of `taskfast-cli` fails verifying its tarball against the
+/// last *published* `taskfast-client` (which lacks any newly-added API). Local
+/// CI and `cargo-semver-checks` use path deps and cannot catch this; only the
+/// registry publish does. See the gh#85 / v0.9.0 postmortem.
+fn version_groups() -> &'static [&'static [SyncedSite]] {
     &[
-        SyncedSite {
-            file: "Cargo.toml",
-            toml_path: &["workspace", "package", "version"],
-        },
-        SyncedSite {
-            file: "Cargo.toml",
-            toml_path: &["workspace", "dependencies", "taskfast-agent", "version"],
-        },
-        // taskfast-client's build-dep is `taskfast-codegen.workspace = true`,
-        // whose version (0.1.0) is pinned once in workspace.dependencies and
-        // versions independently of the workspace package version — so there is
-        // no per-crate inline pin to keep in sync here.
+        // Workspace version: taskfast-cli + taskfast-agent (`version.workspace`),
+        // plus the inline taskfast-agent dep requirement.
+        &[
+            SyncedSite {
+                file: "Cargo.toml",
+                toml_path: &["workspace", "package", "version"],
+            },
+            SyncedSite {
+                file: "Cargo.toml",
+                toml_path: &["workspace", "dependencies", "taskfast-agent", "version"],
+            },
+        ],
+        // taskfast-client: its own package version + the workspace dep
+        // requirement that pins it. Both must stay in lockstep so taskfast-cli
+        // always requires the freshly-published taskfast-client.
+        &[
+            SyncedSite {
+                file: "crates/taskfast-client/Cargo.toml",
+                toml_path: &["package", "version"],
+            },
+            SyncedSite {
+                file: "Cargo.toml",
+                toml_path: &["workspace", "dependencies", "taskfast-client", "version"],
+            },
+        ],
     ]
 }
 
 fn run_bump(level: BumpLevel, no_lock: bool, dry_run: bool) -> Result<()> {
     let workspace_root = find_workspace_root().context("locate workspace root")?;
-    let sites = synced_sites();
+    let groups = version_groups();
 
-    // Load each distinct file once. Multiple sites in the same file must share
-    // one DocumentMut so sequential edits don't clobber each other on write.
+    // Load each distinct file once across ALL groups. Multiple sites in the
+    // same file must share one DocumentMut so sequential edits don't clobber
+    // each other on write.
     let mut docs: Vec<(PathBuf, DocumentMut)> = Vec::new();
-    for site in sites {
+    for site in groups.iter().flat_map(|g| g.iter()) {
         let path = workspace_root.join(site.file);
         if docs.iter().any(|(p, _)| p == &path) {
             continue;
@@ -174,28 +202,31 @@ fn run_bump(level: BumpLevel, no_lock: bool, dry_run: bool) -> Result<()> {
             .expect("file preloaded")
     };
 
-    // Validate: every site's value equals the first site's (authoritative).
-    let current = read_toml_string(&docs[doc_for(sites[0].file, &docs)].1, sites[0].toml_path)
-        .with_context(|| format!("{} @ {}", sites[0].file, sites[0].toml_path.join(".")))?
-        .to_owned();
-    for site in &sites[1..] {
-        let v = read_toml_string(&docs[doc_for(site.file, &docs)].1, site.toml_path)
-            .with_context(|| format!("{} @ {}", site.file, site.toml_path.join(".")))?;
-        if v != current {
-            bail!(
-                "synced site {}@{} = {v} but workspace version = {current}; \
-                 fix manually before bumping",
-                site.file,
-                site.toml_path.join("."),
-            );
+    // For each group, validate intra-group sync and compute current -> next.
+    // Groups version independently, so each reads its own authoritative value.
+    let mut plans: Vec<(&'static [SyncedSite], String)> = Vec::new();
+    for group in groups {
+        let current = read_toml_string(&docs[doc_for(group[0].file, &docs)].1, group[0].toml_path)
+            .with_context(|| format!("{} @ {}", group[0].file, group[0].toml_path.join(".")))?
+            .to_owned();
+        for site in &group[1..] {
+            let v = read_toml_string(&docs[doc_for(site.file, &docs)].1, site.toml_path)
+                .with_context(|| format!("{} @ {}", site.file, site.toml_path.join(".")))?;
+            if v != current {
+                bail!(
+                    "synced site {}@{} = {v} but group version = {current}; \
+                     fix manually before bumping",
+                    site.file,
+                    site.toml_path.join("."),
+                );
+            }
         }
-    }
-
-    let next = bump_semver(&current, level)?;
-
-    eprintln!("bump: {current} -> {next} ({level:?})");
-    for site in sites {
-        eprintln!("  touched: {} @ {}", site.file, site.toml_path.join("."));
+        let next = bump_semver(&current, level)?;
+        eprintln!("bump: {current} -> {next} ({level:?})");
+        for site in *group {
+            eprintln!("  touched: {} @ {}", site.file, site.toml_path.join("."));
+        }
+        plans.push((group, next));
     }
 
     if dry_run {
@@ -204,9 +235,11 @@ fn run_bump(level: BumpLevel, no_lock: bool, dry_run: bool) -> Result<()> {
     }
 
     // Apply all edits in-memory, then flush each distinct doc once.
-    for site in sites {
-        let idx = doc_for(site.file, &docs);
-        write_toml_string(&mut docs[idx].1, site.toml_path, &next);
+    for (group, next) in &plans {
+        for site in *group {
+            let idx = doc_for(site.file, &docs);
+            write_toml_string(&mut docs[idx].1, site.toml_path, next);
+        }
     }
     for (path, doc) in &docs {
         std::fs::write(path, doc.to_string())
@@ -366,6 +399,30 @@ mod tests {
             err.to_string().contains("parse minor"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn taskfast_client_is_an_independent_bump_group() {
+        // Regression guard for the gh#85 / v0.9.0 release: taskfast-client must
+        // bump alongside every release so its published version always carries
+        // the API that taskfast-cli depends on.
+        let groups = version_groups();
+        assert_eq!(groups.len(), 2, "workspace group + taskfast-client group");
+        let client = groups
+            .iter()
+            .find(|g| {
+                g.iter()
+                    .any(|s| s.file == "crates/taskfast-client/Cargo.toml")
+            })
+            .expect("a taskfast-client version group exists");
+        // It pins both the crate's own version and the workspace dep requirement.
+        assert!(client
+            .iter()
+            .any(|s| s.file == "crates/taskfast-client/Cargo.toml"
+                && s.toml_path == ["package", "version"].as_slice()));
+        assert!(client.iter().any(|s| s.file == "Cargo.toml"
+            && s.toml_path
+                == ["workspace", "dependencies", "taskfast-client", "version"].as_slice()));
     }
 
     #[test]
