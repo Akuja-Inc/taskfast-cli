@@ -27,13 +27,13 @@ fn emit_appends_redaction_safe_jsonl_lines() {
     trace::emit(&config_path, Some("poster-1"), "post", &ok);
     trace::emit(&config_path, Some("poster-1"), "post", &ok);
 
-    let file = std::fs::read_dir(tmp.path().join("traces"))
-        .expect("traces dir created beside config")
-        .next()
-        .expect("one trace file")
-        .unwrap()
-        .path();
-    let body = std::fs::read_to_string(&file).unwrap();
+    // Read every file in the dir: the two emits normally share one daily file,
+    // but if the test straddles a UTC midnight they split across two. The line
+    // count and redaction guarantees hold regardless.
+    let mut body = String::new();
+    for entry in std::fs::read_dir(tmp.path().join("traces")).expect("traces dir created") {
+        body.push_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap());
+    }
 
     let lines: Vec<&str> = body.lines().collect();
     assert_eq!(lines.len(), 2, "two emits => two appended lines");

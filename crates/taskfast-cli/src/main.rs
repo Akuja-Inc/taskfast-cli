@@ -188,12 +188,21 @@ async fn main() -> std::process::ExitCode {
     let cfg = match Config::load(&cfg_path) {
         Ok(c) => c,
         Err(e) => {
-            // Config load failure is fatal and happens before we have
-            // a Ctx — fall back to defaults for the error envelope.
+            // Config load failure is fatal and happens before we have a Ctx.
+            // Still emit a trace line — this is an invocation that failed — and
+            // fall back to defaults for the error envelope. (A missing file
+            // loads as default above, so this only fires on a present-but-bad
+            // config, meaning the config dir already exists.)
+            let result: cmd::CmdResult = Err(cmd::CmdError::Usage(format!("config: {e}")));
+            if trace::enabled(no_trace) {
+                // Config failed to load, so there is no agent id to attribute.
+                trace::emit(&cfg_path, None, &op, &result);
+            }
             if !cli.quiet {
-                let err = cmd::CmdError::Usage(format!("config: {e}"));
                 let env = cli.env.unwrap_or(cmd::DEFAULT_ENVIRONMENT);
-                Envelope::error(env, cli.dry_run, &err).emit();
+                if let Err(err) = &result {
+                    Envelope::error(env, cli.dry_run, err).emit();
+                }
             }
             return exit::ExitCode::Usage.into();
         }
@@ -203,7 +212,7 @@ async fn main() -> std::process::ExitCode {
         cli.api_key,
         cli.env,
         cli.api_base,
-        Some(cfg_path),
+        Some(cfg_path.clone()),
         cli.dry_run,
         cli.quiet,
         cli.allow_custom_endpoints,
@@ -212,10 +221,17 @@ async fn main() -> std::process::ExitCode {
         Ok(c) => c,
         Err(e) => {
             // Malformed duration strings in config surface here, before any
-            // subcommand runs. Emit the same Usage envelope as a bad flag.
+            // subcommand runs. Emit the same Usage envelope as a bad flag —
+            // and a trace line, since this is still a failed invocation.
+            let result: cmd::CmdResult = Err(e);
+            if trace::enabled(no_trace) {
+                trace::emit(&cfg_path, cfg.agent_id.as_deref(), &op, &result);
+            }
             if !cli.quiet {
                 let env = cli.env.unwrap_or(cmd::DEFAULT_ENVIRONMENT);
-                Envelope::error(env, cli.dry_run, &e).emit();
+                if let Err(err) = &result {
+                    Envelope::error(env, cli.dry_run, err).emit();
+                }
             }
             return exit::ExitCode::Usage.into();
         }

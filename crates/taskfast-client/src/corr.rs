@@ -25,10 +25,19 @@ const HEADER: &str = "x-request-id";
 ///
 /// The generated client invokes `(crate::record_corr)(&result)` after every
 /// `exec`, before the response is unwrapped, so this sees both 2xx and error
-/// responses. Transport failures (`Err`) carry no response and are ignored.
+/// (4xx/5xx) responses — those still join, so their id is kept.
+///
+/// A transport failure (`Err`) carries no response, so it *clears* the stored
+/// id: otherwise a later transport error in a multi-call command would leave a
+/// stale `corr` from an earlier request and mis-join the failure's trace line.
 pub fn record_corr(result: &Result<reqwest::Response, reqwest::Error>) {
-    if let Ok(resp) = result {
-        record_corr_response(resp);
+    match result {
+        Ok(resp) => record_corr_response(resp),
+        Err(_) => {
+            if let Ok(mut slot) = LAST_CORR.lock() {
+                *slot = None;
+            }
+        }
     }
 }
 
@@ -62,7 +71,7 @@ mod tests {
     // One test, not two: `LAST_CORR` is process-global, and the test runner
     // would race two functions that both touch it.
     #[test]
-    fn capture_take_and_missing_header() {
+    fn capture_take_missing_header_and_transport_error() {
         let _ = take_last_corr(); // start clean
 
         // Captures from an Ok response carrying the header.
@@ -76,5 +85,14 @@ mod tests {
         record_corr(&Ok(response_with(Some("req-xyz"))));
         record_corr(&Ok(response_with(None)));
         assert_eq!(take_last_corr().as_deref(), Some("req-xyz"));
+
+        // A transport failure clears the stored id so a failure trace line
+        // cannot carry a stale `corr`. (error_for_status on a 5xx yields the
+        // Err(reqwest::Error) we need without a live socket.)
+        let err = reqwest::Response::from(http::Response::builder().status(500).body("").unwrap())
+            .error_for_status();
+        assert!(err.is_err());
+        record_corr(&err);
+        assert_eq!(take_last_corr(), None);
     }
 }

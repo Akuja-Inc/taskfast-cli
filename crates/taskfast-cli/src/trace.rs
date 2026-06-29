@@ -120,13 +120,20 @@ fn try_emit(
         sanitize(&agent),
         now.format("%Y-%m-%d")
     ));
-    // O_APPEND + a single sub-PIPE_BUF write is atomic across processes on
-    // POSIX, so concurrent agents never interleave lines (~200 B << 4096).
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(file)?
-        .write_all(line.as_bytes())
+    // O_APPEND makes a single write(2) atomic across processes (the line is
+    // ~200 B, well under PIPE_BUF = 4096). `write_all` could split into several
+    // write(2)s on a short write and interleave with a concurrent agent, so we
+    // issue exactly one write and treat a short write as an error — swallowed
+    // by `emit`, since the trace is best-effort.
+    let mut f = OpenOptions::new().create(true).append(true).open(file)?;
+    let written = f.write(line.as_bytes())?;
+    if written != line.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            "short trace append; dropped to preserve line atomicity",
+        ));
+    }
+    Ok(())
 }
 
 fn build_record(
