@@ -10,12 +10,16 @@
 //! will be composed over the generated client in a follow-up.
 
 pub mod client;
+pub mod corr;
 pub mod errors;
 pub mod retry;
 
 pub use client::{
     map_api_error, NetworkConfigEntry, NetworkConfigResponse, TaskFastClient, UserProfile,
 };
+// `record_corr` is referenced by the generated client as `crate::record_corr`
+// (wired as progenitor's post-hook in build.rs), so it must live at the root.
+pub use corr::{record_corr, record_corr_response, take_last_corr};
 pub use errors::{Error, Result};
 pub use retry::{with_backoff, RetryPolicy};
 

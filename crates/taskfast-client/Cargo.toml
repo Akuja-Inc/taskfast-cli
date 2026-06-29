@@ -37,12 +37,14 @@ progenitor = "0.14"
 openapiv3 = { version = "2", default-features = false }
 prettyplease = "0.2"
 syn = { version = "2", features = ["full"] }
+quote = "1"
 serde_yaml.workspace = true
 taskfast-codegen.workspace = true
 
 [dev-dependencies]
 wiremock = "0.6"
 tokio = { workspace = true, features = ["macros", "rt"] }
+http = "1"
 
 # Deps below appear only in build.rs-generated code ($OUT_DIR/codegen.rs,
 # produced by progenitor from spec/openapi.yaml). cargo-machete scans the

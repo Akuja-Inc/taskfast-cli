@@ -59,7 +59,13 @@ fn main() {
     let spec: openapiv3::OpenAPI = serde_yaml::from_str(&normalized)
         .unwrap_or_else(|e| panic!("parse normalized spec as OpenAPI: {e}"));
 
-    let mut generator = progenitor::Generator::default();
+    // Wire a post-hook so every generated request reports its response to
+    // `crate::record_corr`, which stashes the server `x-request-id` for the
+    // CLI trace (gh#85). The hook is `(crate::record_corr)(&result)` injected
+    // after each `exec`; see crates/taskfast-client/src/corr.rs.
+    let mut settings = progenitor::GenerationSettings::default();
+    settings.with_post_hook(quote::quote! { crate::record_corr });
+    let mut generator = progenitor::Generator::new(&settings);
     let tokens = generator
         .generate_tokens(&spec)
         .unwrap_or_else(|e| panic!("progenitor generate_tokens: {e}"));

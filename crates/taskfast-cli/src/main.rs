@@ -10,9 +10,9 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
-use taskfast_cli::{cmd, config::Config, exit, Envelope, Environment};
+use taskfast_cli::{cmd, config::Config, exit, trace, Envelope, Environment};
 
 /// `--log-format` selector. `Text` is the human-friendly default for
 /// interactive use; `Json` emits `tracing_subscriber::fmt::json()` lines
@@ -39,6 +39,8 @@ impl LogFormat {
     version,
     about = "TaskFast marketplace CLI — worker + poster hot loop."
 )]
+// Global CLI flags are naturally boolean switches; the count is incidental.
+#[allow(clippy::struct_excessive_bools)]
 struct Cli {
     /// API key (overrides TASKFAST_API_KEY env).
     #[arg(long, global = true, env = "TASKFAST_API_KEY")]
@@ -93,6 +95,12 @@ struct Cli {
     /// Accepts `TASKFAST_ALLOW_CUSTOM_ENDPOINTS=1`.
     #[arg(long, global = true, env = "TASKFAST_ALLOW_CUSTOM_ENDPOINTS")]
     allow_custom_endpoints: bool,
+
+    /// Disable the per-invocation JSONL command trace (on by default).
+    /// `TASKFAST_TRACE=0` does the same; `TASKFAST_TRACE_DIR` overrides the
+    /// output directory (default: `traces/` beside the config file).
+    #[arg(long, global = true)]
+    no_trace: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -165,7 +173,16 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let cli = Cli::parse();
+    // Parse via ArgMatches so we can derive the trace `op` (the subcommand
+    // path only, never flag values — see trace::subcommand_path) before
+    // consuming the typed `Cli`. Mirrors what `Cli::parse()` does internally.
+    let mut matches = Cli::command().get_matches();
+    let op = trace::subcommand_path(&matches);
+    let cli = match Cli::from_arg_matches_mut(&mut matches) {
+        Ok(c) => c,
+        Err(e) => e.exit(),
+    };
+    let no_trace = cli.no_trace;
 
     let cfg_path = cli.config.clone().unwrap_or_else(Config::default_path);
     let cfg = match Config::load(&cfg_path) {
@@ -260,6 +277,13 @@ async fn main() -> std::process::ExitCode {
         Command::Config(c) => cmd::config::run(&ctx, c).await,
         Command::Skills(a) => cmd::skills::run(&ctx, a).await,
     };
+
+    // One redaction-safe JSONL trace line per invocation (gh#85), best-effort.
+    // `events stream` early-returns above and is intentionally untraced (it is
+    // a long-lived stream, not a single request/response).
+    if trace::enabled(no_trace) {
+        trace::emit(&ctx.config_path, cfg.agent_id.as_deref(), &op, &result);
+    }
 
     match result {
         Ok(env) => {
