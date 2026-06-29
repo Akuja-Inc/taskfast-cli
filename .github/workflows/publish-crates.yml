@@ -127,12 +127,24 @@ jobs:
             fi
           }
 
-          # Topological order — each crate's workspace deps precede it.
-          publish_one taskfast-codegen 0.1.0
-          publish_one taskfast-client  0.3.0
-          publish_one taskfast-chains  0.1.0
-          publish_one taskfast-agent   0.7.0
-          publish_one taskfast-cli     0.7.0
+          # Resolve a crate's version from the workspace manifest. Versions used
+          # to be hardcoded here and silently went stale — the list stayed at
+          # 0.7.0 while the workspace moved on, so 0.7.1 and 0.8.0 releases were
+          # no-op "already published" skips. Reading from `cargo metadata` keeps
+          # this in lockstep with Cargo.toml automatically (gh#674 review).
+          pkg_version() {
+            cargo metadata --no-deps --format-version 1 \
+              | jq -er --arg n "$1" '.packages[] | select(.name == $n) | .version'
+          }
+
+          # Topological order is load-bearing — each crate's workspace deps must
+          # already be on the registry, so publish in this exact sequence. xtask
+          # is intentionally absent (internal, never published).
+          for crate in taskfast-codegen taskfast-client taskfast-chains taskfast-agent taskfast-cli; do
+            ver="$(pkg_version "$crate")"
+            [ -n "$ver" ] || { echo "::error::could not resolve version for ${crate} from cargo metadata"; exit 1; }
+            publish_one "$crate" "$ver"
+          done
 
       - name: Dry-run summary
         if: ${{ inputs.dry_run }}
