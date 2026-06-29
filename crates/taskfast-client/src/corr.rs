@@ -29,7 +29,7 @@ const HEADER: &str = "x-request-id";
 ///
 /// A transport failure (`Err`) carries no response, so it *clears* the stored
 /// id: otherwise a later transport error in a multi-call command would leave a
-/// stale `corr` from an earlier request and mis-join the failure's trace line.
+/// stale `corr` from an earlier request and wrongly join the failure's line.
 pub fn record_corr(result: &Result<reqwest::Response, reqwest::Error>) {
     match result {
         Ok(resp) => record_corr_response(resp),
