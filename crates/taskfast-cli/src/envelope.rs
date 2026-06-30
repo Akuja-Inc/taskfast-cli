@@ -32,6 +32,12 @@ pub struct Envelope {
     pub data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorPayload>,
+    /// Server `x-request-id` (gh#91), present whenever the invocation made an
+    /// HTTP call. Lets a consumer reading only stdout JSON join back to the
+    /// server-side `mix taskfast.trace`, without the server's `Error` schema
+    /// having to carry it (`additionalProperties: false`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
     /// F15: machine-readable non-fatal security signals. Always present
     /// (possibly empty) so orchestrators can unconditionally `.jq`
     /// `.security_warnings | length > 0` without needing a null check.
@@ -69,6 +75,7 @@ impl Envelope {
             dry_run,
             data: Some(data),
             error: None,
+            correlation_id: None,
             security_warnings: Vec::new(),
         }
     }
@@ -84,6 +91,7 @@ impl Envelope {
                 message: err.to_string(),
                 retry_after_seconds: err.retry_after().map(|d| d.as_secs()),
             }),
+            correlation_id: None,
             security_warnings: Vec::new(),
         }
     }
@@ -93,6 +101,14 @@ impl Envelope {
     /// the request pipeline.
     pub fn with_warnings(mut self, warnings: Vec<SecurityWarning>) -> Self {
         self.security_warnings.extend(warnings);
+        self
+    }
+
+    /// Attach the server correlation id captured for this invocation
+    /// (gh#91). `None` when no HTTP call was made or none carried the
+    /// header.
+    pub fn with_correlation_id(mut self, id: Option<String>) -> Self {
+        self.correlation_id = id;
         self
     }
 
@@ -177,5 +193,34 @@ mod tests {
         let v = serde_json::to_value(&env).unwrap();
         assert_eq!(v["dry_run"], true);
         assert_eq!(v["environment"], "local");
+    }
+
+    #[test]
+    fn correlation_id_omitted_when_absent() {
+        let env = Envelope::success(Environment::Prod, false, serde_json::json!({}));
+        let v = serde_json::to_value(&env).unwrap();
+        assert!(v.get("correlation_id").is_none());
+
+        let err = CmdError::Auth("401".into());
+        let env = Envelope::error(Environment::Staging, false, &err);
+        let v = serde_json::to_value(&env).unwrap();
+        assert!(v.get("correlation_id").is_none());
+    }
+
+    #[test]
+    fn with_correlation_id_populates_the_field_on_success() {
+        let env = Envelope::success(Environment::Prod, false, serde_json::json!({}))
+            .with_correlation_id(Some("req-9".into()));
+        let v = serde_json::to_value(&env).unwrap();
+        assert_eq!(v["correlation_id"], "req-9");
+    }
+
+    #[test]
+    fn with_correlation_id_populates_the_field_on_error() {
+        let err = CmdError::Auth("401".into());
+        let env = Envelope::error(Environment::Staging, false, &err)
+            .with_correlation_id(Some("req-7".into()));
+        let v = serde_json::to_value(&env).unwrap();
+        assert_eq!(v["correlation_id"], "req-7");
     }
 }

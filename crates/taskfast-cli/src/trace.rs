@@ -86,9 +86,23 @@ fn toggle_from_env(value: Option<&str>) -> bool {
     }
 }
 
+/// Take the last-captured server correlation id (`x-request-id`), if any.
+/// Consumes it — the caller must take it exactly once per invocation and
+/// share the value between the trace line and the stdout envelope (gh#91),
+/// since a second take always sees `None`.
+pub fn take_corr() -> Option<String> {
+    taskfast_client::take_last_corr()
+}
+
 /// Emit a trace line for one invocation. Best-effort: never propagates errors.
-pub fn emit(config_path: &Path, agent_id: Option<&str>, op: &str, result: &CmdResult) {
-    if let Err(e) = try_emit(config_path, agent_id, op, result) {
+pub fn emit(
+    config_path: &Path,
+    agent_id: Option<&str>,
+    op: &str,
+    result: &CmdResult,
+    corr: Option<&str>,
+) {
+    if let Err(e) = try_emit(config_path, agent_id, op, result, corr) {
         tracing::debug!(error = %e, "cli trace write failed (ignored)");
     }
 }
@@ -98,6 +112,7 @@ fn try_emit(
     agent_id: Option<&str>,
     op: &str,
     result: &CmdResult,
+    corr: Option<&str>,
 ) -> std::io::Result<()> {
     let now = chrono::Utc::now();
     let agent = resolve_agent(std::env::var(AGENT_ENV).ok().as_deref(), agent_id);
@@ -105,7 +120,7 @@ fn try_emit(
         now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         agent.clone(),
         op,
-        taskfast_client::take_last_corr(),
+        corr.map(str::to_string),
         result,
     );
 

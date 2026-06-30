@@ -24,8 +24,14 @@ fn emit_appends_redaction_safe_jsonl_lines() {
         false,
         json!({ "task_id": "task_xyz", "wallet_password": "leak-me", "api_key": "am_live" }),
     ));
-    trace::emit(&config_path, Some("poster-1"), "post", &ok);
-    trace::emit(&config_path, Some("poster-1"), "post", &ok);
+    trace::emit(
+        &config_path,
+        Some("poster-1"),
+        "post",
+        &ok,
+        Some("req-corr-1"),
+    );
+    trace::emit(&config_path, Some("poster-1"), "post", &ok, None);
 
     // Read every file in the dir: the two emits normally share one daily file,
     // but if the test straddles a UTC midnight they split across two. The line
@@ -45,6 +51,16 @@ fn emit_appends_redaction_safe_jsonl_lines() {
     assert_eq!(rec["task_id"], "task_xyz");
     assert_eq!(rec["ok"], true);
     assert_eq!(rec["exit"], 0);
+    assert_eq!(
+        rec["corr"], "req-corr-1",
+        "caller-supplied corr reaches the trace line (gh#91)"
+    );
+
+    let rec2: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert!(
+        rec2.get("corr").is_none(),
+        "absent corr is omitted, not null"
+    );
 
     // Redaction: secrets carried in the response data must never be written.
     assert!(!body.contains("wallet_password"), "leaked a flag name");
