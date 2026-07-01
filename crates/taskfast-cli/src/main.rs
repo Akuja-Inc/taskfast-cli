@@ -195,8 +195,9 @@ async fn main() -> std::process::ExitCode {
             // config, meaning the config dir already exists.)
             let result: cmd::CmdResult = Err(cmd::CmdError::Usage(format!("config: {e}")));
             if trace::enabled(no_trace) {
-                // Config failed to load, so there is no agent id to attribute.
-                trace::emit(&cfg_path, None, &op, &result);
+                // Config failed to load, so there is no agent id to attribute
+                // and no HTTP call could have happened yet.
+                trace::emit(&cfg_path, None, &op, &result, None);
             }
             if !cli.quiet {
                 let env = cli.env.unwrap_or(cmd::DEFAULT_ENVIRONMENT);
@@ -225,7 +226,8 @@ async fn main() -> std::process::ExitCode {
             // and a trace line, since this is still a failed invocation.
             let result: cmd::CmdResult = Err(e);
             if trace::enabled(no_trace) {
-                trace::emit(&cfg_path, cfg.agent_id.as_deref(), &op, &result);
+                // Ctx construction is still pre-flight; no HTTP call has run.
+                trace::emit(&cfg_path, cfg.agent_id.as_deref(), &op, &result, None);
             }
             if !cli.quiet {
                 let env = cli.env.unwrap_or(cmd::DEFAULT_ENVIRONMENT);
@@ -294,17 +296,31 @@ async fn main() -> std::process::ExitCode {
         Command::Skills(a) => cmd::skills::run(&ctx, a).await,
     };
 
+    // Take the server correlation id (if any HTTP call was made) exactly
+    // once and share it between the JSONL trace line and the stdout envelope
+    // (gh#91) — `take_corr` clears the slot, so a second take always sees
+    // `None`.
+    let corr = trace::take_corr();
+
     // One redaction-safe JSONL trace line per invocation (gh#85), best-effort.
     // `events stream` early-returns above and is intentionally untraced (it is
     // a long-lived stream, not a single request/response).
     if trace::enabled(no_trace) {
-        trace::emit(&ctx.config_path, cfg.agent_id.as_deref(), &op, &result);
+        trace::emit(
+            &ctx.config_path,
+            cfg.agent_id.as_deref(),
+            &op,
+            &result,
+            corr.as_deref(),
+        );
     }
 
     match result {
         Ok(env) => {
             if !ctx.quiet {
-                env.with_warnings(ctx.security_warnings()).emit();
+                env.with_warnings(ctx.security_warnings())
+                    .with_correlation_id(corr)
+                    .emit();
             }
             exit::ExitCode::Success.into()
         }
@@ -312,6 +328,7 @@ async fn main() -> std::process::ExitCode {
             if !ctx.quiet {
                 Envelope::error(ctx.environment, ctx.dry_run, &e)
                     .with_warnings(ctx.security_warnings())
+                    .with_correlation_id(corr)
                     .emit();
             }
             e.exit_code().into()
