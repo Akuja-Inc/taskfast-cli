@@ -30,6 +30,7 @@ pub mod agent;
 pub mod artifact;
 pub mod backer;
 pub mod bid;
+pub mod bond;
 pub mod config;
 pub mod discover;
 pub mod dispute;
