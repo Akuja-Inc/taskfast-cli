@@ -65,6 +65,32 @@ sol! {
         function allowance(address owner, address spender) external view returns (uint256);
         function balanceOf(address account) external view returns (uint256);
     }
+
+    /// TaskBond contract surface used by the auction-task operator bond flow
+    /// (`taskfast bond post`, gh#95). Only `post` is bound. The server verifies
+    /// the resulting `BondPosted` event by matching contract/token/`taskRef`/
+    /// amount — it does *not* pin `salt`, so any salt is accepted.
+    #[allow(missing_docs)]
+    contract TaskBond {
+        function post(
+            address token,
+            uint256 amount,
+            bytes32 taskRef,
+            bytes32 salt
+        ) external;
+    }
+}
+
+/// Derive the `bytes32 taskRef` that `TaskBond.post` binds for a given task.
+///
+/// The server verifier expects `taskRef` = 16 zero bytes concatenated with the
+/// task UUID's 16 raw bytes (gh#95). Kept next to [`compute_escrow_id`] because
+/// it is the same class of "must byte-match the on-chain/server derivation"
+/// helper: drift here silently posts a bond the verifier will never accept.
+pub fn compute_task_ref(task_id: uuid::Uuid) -> B256 {
+    let mut bytes = [0u8; 32];
+    bytes[16..].copy_from_slice(task_id.as_bytes());
+    B256::from(bytes)
 }
 
 /// Inputs to [`compute_escrow_id`] — one named field per preimage element.
@@ -194,6 +220,32 @@ mod tests {
         };
         let data = call.abi_encode();
         assert_eq!(&data[0..4], &[0x09, 0x5e, 0xa7, 0xb3]);
+    }
+
+    #[test]
+    fn post_bond_calldata_has_expected_selector() {
+        // `TaskBond.post(address,uint256,bytes32,bytes32)` — the macro-derived
+        // selector must equal keccak(canonical signature)[..4]. Arg-order/type
+        // drift (e.g. swapping taskRef/salt or widening amount) fails this.
+        let call = TaskBond::postCall {
+            token: Address::ZERO,
+            amount: U256::from(1u64),
+            taskRef: B256::ZERO,
+            salt: B256::ZERO,
+        };
+        let data = call.abi_encode();
+        let expected = &keccak256("post(address,uint256,bytes32,bytes32)")[..4];
+        assert_eq!(&data[0..4], expected);
+    }
+
+    #[test]
+    fn compute_task_ref_left_pads_uuid_into_low_16_bytes() {
+        // 16 zero bytes ++ the task UUID's 16 raw bytes (gh#95 server verifier).
+        let id = uuid::Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap();
+        let task_ref = compute_task_ref(id);
+        let bytes: [u8; 32] = task_ref.into();
+        assert_eq!(&bytes[..16], &[0u8; 16], "high 16 bytes must be zero");
+        assert_eq!(&bytes[16..], id.as_bytes(), "low 16 bytes must be the UUID");
     }
 
     #[test]

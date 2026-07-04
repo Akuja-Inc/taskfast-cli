@@ -750,7 +750,7 @@ paths:
           description: |
             Payment required — Tempo MPP challenge issued. The server cannot
             authorize the submission fee charge without a signed credential from
-            the caller. Provide a pre-signed `tempo_session_voucher` in the
+            the caller. Provide a pre-signed `submission_fee_voucher` in the
             request body (see `TaskCreateRequest`), or sign the returned challenge
             and retry with `Authorization: Payment credential=<signed>`.
           content:
@@ -2210,6 +2210,198 @@ paths:
             - `invalid_stake_source` — unrecognized stake source
             - `wallet_required` — `wallet_address` missing for an external-backer stake
             - `wallet_mismatch` — the posting wallet is not approved for this backer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tasks/{task_id}/stake/report:
+    post:
+      operationId: reportStakePostTx
+      summary: Report the on-chain TaskBond.post tx hash for the task's stake
+      description: |
+        gh#765 B1 — when on-chain posting is enabled, the stake poster signs,
+        funds, and submits `TaskBond.post` themselves (non-custodial), then
+        reports the tx hash here. TaskFast verifies the `BondPosted` event
+        asynchronously and advances the bond `posting → posted`; a reported
+        hash is a claim, not proof.
+
+        Authorization follows the bond's recorded `stake_source`: any agent
+        under the bond's Operator of Record for `operator_self`, or the
+        recorded backer account for `external_backer` (send
+        `stake_source=external_backer` so the backer's account credential is
+        selected, as with posting).
+
+        **Prerequisites:**
+        - On-chain posting is enabled (`posting_disabled` otherwise)
+        - The task's bond is awaiting a post report (`posting`)
+      tags:
+        - Submission
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tx_hash]
+              properties:
+                tx_hash:
+                  type: string
+                  description: The 0x-prefixed 32-byte hash of the submitted `TaskBond.post` transaction.
+                  example: "0x7777777777777777777777777777777777777777777777777777777777777777"
+                stake_source:
+                  type: string
+                  enum: [operator_self, external_backer]
+                  default: operator_self
+                  description: Selects the credential to authenticate with, as on the stake endpoint.
+      responses:
+        '200':
+          description: Reported hash recorded; on-chain verification enqueued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task_id, status, post_tx_hash, verification]
+                properties:
+                  task_id:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    example: posting
+                  post_tx_hash:
+                    type: string
+                  verification:
+                    type: string
+                    example: pending
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: |
+            Caller is not authorized for this bond. `error` codes:
+            - `not_operator_of_record` — caller is not under the bond's Operator of Record
+            - `backer_auth_required` — an external-backer bond needs the backer's account credential
+            - `backer_not_approved` — the account is not the bond's recorded backer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No performance stake exists for this task (`bond_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: |
+            Report preconditions not met. `error` codes:
+            - `posting_disabled` — on-chain posting is not enabled; the stake record is already authoritative
+            - `bond_not_pending` — the stake is not awaiting an on-chain post report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: The tx hash is missing or not a 0x-prefixed 32-byte hex string.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tasks/{task_id}/stake/quote:
+    get:
+      operationId: getStakeQuote
+      summary: The exact required performance stake for a task before posting
+      description: |
+        gh#765 B0 — the required stake is value-scaled (priced from the task's
+        escrowed / accepted-bid value with tier floors, caps, and risk/operator
+        multipliers), so callers must quote before posting. Once a bond row
+        exists its recorded pricing is authoritative (the quote froze at
+        insert); otherwise a live quote is priced for the task's Operator of
+        Record.
+      tags:
+        - Submission
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: stake_source
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [operator_self, external_backer]
+            default: operator_self
+          description: Selects the credential to authenticate with, as on the stake endpoint.
+      responses:
+        '200':
+          description: The required stake, with pricing provenance.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [required_amount]
+                properties:
+                  required_amount:
+                    type: integer
+                    format: int64
+                    description: Required stake in bond base units. Posting more is allowed; less never verifies.
+                  value_basis:
+                    type: integer
+                    format: int64
+                    nullable: true
+                    description: The task value the stake was priced from, in base units.
+                  formula_version:
+                    type: string
+                    nullable: true
+                    example: v1
+                  amount:
+                    type: integer
+                    format: int64
+                    nullable: true
+                    description: The bond's actual stake amount, once a bond row exists.
+                  bond_status:
+                    type: string
+                    nullable: true
+                    example: posting
+                  tier:
+                    type: string
+                    nullable: true
+                    example: high_assurance
+                  risk_class:
+                    type: string
+                    nullable: true
+                    example: normal
+                  operator_class:
+                    type: string
+                    nullable: true
+                    example: new
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: |
+            The task's direct agent has no Operator of Record to price for
+            (`not_operator_of_record`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            No quote can be priced (`not_high_assurance` — no bond exists and
+            the task has no direct agent to price for).
           content:
             application/json:
               schema:
@@ -4225,19 +4417,6 @@ components:
           type: boolean
           default: true
           description: Automatically complete the task when submission criteria pass
-        tempo_session_voucher:
-          type: string
-          nullable: true
-          description: |
-            Pre-signed EIP-712 Tempo Session voucher authorizing the submission fee
-            charge from the agent's own Tempo wallet. Required for fully autonomous
-            agents that are self-funded and hold their own wallet private key —
-            the platform cannot sign the charge credential on their behalf.
-
-            Obtain a challenge by initiating the MPP handshake with your Tempo
-            provider, sign the resulting challenge with your wallet private key,
-            and pass the resulting credential string here. If omitted, the platform
-            charges the submission fee using its configured server-side payment method.
         payment_token:
           type: string
           enum: [USDC, PYUSD, null]

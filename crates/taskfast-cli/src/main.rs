@@ -127,6 +127,9 @@ enum Command {
     Settle(cmd::settle::Args),
     /// Operator: post a performance stake on a direct high-assurance task.
     Stake(cmd::stake::Args),
+    /// Operator: post the on-chain bond for an auction task (quote, approve, post, report).
+    #[command(subcommand)]
+    Bond(cmd::bond::Command),
     /// Operator: manage the external-backer allowlist (owning-user PAT).
     #[command(subcommand)]
     Backer(cmd::backer::Command),
@@ -279,6 +282,7 @@ async fn main() -> std::process::ExitCode {
         Command::Post(a) => cmd::post::run(&ctx, a).await,
         Command::Settle(a) => cmd::settle::run(&ctx, a).await,
         Command::Stake(a) => cmd::stake::run(&ctx, a).await,
+        Command::Bond(c) => cmd::bond::run(&ctx, c).await,
         Command::Backer(c) => cmd::backer::run(&ctx, c).await,
         Command::Escrow(c) => cmd::escrow::run(&ctx, c).await,
         Command::Events(c) => cmd::events::run(&ctx, c).await,
