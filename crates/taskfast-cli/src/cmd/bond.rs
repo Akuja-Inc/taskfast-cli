@@ -145,8 +145,9 @@ pub struct PostArgs {
     #[arg(long, env = "TEMPO_RPC_URL")]
     pub rpc_url: Option<String>,
 
-    /// Skip the on-chain `allowance` preflight + `approve` tx. Only safe when a
-    /// sufficient allowance was already granted to the TaskBond contract.
+    /// Skip the on-chain `allowance` preflight + `approve` tx (the balance
+    /// preflight still runs). Only safe when a sufficient allowance was already
+    /// granted to the TaskBond contract.
     #[arg(long)]
     pub skip_allowance_check: bool,
 
@@ -312,17 +313,22 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
         default_receipt_timeout(chain_id),
     );
 
-    // 9. Live RPC: balance + allowance preflight, approve TaskBond if short.
+    // 9. Live RPC: balance preflight, then allowance preflight + approve.
     let http = ctx.rpc_http_client(&client, &rpc_url);
     let rpc = TempoRpcClient::new(http, rpc_url.clone());
+
+    // Balance preflight always runs — independent of --skip-allowance-check,
+    // which governs only the allowance + approve path — so an underfunded
+    // poster fails fast before broadcasting anything.
+    let balance = erc20_balance_of(&rpc, token, signer.address()).await?;
+    if balance < amount {
+        return Err(CmdError::Usage(format!(
+            "poster balance {balance} < required bond {amount} on token {token:#x}"
+        )));
+    }
+
     let mut approval_tx_hex: Option<String> = None;
     if !args.skip_allowance_check {
-        let balance = erc20_balance_of(&rpc, token, signer.address()).await?;
-        if balance < amount {
-            return Err(CmdError::Usage(format!(
-                "poster balance {balance} < required bond {amount} on token {token:#x}"
-            )));
-        }
         let current_allowance = erc20_allowance(&rpc, token, signer.address(), task_bond).await?;
         if current_allowance < amount {
             let approve_calldata: Bytes = IERC20::approveCall {
@@ -341,6 +347,15 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
             if !ok {
                 return Err(CmdError::Server(format!(
                     "approve tx {approve_hash:#x} reverted on-chain"
+                )));
+            }
+            // Re-read allowance: a non-standard or no-op approve can leave it
+            // short, which would revert TaskBond.post and waste gas (mirrors
+            // `escrow sign`).
+            let new_allowance = erc20_allowance(&rpc, token, signer.address(), task_bond).await?;
+            if new_allowance < amount {
+                return Err(CmdError::Server(format!(
+                    "allowance still {new_allowance} after approve tx {approve_hash:#x} (needed {amount})"
                 )));
             }
             approval_tx_hex = Some(format!("{approve_hash:#x}"));
