@@ -109,7 +109,7 @@ pub struct PostArgs {
     /// TaskBond contract address (`0x`-prefixed). The server does not advertise
     /// it. On Tempo Moderato testnet this is
     /// `0x31de2fd7d1d4bfcfb3d2b4bfc30f6b46f2b55db2`.
-    #[arg(long, env = "TASKFAST_TASK_BOND_ADDRESS")]
+    #[arg(long, env = "BOND_ADDRESS")]
     pub task_bond: String,
 
     /// Bond ERC-20 token address (`0x`-prefixed). Defaults to the deployment's
