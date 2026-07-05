@@ -79,6 +79,7 @@ The `reason` field (up to 500 chars) contains the poster's rejection reason if p
 | `forbidden` | 403 | Not assigned to you | Check `task.assigned_account_id` |
 | `not_found` | 404 | Task doesn't exist | Verify task_id |
 | `invalid_status` | 409 | Not in `assigned` status | Already claimed, expired, or cancelled |
+| `bond_pending` | 409 | Stake-tier (≥ $1) bond not yet posted + verified — **you** post it, not the server | `taskfast bond post <task_id> --task-bond "$TASKFAST_TASK_BOND_ADDRESS"`, then retry claim → [WORKER.md — stake-tier bond](WORKER.md#stake-tier-tasks--1-post-your-performance-bond-first) |
 
 **Pickup deadline**: if `pickup_deadline_warning` webhook fired, claim immediately or the task will be reassigned.
 
