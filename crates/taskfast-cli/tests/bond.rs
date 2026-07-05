@@ -67,7 +67,7 @@ fn fresh_keys() -> Keys {
 fn base_args(keys: &Keys) -> PostArgs {
     PostArgs {
         task_id: TASK_ID.into(),
-        task_bond: TASK_BOND.into(),
+        task_bond: Some(TASK_BOND.into()),
         token: None, // exercises the default_stablecoin path
         amount: None,
         source: BondStakeSource::OperatorSelf,
@@ -213,8 +213,9 @@ async fn bad_task_bond_address_is_usage_error() {
     let mut ctx = ctx_for(&server, Some("test-key"));
     ctx.dry_run = true;
 
+    mount_network_config(&server).await; // task-bond parse now follows network resolution
     let mut args = base_args(&keys);
-    args.task_bond = "0xnothex".into();
+    args.task_bond = Some("0xnothex".into());
     let err = run(&ctx, Command::Post(args))
         .await
         .expect_err("bad task-bond must fail");
@@ -248,4 +249,75 @@ async fn quote_409_maps_to_validation() {
         .await
         .expect_err("409 must fail");
     assert!(matches!(err, CmdError::Validation { .. }), "got {err:?}");
+}
+
+#[tokio::test]
+async fn absent_task_bond_resolves_from_server_task_bond_contract() {
+    let server = MockServer::start().await;
+    mount_quote(&server, 200, quote_json(None)).await;
+    let mut cfg = network_config_json();
+    cfg["networks"]["testnet"]["task_bond_contract"] = json!(TASK_BOND);
+    Mock::given(method("GET"))
+        .and(path("/config/network"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(cfg))
+        .mount(&server)
+        .await;
+    let keys = fresh_keys();
+    let mut ctx = ctx_for(&server, Some("test-key"));
+    ctx.dry_run = true;
+
+    let mut args = base_args(&keys);
+    args.task_bond = None;
+    let env = run(&ctx, Command::Post(args)).await.expect("dry-run ok");
+    let v = envelope_value(&env);
+    assert_eq!(
+        v["data"]["task_bond"].as_str().unwrap().to_lowercase(),
+        TASK_BOND.to_lowercase()
+    );
+}
+
+#[tokio::test]
+async fn explicit_task_bond_wins_over_server_task_bond_contract() {
+    let server = MockServer::start().await;
+    mount_quote(&server, 200, quote_json(None)).await;
+    let mut cfg = network_config_json();
+    // Server advertises a DIFFERENT address; the explicit flag must win.
+    cfg["networks"]["testnet"]["task_bond_contract"] = json!(STABLECOIN);
+    Mock::given(method("GET"))
+        .and(path("/config/network"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(cfg))
+        .mount(&server)
+        .await;
+    let keys = fresh_keys();
+    let mut ctx = ctx_for(&server, Some("test-key"));
+    ctx.dry_run = true;
+
+    let env = run(&ctx, Command::Post(base_args(&keys)))
+        .await
+        .expect("dry-run ok");
+    let v = envelope_value(&env);
+    assert_eq!(
+        v["data"]["task_bond"].as_str().unwrap().to_lowercase(),
+        TASK_BOND.to_lowercase()
+    );
+}
+
+#[tokio::test]
+async fn absent_task_bond_without_server_contract_is_usage_error() {
+    let server = MockServer::start().await;
+    mount_quote(&server, 200, quote_json(None)).await;
+    mount_network_config(&server).await; // config has no task_bond_contract key
+    let keys = fresh_keys();
+    let mut ctx = ctx_for(&server, Some("test-key"));
+    ctx.dry_run = true;
+
+    let mut args = base_args(&keys);
+    args.task_bond = None;
+    let err = run(&ctx, Command::Post(args))
+        .await
+        .expect_err("no server contract must fail");
+    match err {
+        CmdError::Usage(msg) => assert!(msg.contains("task_bond_contract"), "msg: {msg}"),
+        other => panic!("expected Usage, got {other:?}"),
+    }
 }

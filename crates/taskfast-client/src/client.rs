@@ -382,6 +382,11 @@ pub struct NetworkConfigEntry {
     /// Default stablecoin ticker; `None` when the deployment has not
     /// finalized a token for the network (e.g. mainnet pre-launch).
     pub default_stablecoin: Option<String>,
+    /// TaskBond contract address (`0x`-prefixed) for stake-tier bond
+    /// posting; `None` (or absent, on older servers) when the deployment
+    /// does not advertise one.
+    #[serde(default)]
+    pub task_bond_contract: Option<String>,
 }
 
 /// Owning human's display name + email, returned by `GET /users/me`.

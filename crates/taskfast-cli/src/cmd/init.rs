@@ -338,6 +338,7 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
     //     plus a `funding_hint` so orchestrators can tell the human where
     //     to go.
     let faucet_outcome = maybe_request_faucet(
+        &client,
         &args,
         ctx.environment.network(),
         &wallet_outcome,
@@ -724,12 +725,25 @@ fn persist_keystore(
 /// already present, dry-run) — the reason is echoed so the caller can tell
 /// *why* we didn't hit the faucet.
 enum FaucetOutcome {
-    Skipped { reason: &'static str },
-    Requested { drops: Vec<FaucetDrop> },
-    Failed { error: String },
+    Skipped {
+        reason: &'static str,
+    },
+    Requested {
+        drops: Vec<FaucetDrop>,
+    },
+    /// HTTP faucet failed but the `tempo_fundAddress` JSON-RPC fallback
+    /// funded the wallet. Carries the HTTP error for observability.
+    RpcFunded {
+        tx_hashes: Vec<String>,
+        http_error: String,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 async fn maybe_request_faucet(
+    client: &TaskFastClient,
     args: &Args,
     network: crate::Network,
     wallet: &WalletOutcome,
@@ -756,12 +770,58 @@ async fn maybe_request_faucet(
         }
     };
     let http = reqwest::Client::new();
-    match request_testnet_funds(&http, &address).await {
-        Ok(drops) => FaucetOutcome::Requested { drops },
-        Err(e) => FaucetOutcome::Failed {
-            error: e.to_string(),
+    let http_error = match request_testnet_funds(&http, &address).await {
+        Ok(drops) => return FaucetOutcome::Requested { drops },
+        Err(e) => e.to_string(),
+    };
+    // The public HTTP faucet 404s on some deployments — fall back to the
+    // Tempo `tempo_fundAddress` JSON-RPC method via the deployment's own
+    // authenticated `POST /rpc/{network}` proxy (the same endpoint every
+    // other chain call uses). We only reach here on Testnet: the mainnet
+    // gate above returned `Skipped` already.
+    match rpc_fund_address(client, network, &address).await {
+        Ok(tx_hashes) => FaucetOutcome::RpcFunded {
+            tx_hashes,
+            http_error,
+        },
+        Err(rpc_error) => FaucetOutcome::Failed {
+            error: format!("http faucet: {http_error}; tempo_fundAddress fallback: {rpc_error}"),
         },
     }
+}
+
+/// Call `tempo_fundAddress(address)` through the deployment RPC proxy.
+/// Success returns the array of funding tx hashes from `result`.
+async fn rpc_fund_address(
+    client: &TaskFastClient,
+    network: crate::Network,
+    address: &str,
+) -> Result<Vec<String>, String> {
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tempo_fundAddress",
+        "params": [address],
+    });
+    let resp = client
+        .post_json_rpc(network.as_str(), &req)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(err) = resp.get("error").filter(|v| !v.is_null()) {
+        return Err(format!("rpc error: {err}"));
+    }
+    let hashes = resp
+        .get("result")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("unexpected tempo_fundAddress response: {resp}"))?;
+    hashes
+        .iter()
+        .map(|h| {
+            h.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("non-string tx hash in tempo_fundAddress result: {resp}"))
+        })
+        .collect()
 }
 
 /// Outcome of the optional webhook step. `Skipped` is the default when
@@ -916,10 +976,20 @@ fn build_envelope_data(
         }
         FaucetOutcome::Requested { drops } => json!({
             "status": "requested",
+            "via": "http_faucet",
             "drops": drops.iter().map(|d| json!({
                 "token": d.token,
                 "tx_hash": d.tx_hash,
             })).collect::<Vec<_>>(),
+        }),
+        FaucetOutcome::RpcFunded {
+            tx_hashes,
+            http_error,
+        } => json!({
+            "status": "requested",
+            "via": "tempo_fundAddress",
+            "tx_hashes": tx_hashes,
+            "http_faucet_error": http_error,
         }),
         FaucetOutcome::Failed { error } => json!({
             "status": "failed",
