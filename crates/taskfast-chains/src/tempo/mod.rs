@@ -46,14 +46,20 @@ pub const ANVIL_LOCAL_CHAIN_ID: u64 = 31_337;
 /// Hardhat default local chain id.
 pub const HARDHAT_LOCAL_CHAIN_ID: u64 = 1_337;
 
-/// PathUSD is the only token the platform will ever ask the CLI to move as
-/// a submission fee. It happens to share the same address on mainnet + moderato,
-/// but we key on `chain_id` anyway so a future divergence is a one-line
-/// change here and nowhere else.
+/// The fee-token allowlist holds only enshrined, platform-ruled rail tokens,
+/// hardcoded per `chain_id` — never anything the server supplies. Each network
+/// authorizes its own set, so a per-network divergence is a one-line change
+/// here and nowhere else.
 ///
 /// Source: <https://docs.tempo.xyz/quickstart/connection-details>.
 pub const PATHUSD_MAINNET: &str = "0x20c0000000000000000000000000000000000000";
 pub const PATHUSD_TESTNET: &str = "0x20c0000000000000000000000000000000000000";
+
+/// AlphaUSD — enshrined TIP-20, verified 6dp on Moderato (chain 42431), the
+/// second electable fee rail there (Akuja-Inc/taskfast#812). Moderato only:
+/// mainnet (4217) stays PathUSD-only until its hedge coin is ruled, so there
+/// is deliberately no `ALPHAUSD_MAINNET`.
+pub const ALPHAUSD_TESTNET: &str = "0x20c0000000000000000000000000000000000001";
 
 /// F1 allowlist for the submission-fee ERC-20. Compares case-insensitively.
 ///
@@ -71,7 +77,10 @@ pub fn is_allowed_fee_token(chain_id: u64, token_address_hex: &str) -> bool {
     let normalized = normalize_addr(token_address_hex);
     match chain_id {
         TEMPO_MAINNET_CHAIN_ID => normalized == normalize_addr(PATHUSD_MAINNET),
-        TEMPO_TESTNET_CHAIN_ID => normalized == normalize_addr(PATHUSD_TESTNET),
+        TEMPO_TESTNET_CHAIN_ID => {
+            normalized == normalize_addr(PATHUSD_TESTNET)
+                || normalized == normalize_addr(ALPHAUSD_TESTNET)
+        }
         ANVIL_LOCAL_CHAIN_ID | HARDHAT_LOCAL_CHAIN_ID => true,
         _ => false,
     }
@@ -269,6 +278,25 @@ mod allowlist_tests {
         assert!(is_allowed_fee_token(
             TEMPO_TESTNET_CHAIN_ID,
             PATHUSD_TESTNET
+        ));
+    }
+
+    #[test]
+    fn alphausd_is_allowed_on_moderato() {
+        // Second electable rail on Moderato (chain 42431); gh#93.
+        assert!(is_allowed_fee_token(
+            TEMPO_TESTNET_CHAIN_ID,
+            ALPHAUSD_TESTNET
+        ));
+    }
+
+    #[test]
+    fn alphausd_is_rejected_on_mainnet() {
+        // Mainnet (4217) carries no AlphaUSD ruling — pre-authorizing it would
+        // be exactly the over-broad trust the allowlist exists to prevent.
+        assert!(!is_allowed_fee_token(
+            TEMPO_MAINNET_CHAIN_ID,
+            ALPHAUSD_TESTNET
         ));
     }
 
