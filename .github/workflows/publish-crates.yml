@@ -21,8 +21,9 @@
 #
 # Triggers:
 #   * workflow_dispatch (manual) — a `dry_run` input validates packaging +
-#     metadata without uploading. (Dependent crates will report "no matching
-#     package <dep>" until their deps are actually published — expected.)
+#     metadata without uploading. Dependent crates can't resolve sibling
+#     versions this same release publishes first (not on the index yet); that
+#     specific error is tolerated with a warning in dry-run mode.
 #   * push of a version tag (taskfast-cli-v* or bare vX.Y.Z) — automates the
 #     registry publish on each release, alongside the binary release.yml run.
 #
@@ -106,11 +107,20 @@ jobs:
             fi
 
             echo "::group::cargo publish -p ${name} ${flag}"
-            cargo publish -p "${name}" --locked ${flag}
-            local s=$?
+            local out s=0
+            out="$(cargo publish -p "${name}" --locked ${flag} 2>&1)" || s=$?
+            printf '%s\n' "$out"
             echo "::endgroup::"
 
             if [ $s -ne 0 ]; then
+              # Dry-run only: a dependent crate can't resolve a sibling version
+              # that this same release publishes first — it isn't on the index
+              # yet. Expected, not a packaging error (the real publish uploads
+              # deps in topological order before dependents resolve them).
+              if [ "${DRY_RUN}" = "true" ] && printf '%s' "$out" | grep -q 'failed to select a version for the requirement `taskfast-'; then
+                echo "::warning::${name}: workspace dep not yet on crates.io — expected in dry-run; the real publish uploads deps first."
+                return 0
+              fi
               echo "::error::cargo publish -p ${name} failed (exit ${s})"
               return $s
             fi
@@ -150,6 +160,5 @@ jobs:
         if: ${{ inputs.dry_run }}
         run: |
           echo "::notice::Dry-run publish validation complete."
-          echo "Leaf crates (taskfast-codegen, taskfast-chains) should be green — they have no workspace deps."
-          echo "taskfast-client/agent/cli are EXPECTED to fail here until their workspace deps are actually on crates.io (the 'no matching package <dep>' error). This is normal before the first real publish."
-          echo "For the first real publish, run this workflow WITHOUT dry_run (requires CARGO_REGISTRY_TOKEN + a verified email on the owning crates.io account)."
+          echo "Crates whose workspace deps are not yet on crates.io are skipped with a warning — their packaging is only fully validated by the real publish, which uploads deps in topological order first."
+          echo "For the real publish, run this workflow WITHOUT dry_run (requires CARGO_REGISTRY_TOKEN + a verified email on the owning crates.io account), or push the release tag."
