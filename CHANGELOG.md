@@ -79,7 +79,7 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 - **Release automation now maintains `CHANGELOG.md` (gh#102).** `cargo xtask
   bump` rolls the `## Unreleased` section into a dated `## [X.Y.Z]` heading
-  (failing loud if `## Unreleased` is missing), `bump.yml` stages `CHANGELOG.md`
+  (failing loudly if `## Unreleased` is missing), `bump.yml` stages `CHANGELOG.md`
   in the release commit, and CI now requires a changelog entry on PRs that touch
   `crates/**` or `spec/**` (bypass with the `no-changelog` label; dependabot is
   exempt).

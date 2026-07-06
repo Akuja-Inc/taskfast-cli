@@ -312,14 +312,18 @@ struct RolledChangelog {
 /// Roll the `## Unreleased` section into a dated `## [version] - date` section,
 /// leaving a fresh empty `## Unreleased` stub above it.
 ///
-/// Fails loud if there is no `## Unreleased` heading — the caller runs this
+/// Fails loudly if there is no `## Unreleased` heading — the caller runs this
 /// *before* writing any file, so a missing heading aborts the whole bump with
 /// no side effects (same fail-early philosophy as the version-site checks).
 fn roll_changelog(content: &str, version: &str, date: &str) -> Result<RolledChangelog> {
     const HEADING: &str = "## Unreleased";
-    let idx = content
-        .lines()
-        .position(|l| l.trim_end() == HEADING)
+    // Match the heading as a full line (via `split_inclusive`, which keeps each
+    // line's terminator). A plain substring match would be fragile: `##
+    // Unreleased` can also appear in prose — e.g. a changelog entry describing
+    // this very tool — and only the actual heading line should be rolled.
+    let heading_idx = content
+        .split_inclusive('\n')
+        .position(|seg| seg.trim_end() == HEADING)
         .with_context(|| {
             format!(
                 "CHANGELOG.md has no `{HEADING}` heading — cannot roll it into `## [{version}]`. \
@@ -331,17 +335,35 @@ fn roll_changelog(content: &str, version: &str, date: &str) -> Result<RolledChan
     // `## ` heading (or EOF).
     let body_empty = content
         .lines()
-        .skip(idx + 1)
+        .skip(heading_idx + 1)
         .take_while(|l| !l.starts_with("## "))
         .all(|l| l.trim().is_empty());
 
-    // ponytail: the heading line is unique in this file, so a substring
-    // `replacen(.., 1)` targets it precisely and preserves the rest byte-for-byte
-    // (avoids re-normalizing line endings that a lines().join() rebuild would).
-    let replacement = format!("{HEADING}\n\n## [{version}] - {date}");
-    let content = content.replacen(HEADING, &replacement, 1);
+    // Rebuild verbatim, inserting `<blank><dated heading>` right after the
+    // heading line. Reuse the file's newline style (CRLF vs LF) so a bump can't
+    // introduce mixed line endings.
+    let nl = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut out = String::with_capacity(content.len() + 64);
+    for (i, seg) in content.split_inclusive('\n').enumerate() {
+        out.push_str(seg);
+        if i == heading_idx {
+            if !out.ends_with('\n') {
+                out.push_str(nl); // heading was the final, unterminated line
+            }
+            out.push_str(nl);
+            out.push_str("## [");
+            out.push_str(version);
+            out.push_str("] - ");
+            out.push_str(date);
+            out.push_str(nl);
+        }
+    }
     Ok(RolledChangelog {
-        content,
+        content: out,
         body_empty,
     })
 }
@@ -518,6 +540,42 @@ mod tests {
         let stub = rolled.content.find("## Unreleased").unwrap();
         let dated = rolled.content.find("## [1.2.3]").unwrap();
         assert!(stub < dated, "stub must precede dated section");
+    }
+
+    #[test]
+    fn roll_targets_heading_line_not_prose_mention() {
+        // A prose mention of "## Unreleased" (in backticks) must NOT be mistaken
+        // for the heading — regression guard for the substring-match trap.
+        let src = "# Changelog\n\n## Unreleased\n\n### Changed\n\n- rolls `## Unreleased` into a dated section\n";
+        let rolled = roll_changelog(src, "1.0.0", "2026-07-06").unwrap();
+        // Exactly one dated section, inserted right under the real heading.
+        assert_eq!(rolled.content.matches("## [1.0.0]").count(), 1);
+        assert!(rolled
+            .content
+            .contains("## Unreleased\n\n## [1.0.0] - 2026-07-06\n\n### Changed"));
+        // The prose mention survives untouched.
+        assert!(rolled
+            .content
+            .contains("- rolls `## Unreleased` into a dated section"));
+    }
+
+    #[test]
+    fn roll_preserves_crlf_line_endings() {
+        let src = "# Changelog\r\n\r\n## Unreleased\r\n\r\n### Fixed\r\n\r\n- a bug\r\n";
+        let rolled = roll_changelog(src, "1.2.3", "2026-07-06").unwrap();
+        assert!(
+            rolled
+                .content
+                .contains("## Unreleased\r\n\r\n## [1.2.3] - 2026-07-06\r\n"),
+            "CRLF not preserved:\n{:?}",
+            rolled.content
+        );
+        // No lone LF introduced.
+        assert!(!rolled.content.contains("\n\n\n"));
+        assert_eq!(
+            rolled.content.matches('\n').count(),
+            rolled.content.matches("\r\n").count()
+        );
     }
 
     #[test]
