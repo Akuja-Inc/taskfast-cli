@@ -5293,6 +5293,7 @@ name = "xtask"
 version = "0.13.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "taskfast-codegen",
  "toml_edit",

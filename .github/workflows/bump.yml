@@ -2,7 +2,8 @@
 #
 # Click "Run workflow" in the Actions tab on the `main` branch, pick the bump
 # level (patch / minor / major — default patch). CI will:
-#   1. `cargo xtask bump <level>` (bumps the 3 synced version sites + Cargo.lock)
+#   1. `cargo xtask bump <level>` (bumps the 3 synced version sites + Cargo.lock,
+#      and rolls `## Unreleased` -> dated `## [X.Y.Z]` in CHANGELOG.md — gh#102)
 #   2. commit the diff as `chore(release): vX.Y.Z`
 #   3. tag `taskfast-cli-vX.Y.Z` (annotated — lightweight tags get dropped by
 #      `git push --follow-tags`, which previously broke the 0.2.2 release)
@@ -87,7 +88,11 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          git add Cargo.toml Cargo.lock crates/taskfast-client/Cargo.toml
+          # CHANGELOG.md is included because `cargo xtask bump` rolls
+          # `## Unreleased` into the dated release section (gh#102) — the
+          # release commit must carry that roll or cargo-dist can't match the
+          # tagged version's Release notes.
+          git add Cargo.toml Cargo.lock crates/taskfast-client/Cargo.toml CHANGELOG.md
           git commit -m "chore(release): v$VERSION"
           # Annotated tag (-a) — `git push --follow-tags` silently skips
           # lightweight tags, which previously caused release.yml to never
