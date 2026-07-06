@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.12.1"
+version = "0.13.0"
 edition = "2021"
 license = "MIT"
 authors = ["Akuja Inc. <onyekwelu+taskfast@obukwelu.com>"]
@@ -36,6 +36,8 @@ futures = "0.3"
 uuid = { version = "1", features = ["serde", "v4"] }
 
 alloy-primitives = "1"
+alloy-dyn-abi = "1"
+alloy-json-abi = "1"
 alloy-signer = "2"
 alloy-signer-local = { version = "2", features = ["keystore"] }
 alloy-sol-types = "1"
@@ -52,9 +54,9 @@ toml_edit = "0.25"
 rust_decimal = { version = "1", default-features = false, features = ["std"] }
 
 taskfast-codegen = { path = "crates/taskfast-codegen", version = "0.1.0" }
-taskfast-client = { path = "crates/taskfast-client", version = "0.5.1" }
+taskfast-client = { path = "crates/taskfast-client", version = "0.6.0" }
 taskfast-chains = { path = "crates/taskfast-chains", version = "0.1.0", default-features = false }
-taskfast-agent = { path = "crates/taskfast-agent", version = "0.12.1" }
+taskfast-agent = { path = "crates/taskfast-agent", version = "0.13.0" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

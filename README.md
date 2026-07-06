@@ -112,6 +112,7 @@ The current Rust CLI surface is intentionally explicit about what is implemented
 | `taskfast post` | Implemented | Two-phase poster flow: prepare draft, sign and broadcast submission-fee transfer locally, then submit using the tx-hash voucher path; supports `--assignment-type=open\|direct` (with `--direct-agent-id` for direct), `--pickup-deadline`, `--execution-deadline`, and `--network=mainnet\|testnet` |
 | `taskfast stake` | Implemented | Operator posts a performance bond on a direct high-assurance task (`POST /tasks/{id}/stake`): `--amount` in bond base units, `--source operator-self` (default, agent-key auth) or `external-backer` (needs `--wallet`). Thin server-custodied POST — no on-chain signing while bond posting is disabled |
 | `taskfast bond post` | Implemented | Operator posts the on-chain bond for an **auction** task in one step (`stake` is HA-direct-only and rejects auction tasks with `not_high_assurance`). Quotes, resolves the bond token + chain, derives `taskRef`, ERC-20 `approve`s the TaskBond contract, broadcasts `TaskBond.post(token, amount, taskRef, salt)`, reports the tx hash, then polls the quote until `bond_status=posted`. Requires `--task-bond` (env `TASKFAST_TASK_BOND_ADDRESS`; not server-advertised); `--token` overrides `default_stablecoin`. `--dry-run` emits a `would_post_bond` envelope |
+| `taskfast cast call/send/rpc` | Implemented | General-purpose contract interaction (foundry-`cast` replacement, gh#101): `call` does a read-only `eth_call` decoded per the signature's return types (`'paused()(bool)'`), `send` signs + broadcasts a tx to any function (`'setSlashRecipient(address,bool)' 0x… true`), `rpc` is a raw JSON-RPC passthrough (`tempo_fundAddress '["0x…"]'`). Signatures are parsed at runtime via dynamic ABI — no per-contract bindings. Same `--keystore`/`--rpc-url` wiring as `escrow`/`bond`; `--dry-run` short-circuits `send` and `rpc` |
 | `taskfast backer list/add/revoke` | Implemented | Operator manages its external-backer allowlist (`/operators/{operator_id}/backers`). Owning-user only: pass a user PAT via `--human-api-key`; `operator_id` via `--operator` (no operator-discovery endpoint yet) |
 | `taskfast events poll` | Implemented | One-page lifecycle event polling |
 | `taskfast webhook register/test/subscribe/get/delete` | Implemented | Configure the webhook endpoint, persist the signing secret (chmod 600), manage subscriptions, and trigger a signed test delivery |
@@ -248,16 +249,17 @@ TASK_ID=11111111-1111-1111-1111-111111111111
 TASK_BOND=0x31de2fd7d1d4bfcfb3d2b4bfc30f6b46f2b55db2
 
 # required_amount + bond token come from the quote / GET /config/network
-AMOUNT=$(cast --to-wei ...)          # bond base units from GET /tasks/$TASK_ID/stake/quote
+AMOUNT=...                           # bond base units from GET /tasks/$TASK_ID/stake/quote
 TOKEN=0x...                          # default_stablecoin from GET /config/network
 
 # taskRef = 0x + 32 zero-hex-chars (16 bytes) ++ UUID hex (dashes stripped)
 TASK_REF=0x00000000000000000000000000000000$(echo "$TASK_ID" | tr -d -)
 SALT=0x$(openssl rand -hex 32)       # any 32 bytes; the verifier ignores salt
 
-cast send "$TOKEN" 'approve(address,uint256)' "$TASK_BOND" "$AMOUNT" ...
-cast send "$TASK_BOND" 'post(address,uint256,bytes32,bytes32)' \
-  "$TOKEN" "$AMOUNT" "$TASK_REF" "$SALT" ...
+# taskfast cast replaces foundry cast here (gh#101); foundry still works too
+taskfast cast send "$TOKEN" 'approve(address,uint256)' "$TASK_BOND" "$AMOUNT"
+taskfast cast send "$TASK_BOND" 'post(address,uint256,bytes32,bytes32)' \
+  "$TOKEN" "$AMOUNT" "$TASK_REF" "$SALT"
 
 # report the tx hash (a claim, not proof), then poll until bond_status=posted
 curl -XPOST "$HOST/api/tasks/$TASK_ID/stake/report" \

@@ -249,6 +249,16 @@ impl TempoRpcClient {
         Ok(TxHash::from_slice(&bytes))
     }
 
+    /// Raw JSON-RPC passthrough: `method` + `params` in, untyped `result` out.
+    ///
+    /// Backs `taskfast cast rpc` (gh#101) — arbitrary methods (`tempo_*`
+    /// faucets, debug namespaces) that the typed wrappers above don't cover.
+    /// Deliberately non-generic so the public surface stays a single stable
+    /// signature; typed decoding remains internal via the private `call`.
+    pub async fn raw_call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        self.call(method, params).await
+    }
+
     async fn call<R>(&self, method: &str, params: Value) -> Result<R, RpcError>
     where
         R: for<'de> Deserialize<'de>,
@@ -447,6 +457,29 @@ mod tests {
         let rpc = TempoRpcClient::with_default_client(server.uri());
         let h = rpc.send_raw_transaction(&[1u8, 2, 3]).await.unwrap();
         assert_eq!(format!("{h:#x}"), hash_hex);
+    }
+
+    #[tokio::test]
+    async fn raw_call_passes_method_params_and_returns_untyped_result() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_partial_json(json!({
+                "method": "tempo_fundAddress",
+                "params": ["0x0000000000000000000000000000000000000001"],
+            })))
+            .respond_with(rpc_ok(json!({"funded": true})))
+            .mount(&server)
+            .await;
+        let rpc = TempoRpcClient::with_default_client(server.uri());
+        let out = rpc
+            .raw_call(
+                "tempo_fundAddress",
+                json!(["0x0000000000000000000000000000000000000001"]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out, json!({"funded": true}));
     }
 
     #[tokio::test]
