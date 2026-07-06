@@ -206,6 +206,42 @@ jobs:
             exit 1
           fi
 
+  changelog:
+    # Require a CHANGELOG.md entry when a PR changes shipped code (crates/**)
+    # or the vendored spec (spec/**), so `## Unreleased` doesn't rot between
+    # releases (gh#102). `cargo xtask bump` rolls that section into the dated
+    # release heading, so it must actually contain the release's changes.
+    #
+    # Escape hatches, both in the job-level `if`:
+    #   - `no-changelog` label — pure refactors, CI plumbing, doc-only churn.
+    #   - dependabot[bot] PRs — `chore(deps)` bumps don't warrant entries.
+    name: changelog-entry
+    if: >-
+      github.event_name == 'pull_request'
+      && github.actor != 'dependabot[bot]'
+      && !contains(github.event.pull_request.labels.*.name, 'no-changelog')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Require a CHANGELOG entry for code/spec changes
+        env:
+          # Env-var indirection (not inline `${{ }}` in the script) — the
+          # documented safe pattern for event-derived values.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          files=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          code=$(printf '%s\n' "$files" | grep -E '^(crates|spec)/' || true)
+          changelog=$(printf '%s\n' "$files" | grep -xF 'CHANGELOG.md' || true)
+          if [ -n "$code" ] && [ -z "$changelog" ]; then
+            echo "::error::This PR changes crates/** or spec/** but not CHANGELOG.md. Add an entry under '## Unreleased' (Keep a Changelog format), or apply the 'no-changelog' label and say why. See CONTRIBUTING.md."
+            exit 1
+          fi
+          echo "changelog check passed"
+
   notify-discord:
     # Posts a single consolidated run result to Discord. Mirrors the
     # pattern in docker.yml. Skipped for pull_request events to avoid
@@ -225,6 +261,7 @@ jobs:
       - semver
       - coverage
       - spec-drift
+      - changelog
     runs-on: ubuntu-22.04
     permissions:
       actions: read

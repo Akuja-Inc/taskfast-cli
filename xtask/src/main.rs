@@ -229,6 +229,25 @@ fn run_bump(level: BumpLevel, no_lock: bool, dry_run: bool) -> Result<()> {
         plans.push((group, next));
     }
 
+    // Roll the changelog against the release (workspace / taskfast-cli) version.
+    // groups[0] — and thus plans[0] — is the workspace version line by
+    // construction of `version_groups()`; that is the version the release tag
+    // `taskfast-cli-vX.Y.Z` carries and the section cargo-dist matches.
+    // Compute (and fail-early-validate) BEFORE any file is written.
+    let changelog_path = workspace_root.join("CHANGELOG.md");
+    let changelog_src = std::fs::read_to_string(&changelog_path)
+        .with_context(|| format!("read {}", changelog_path.display()))?;
+    let release_version = plans[0].1.clone();
+    let date = today_utc();
+    let rolled = roll_changelog(&changelog_src, &release_version, &date)?;
+    eprintln!("bump: changelog: ## Unreleased -> ## [{release_version}] - {date}");
+    if rolled.body_empty {
+        eprintln!(
+            "bump: warning: `## Unreleased` had no entries — rolling an empty \
+             {release_version} section (pure chore release?)"
+        );
+    }
+
     if dry_run {
         eprintln!("bump: --dry-run, no files written");
         return Ok(());
@@ -246,6 +265,9 @@ fn run_bump(level: BumpLevel, no_lock: bool, dry_run: bool) -> Result<()> {
             .with_context(|| format!("write {}", path.display()))?;
         eprintln!("bump: wrote {}", path.display());
     }
+    std::fs::write(&changelog_path, &rolled.content)
+        .with_context(|| format!("write {}", changelog_path.display()))?;
+    eprintln!("bump: wrote {}", changelog_path.display());
 
     if no_lock {
         eprintln!("bump: --no-lock, skipping `cargo check`");
@@ -274,6 +296,81 @@ fn write_toml_string(doc: &mut DocumentMut, path: &[&str], new: &str) {
         item = &mut item[*key];
     }
     item[*last] = value(new);
+}
+
+/// Result of rolling `## Unreleased` into a dated release section.
+#[derive(Debug)]
+struct RolledChangelog {
+    /// The rewritten changelog text.
+    content: String,
+    /// True if the rolled `Unreleased` section had no entries (blank body until
+    /// the next `## ` heading or EOF). A pure `chore` release is legitimate, so
+    /// this only warns rather than fails.
+    body_empty: bool,
+}
+
+/// Roll the `## Unreleased` section into a dated `## [version] - date` section,
+/// leaving a fresh empty `## Unreleased` stub above it.
+///
+/// Fails loudly if there is no `## Unreleased` heading — the caller runs this
+/// *before* writing any file, so a missing heading aborts the whole bump with
+/// no side effects (same fail-early philosophy as the version-site checks).
+fn roll_changelog(content: &str, version: &str, date: &str) -> Result<RolledChangelog> {
+    const HEADING: &str = "## Unreleased";
+    // Match the heading as a full line (via `split_inclusive`, which keeps each
+    // line's terminator). A plain substring match would be fragile: `##
+    // Unreleased` can also appear in prose — e.g. a changelog entry describing
+    // this very tool — and only the actual heading line should be rolled.
+    let heading_idx = content
+        .split_inclusive('\n')
+        .position(|seg| seg.trim_end() == HEADING)
+        .with_context(|| {
+            format!(
+                "CHANGELOG.md has no `{HEADING}` heading — cannot roll it into `## [{version}]`. \
+                 Add an `{HEADING}` section (Keep a Changelog format) before bumping."
+            )
+        })?;
+
+    // Empty = only blank lines from just after the heading up to the next
+    // `## ` heading (or EOF).
+    let body_empty = content
+        .lines()
+        .skip(heading_idx + 1)
+        .take_while(|l| !l.starts_with("## "))
+        .all(|l| l.trim().is_empty());
+
+    // Rebuild verbatim, inserting `<blank><dated heading>` right after the
+    // heading line. Reuse the file's newline style (CRLF vs LF) so a bump can't
+    // introduce mixed line endings.
+    let nl = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut out = String::with_capacity(content.len() + 64);
+    for (i, seg) in content.split_inclusive('\n').enumerate() {
+        out.push_str(seg);
+        if i == heading_idx {
+            if !out.ends_with('\n') {
+                out.push_str(nl); // heading was the final, unterminated line
+            }
+            out.push_str(nl);
+            out.push_str("## [");
+            out.push_str(version);
+            out.push_str("] - ");
+            out.push_str(date);
+            out.push_str(nl);
+        }
+    }
+    Ok(RolledChangelog {
+        content: out,
+        body_empty,
+    })
+}
+
+/// Today's date as `YYYY-MM-DD` in UTC, for the rolled changelog heading.
+fn today_utc() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
 }
 
 fn bump_semver(current: &str, level: BumpLevel) -> Result<String> {
@@ -423,6 +520,99 @@ mod tests {
         assert!(client.iter().any(|s| s.file == "Cargo.toml"
             && s.toml_path
                 == ["workspace", "dependencies", "taskfast-client", "version"].as_slice()));
+    }
+
+    #[test]
+    fn roll_inserts_dated_section_and_keeps_unreleased_stub() {
+        let src = "# Changelog\n\n## Unreleased\n\n### Fixed\n\n- a bug\n";
+        let rolled = roll_changelog(src, "1.2.3", "2026-07-06").unwrap();
+        assert!(
+            rolled
+                .content
+                .contains("## Unreleased\n\n## [1.2.3] - 2026-07-06\n"),
+            "unexpected roll:\n{}",
+            rolled.content
+        );
+        // Prior entries are carried into the dated section, not lost.
+        assert!(rolled.content.contains("- a bug"));
+        assert!(!rolled.body_empty);
+        // Fresh stub sits above the dated section.
+        let stub = rolled.content.find("## Unreleased").unwrap();
+        let dated = rolled.content.find("## [1.2.3]").unwrap();
+        assert!(stub < dated, "stub must precede dated section");
+    }
+
+    #[test]
+    fn roll_targets_heading_line_not_prose_mention() {
+        // A prose mention of "## Unreleased" (in backticks) must NOT be mistaken
+        // for the heading — regression guard for the substring-match trap.
+        let src = "# Changelog\n\n## Unreleased\n\n### Changed\n\n- rolls `## Unreleased` into a dated section\n";
+        let rolled = roll_changelog(src, "1.0.0", "2026-07-06").unwrap();
+        // Exactly one dated section, inserted right under the real heading.
+        assert_eq!(rolled.content.matches("## [1.0.0]").count(), 1);
+        assert!(rolled
+            .content
+            .contains("## Unreleased\n\n## [1.0.0] - 2026-07-06\n\n### Changed"));
+        // The prose mention survives untouched.
+        assert!(rolled
+            .content
+            .contains("- rolls `## Unreleased` into a dated section"));
+    }
+
+    #[test]
+    fn roll_preserves_crlf_line_endings() {
+        let src = "# Changelog\r\n\r\n## Unreleased\r\n\r\n### Fixed\r\n\r\n- a bug\r\n";
+        let rolled = roll_changelog(src, "1.2.3", "2026-07-06").unwrap();
+        assert!(
+            rolled
+                .content
+                .contains("## Unreleased\r\n\r\n## [1.2.3] - 2026-07-06\r\n"),
+            "CRLF not preserved:\n{:?}",
+            rolled.content
+        );
+        // No lone LF introduced.
+        assert!(!rolled.content.contains("\n\n\n"));
+        assert_eq!(
+            rolled.content.matches('\n').count(),
+            rolled.content.matches("\r\n").count()
+        );
+    }
+
+    #[test]
+    fn roll_fails_when_unreleased_missing() {
+        let src = "# Changelog\n\n## [0.1.0] - 2020-01-01\n\n- old\n";
+        let err = roll_changelog(src, "0.2.0", "2026-07-06").unwrap_err();
+        assert!(
+            err.to_string().contains("Unreleased"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn roll_flags_empty_unreleased_but_succeeds() {
+        // Blank body up to the next section heading.
+        let src = "# Changelog\n\n## Unreleased\n\n## [0.1.0] - 2020-01-01\n\n- old\n";
+        let rolled = roll_changelog(src, "0.2.0", "2026-07-06").unwrap();
+        assert!(rolled.body_empty, "empty Unreleased body should be flagged");
+        assert!(rolled.content.contains("## [0.2.0] - 2026-07-06"));
+    }
+
+    #[test]
+    fn roll_flags_empty_unreleased_at_eof() {
+        let src = "# Changelog\n\n## Unreleased\n";
+        let rolled = roll_changelog(src, "0.2.0", "2026-07-06").unwrap();
+        assert!(rolled.body_empty);
+        assert!(rolled.content.contains("## [0.2.0] - 2026-07-06"));
+    }
+
+    #[test]
+    fn today_utc_is_iso_date() {
+        let d = today_utc();
+        // YYYY-MM-DD
+        assert_eq!(d.len(), 10, "got {d}");
+        let parts: Vec<&str> = d.split('-').collect();
+        assert_eq!(parts.len(), 3);
+        assert!(parts[0].len() == 4 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit())));
     }
 
     #[test]
