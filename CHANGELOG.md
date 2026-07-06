@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.13.1] - 2026-07-06
+
 ### Fixed
 
 - **Escrow `open`/`openWithMemo` now bind the `arbitrator`** (canonical v2
