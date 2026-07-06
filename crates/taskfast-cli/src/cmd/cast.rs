@@ -201,6 +201,7 @@ async fn send(ctx: &Ctx, args: SendArgs) -> CmdResult {
     }
 
     if ctx.dry_run {
+        validate_dry_run_override(ctx, args.rpc_url.as_deref())?;
         return Ok(Envelope::success(
             ctx.environment,
             ctx.dry_run,
@@ -261,6 +262,7 @@ async fn rpc(ctx: &Ctx, args: RpcArgs) -> CmdResult {
     // is one method call away), so `--dry-run` short-circuits the whole verb
     // rather than honoring the reads-pass-through convention. Fail safe.
     if ctx.dry_run {
+        validate_dry_run_override(ctx, args.rpc_url.as_deref())?;
         return Ok(Envelope::success(
             ctx.environment,
             ctx.dry_run,
@@ -332,6 +334,16 @@ async fn resolve_rpc(
         )));
     }
     Ok((entry.rpc_url.clone(), client.http_client()))
+}
+
+/// Endpoint-guard check for dry-run short-circuits: `validate_override_rpc_url`
+/// is pure (no I/O), so dry-run can reject the same override URLs live mode
+/// would while still guaranteeing zero network traffic.
+fn validate_dry_run_override(ctx: &Ctx, override_url: Option<&str>) -> Result<(), CmdError> {
+    if let Some(url) = override_url {
+        validate_override_rpc_url(url, ctx.environment.network(), ctx.allow_custom_endpoints)?;
+    }
+    Ok(())
 }
 
 fn parse_to(raw: &str) -> Result<Address, CmdError> {

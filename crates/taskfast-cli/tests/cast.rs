@@ -240,6 +240,22 @@ async fn send_broadcasts_and_reports_tx_hash() {
 }
 
 #[tokio::test]
+async fn send_dry_run_still_enforces_endpoint_guard() {
+    // Dry-run must reject the same override URLs live mode would
+    // (validate_override_rpc_url is pure, so no network is touched).
+    let keys = fresh_keys();
+    let mut c = ctx(true);
+    c.allow_custom_endpoints = false;
+    let err = run(
+        &c,
+        Command::Send(send_args(&keys, "http://192.0.2.1:8545".into())),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, CmdError::Usage(_)), "got {err:?}");
+}
+
+#[tokio::test]
 async fn send_rejects_wallet_address_mismatch() {
     let keys = fresh_keys();
     let mut args = send_args(&keys, "http://rpc.invalid".into());
@@ -299,6 +315,23 @@ async fn rpc_dry_run_short_circuits() {
     let v = envelope_value(&env);
     assert_eq!(v["data"]["action"], json!("would_rpc"));
     assert_eq!(v["data"]["params"], json!(["0xdead"]));
+}
+
+#[tokio::test]
+async fn rpc_dry_run_still_enforces_endpoint_guard() {
+    let mut c = ctx(true);
+    c.allow_custom_endpoints = false;
+    let err = run(
+        &c,
+        Command::Rpc(RpcArgs {
+            method: "eth_chainId".into(),
+            params: None,
+            rpc_url: Some("http://192.0.2.1:8545".into()),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, CmdError::Usage(_)), "got {err:?}");
 }
 
 #[tokio::test]
