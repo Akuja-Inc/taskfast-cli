@@ -254,7 +254,7 @@ impl TempoRpcClient {
     /// Backs `taskfast cast rpc` (gh#101) — arbitrary methods (`tempo_*`
     /// faucets, debug namespaces) that the typed wrappers above don't cover.
     /// Deliberately non-generic so the public surface stays a single stable
-    /// signature; typed decoding remains internal via [`Self::call`].
+    /// signature; typed decoding remains internal via the private `call`.
     pub async fn raw_call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         self.call(method, params).await
     }
