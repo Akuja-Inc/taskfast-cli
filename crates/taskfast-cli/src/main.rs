@@ -133,6 +133,10 @@ enum Command {
     /// Operator: manage the external-backer allowlist (owning-user PAT).
     #[command(subcommand)]
     Backer(cmd::backer::Command),
+    /// Generic contract interaction: eth_call / send tx / raw JSON-RPC
+    /// (foundry-cast replacement).
+    #[command(subcommand)]
+    Cast(cmd::cast::Command),
     /// Poster: headless escrow signing for deferred-accept bids.
     #[command(subcommand)]
     Escrow(cmd::escrow::Command),
@@ -284,6 +288,7 @@ async fn main() -> std::process::ExitCode {
         Command::Stake(a) => cmd::stake::run(&ctx, a).await,
         Command::Bond(c) => cmd::bond::run(&ctx, c).await,
         Command::Backer(c) => cmd::backer::run(&ctx, c).await,
+        Command::Cast(c) => cmd::cast::run(&ctx, c).await,
         Command::Escrow(c) => cmd::escrow::run(&ctx, c).await,
         Command::Events(c) => cmd::events::run(&ctx, c).await,
         Command::Webhook(c) => cmd::webhook::run(&ctx, c).await,

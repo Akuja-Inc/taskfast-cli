@@ -81,6 +81,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloy-dyn-abi"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a475bb02d9cef2dbb99065c1664ab3fe1f9352e21d6d5ed3f02cdbfc06ed1abc"
+dependencies = [
+ "alloy-json-abi",
+ "alloy-primitives",
+ "alloy-sol-type-parser",
+ "alloy-sol-types",
+ "itoa",
+ "serde",
+ "serde_json",
+ "winnow",
+]
+
+[[package]]
 name = "alloy-eip2124"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4047,7 +4063,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "taskfast-agent"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4087,8 +4103,10 @@ dependencies = [
 
 [[package]]
 name = "taskfast-cli"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
+ "alloy-dyn-abi",
+ "alloy-json-abi",
  "alloy-primitives",
  "alloy-signer-local",
  "alloy-sol-types",
@@ -4121,7 +4139,7 @@ dependencies = [
 
 [[package]]
 name = "taskfast-client"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64",
  "bytes",
@@ -5272,7 +5290,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "clap",

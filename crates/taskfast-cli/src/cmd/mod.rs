@@ -31,6 +31,7 @@ pub mod artifact;
 pub mod backer;
 pub mod bid;
 pub mod bond;
+pub mod cast;
 pub mod config;
 pub mod discover;
 pub mod dispute;
