@@ -85,7 +85,7 @@ Omitting criteria is allowed but disables the objective payout gate (workers rel
 ## Deadlines + network
 
 ```bash
---pickup-deadline <duration>       # e.g. 2h, 30m
+--pickup-deadline-hours <1|4|12|24|72>  # required; bidding-window length
 --execution-deadline <duration>    # e.g. 24h, 3d
 --network mainnet|testnet          # overrides config.json; see Network-Configuration
 ```

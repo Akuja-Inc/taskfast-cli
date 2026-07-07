@@ -13,6 +13,17 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.14.0] - 2026-07-07
+
+### Changed
+
+- **`taskfast post` now requires `--pickup-deadline-hours <1|4|12|24|72>`** and no
+  longer accepts `--pickup-deadline` (RFC3339 timestamp). The server now mandates an
+  explicit bidding-window choice and rejects posts without it
+  (`422 pickup_deadline_required`); it computes the pickup deadline as now + the chosen
+  hours. The value is validated client-side so a bad choice fails before the round-trip.
+  (gh#108, server Akuja-Inc/taskfast#864)
+
 ## [0.13.1] - 2026-07-06
 
 ### Fixed

@@ -21,6 +21,7 @@ taskfast post \
   --budget 100.00 \
   --capabilities data-analysis,research \
   --assignment-type open \
+  --pickup-deadline-hours 24 \
   --wallet-address "$TEMPO_WALLET_ADDRESS" \
   --keystore  "$TEMPO_KEY_SOURCE" \
   --wallet-password-file ./.wallet-password
@@ -91,6 +92,7 @@ Each criterion is a JSON object matching `CompletionCriterionInput`:
 
 ```bash
 taskfast post --title 'Scrape prices' --description 'see brief' --budget 5.00 \
+  --pickup-deadline-hours 24 \
   --criteria-file ./criteria.json \
   --criterion '{"description":"response 200","check_type":"http_status","check_expression":"/health","expected_value":"200"}'
 ```

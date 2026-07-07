@@ -35,8 +35,8 @@ use taskfast_agent::tempo_rpc::{sign_and_broadcast_erc20_transfer, TempoRpcClien
 use taskfast_chains::tempo::{is_allowed_fee_token, is_known_network};
 use taskfast_client::api::types::{
     CompletionCriterionInput, TaskDraftPrepareRequest, TaskDraftPrepareRequestAssignmentType,
-    TaskDraftPrepareRequestPosterWalletAddress, TaskDraftSubmitRequest,
-    TaskDraftSubmitRequestSignature,
+    TaskDraftPrepareRequestPickupDeadlineHours, TaskDraftPrepareRequestPosterWalletAddress,
+    TaskDraftSubmitRequest, TaskDraftSubmitRequestSignature,
 };
 use taskfast_client::{map_api_error, TaskFastClient};
 
@@ -75,9 +75,11 @@ pub struct Args {
     #[arg(long)]
     pub criteria_file: Option<PathBuf>,
 
-    /// Pickup deadline (RFC3339 timestamp, e.g. `2026-05-01T00:00:00Z`).
+    /// Pickup window in hours: how long the task stays open for bidding
+    /// before closing. Required; one of 1, 4, 12, 24, 72 (server contract).
+    /// Validated client-side so a bad value fails before the server 422.
     #[arg(long)]
-    pub pickup_deadline: Option<String>,
+    pub pickup_deadline_hours: PickupDeadlineHours,
 
     /// Execution deadline (RFC3339 timestamp).
     #[arg(long)]
@@ -146,6 +148,43 @@ impl From<AssignmentType> for TaskDraftPrepareRequestAssignmentType {
     }
 }
 
+/// Allowed pickup-window lengths (hours). The server rejects anything outside
+/// this set (`422 pickup_deadline_required`); clap enforces it up front so a
+/// typoed value fails before the paid round-trip.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum PickupDeadlineHours {
+    #[value(name = "1")]
+    H1,
+    #[value(name = "4")]
+    H4,
+    #[value(name = "12")]
+    H12,
+    #[value(name = "24")]
+    H24,
+    #[value(name = "72")]
+    H72,
+}
+
+impl PickupDeadlineHours {
+    fn as_i64(self) -> i64 {
+        match self {
+            Self::H1 => 1,
+            Self::H4 => 4,
+            Self::H12 => 12,
+            Self::H24 => 24,
+            Self::H72 => 72,
+        }
+    }
+}
+
+impl From<PickupDeadlineHours> for TaskDraftPrepareRequestPickupDeadlineHours {
+    fn from(h: PickupDeadlineHours) -> Self {
+        // Infallible: the variants are exactly the schema's allowed set, so the
+        // generated newtype's membership check cannot reject them here.
+        Self::try_from(h.as_i64()).expect("pickup window is a schema-valid choice")
+    }
+}
+
 pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     if args.description.trim().is_empty() {
         return Err(CmdError::Usage(
@@ -180,7 +219,6 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         (AssignmentType::Open, _) => None,
     };
 
-    let pickup_deadline = parse_iso_opt(args.pickup_deadline.as_deref(), "--pickup-deadline")?;
     let execution_deadline =
         parse_iso_opt(args.execution_deadline.as_deref(), "--execution-deadline")?;
 
@@ -197,7 +235,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         description: args.description.clone(),
         direct_agent_id,
         execution_deadline,
-        pickup_deadline,
+        pickup_deadline_hours: args.pickup_deadline_hours.into(),
         poster_wallet_address: poster_wallet,
         required_capabilities: args.capabilities.clone(),
         title: args.title.clone(),
@@ -555,6 +593,18 @@ mod tests {
     fn validate_override_allows_plain_http_on_testnet() {
         validate_override_rpc_url("http://my-testnet.example", Network::Testnet, true)
             .expect("testnet does not enforce HTTPS");
+    }
+
+    #[test]
+    fn pickup_hours_rejects_out_of_set_and_maps_to_wire() {
+        use clap::ValueEnum;
+        // clap rejects a value outside the schema's allowed set — client-side,
+        // before any request is built.
+        assert!(PickupDeadlineHours::from_str("3", false).is_err());
+        // A valid choice parses and converts to the exact wire integer.
+        let hours = PickupDeadlineHours::from_str("24", false).expect("24 is valid");
+        let wire: TaskDraftPrepareRequestPickupDeadlineHours = hours.into();
+        assert_eq!(i64::from(wire), 24);
     }
 
     #[test]
