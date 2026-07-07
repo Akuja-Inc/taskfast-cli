@@ -4020,6 +4020,16 @@ components:
             escrow and payouts. `null` when the deployment has not
             finalized a token for the network.
           example: "0x20C0000000000000000000000000000000000000"
+        task_bond_contract:
+          type: string
+          nullable: true
+          description: |
+            TaskBond contract address for this deployment — the on-chain
+            SSOT that bond verification checks against. Clients posting a
+            bond resolve the contract from this field rather than pinning a
+            copy that can go stale. `null` when bond posting is not
+            configured for the deployment.
+          example: null
 
     JsonRpcRequest:
       type: object
@@ -4362,6 +4372,7 @@ components:
         - description
         - budget_max
         - assignment_type
+        - pickup_deadline_hours
       properties:
         title:
           type: string
@@ -4391,6 +4402,15 @@ components:
           format: uuid
           description: Set to create a subtask within a delegation chain
           nullable: true
+        pickup_deadline_hours:
+          type: integer
+          enum: [1, 4, 12, 24, 72]
+          description: >
+            Required. The bidding-window length: how long the task stays open for
+            bidding before its closing time. Must be one of the allowed windows
+            (1, 4, 12, 24, or 72 hours) — there is no default. The server computes
+            pickup_deadline as now + this many hours. A task posted without a
+            valid choice is rejected (422 pickup_deadline_required).
         execution_deadline:
           type: string
           format: date-time
@@ -4419,7 +4439,7 @@ components:
           description: Automatically complete the task when submission criteria pass
         payment_token:
           type: string
-          enum: [USDC, PYUSD, null]
+          enum: [USDC, AlphaUSD, null]
           nullable: true
           description: |
             Buyer-elected settlement rail (stablecoin) for this task. Omit to use
@@ -4597,7 +4617,7 @@ components:
                 `DistributionApproval` message. Null until escrow initialized.
             payment_token:
               type: string
-              enum: [USDC, PYUSD, null]
+              enum: [USDC, AlphaUSD, null]
               nullable: true
               description: |
                 The buyer-elected settlement rail for this task (gh#80); null
@@ -4625,7 +4645,7 @@ components:
                   description: SHA-256 payload hash (also accepted by /receipt/{id}).
                 payment_token:
                   type: string
-                  enum: [USDC, PYUSD, null]
+                  enum: [USDC, AlphaUSD, null]
                   nullable: true
                   description: |
                     The settlement rail named by the receipt (gh#80, D-03);
@@ -6807,6 +6827,7 @@ components:
         - poster_wallet_address
         - title
         - description
+        - pickup_deadline_hours
       properties:
         poster_wallet_address:
           type: string
@@ -6837,9 +6858,14 @@ components:
             verbatim into the created task.
           items:
             $ref: '#/components/schemas/CompletionCriterionInput'
-        pickup_deadline:
-          type: string
-          format: date-time
+        pickup_deadline_hours:
+          type: integer
+          enum: [1, 4, 12, 24, 72]
+          description: >
+            Required. The bidding-window length (1, 4, 12, 24, or 72 hours) — no
+            default. Carried into the draft's task_spec; on submit the server
+            computes pickup_deadline as now + this many hours. Submitting a draft
+            without a valid choice is rejected (422 pickup_deadline_required).
         execution_deadline:
           type: string
           format: date-time
@@ -6974,7 +7000,7 @@ components:
             supported rails.
           items:
             type: string
-            enum: [USDC, PYUSD]
+            enum: [USDC, AlphaUSD]
 
     OperatorCreateResponse:
       type: object
@@ -6999,7 +7025,7 @@ components:
           description: Accepted settlement rails; null when the operator accepts all.
           items:
             type: string
-            enum: [USDC, PYUSD]
+            enum: [USDC, AlphaUSD]
 
     ActivationCheck:
       type: object
