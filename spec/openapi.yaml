@@ -3599,6 +3599,84 @@ paths:
         '429':
           $ref: '#/components/responses/TooManyRequests'
 
+  /receipts/{payload_hash}/proof:
+    get:
+      operationId: getReceiptProof
+      summary: Fetch a receipt's daily-batch inclusion proof
+      description: |
+        Returns the RFC-6962 inclusion proof for a single receipt's leaf in
+        its day's Merkle tree, plus the Tempo on-chain anchor evidence and
+        Sigsum witness-cosigning evidence for that day's root (gh#885:
+        daily-root-only anchoring — there is no per-receipt anchor).
+
+        A valid third-party verification requires both facts together:
+        Merkle inclusion (`audit_path` recomputes to `root_hash`) **and**
+        the on-chain anchor tuple (`anchor.contract`, the `Anchored` event
+        topic, the payload hash, `anchor.issuer_address`) — never a payload
+        hash alone, since `Anchor.anchor(bytes32)` is permissionless by
+        design. See `docs/receipt-proof-verification.md` for the full
+        recipe. `anchor` and `sigsum` are independently nullable: `anchor`
+        is null before that day's root is anchored on Tempo; `sigsum` is
+        null when no witness log round-trip happened for that day (for
+        example `SIGSUM_LOG_URL` unset).
+
+        **Public:** no authentication required. Selective disclosure is by
+        construction — only the audit-path siblings (32-byte hashes) are
+        returned, never sibling receipts' identifiers. Citation surface for
+        the precedent registry (gh#126).
+      tags:
+        - Verification
+      security: []
+      parameters:
+        - name: payload_hash
+          in: path
+          required: true
+          description: The receipt's SHA-256 payload hash (0x-prefixed; case-insensitive)
+          schema:
+            type: string
+            pattern: "^(0x)?[0-9a-fA-F]{64}$"
+      responses:
+        '200':
+          description: Inclusion proof retrieved (anchor/sigsum may still be null)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReceiptProof'
+        '404':
+          description: No receipt matches the payload hash
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [error, payload_hash]
+                properties:
+                  error:
+                    type: string
+                    example: receipt_not_found
+                  payload_hash:
+                    type: string
+        '409':
+          description: |
+            The receipt exists but its day has not yet been rolled up into
+            a daily batch (roll-up runs once daily). Retry after the
+            interval named in the body.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [error, payload_hash, retry_after_seconds]
+                properties:
+                  error:
+                    type: string
+                    example: not_yet_rolled_up
+                  payload_hash:
+                    type: string
+                  retry_after_seconds:
+                    type: integer
+                    example: 86400
+
   /users/me:
     get:
       operationId: getCurrentUser
@@ -4454,6 +4532,15 @@ components:
             tier. `high_assurance` is rejected unless it is currently selectable
             (see the `completion_fee_tiers[].selectable` flag on
             `/platform/config`). The election locks once an operator binds.
+        settlement_venue:
+          type: string
+          nullable: true
+          description: |
+            Settlement venue chain_key (e.g. `tempo-zone-moderato`) electing the
+            settlement rail/chain for this task (ADR 0011 §5). Omit to settle on
+            the default venue (L1). Must reference an active venue; a
+            provisioning, draining, suspended, or unknown key is rejected. Binds
+            once at creation and is immutable thereafter.
 
     TaskEditRequest:
       type: object
@@ -6877,6 +6964,13 @@ components:
           type: string
           format: uuid
           description: Required when `assignment_type` is `direct`
+        settlement_venue:
+          type: string
+          nullable: true
+          description: |
+            Settlement venue chain_key (ADR 0011 §5). Mirrors
+            `TaskCreateRequest.settlement_venue`; omit to settle on the default
+            venue (L1).
       additionalProperties: true
     TaskDraftPrepareResponse:
       type: object
@@ -7165,6 +7259,127 @@ components:
           type: string
           description: The receipt identifier that was not found
 
+    ReceiptProof:
+      type: object
+      additionalProperties: false
+      description: |
+        RFC-6962 inclusion proof for a receipt's leaf in its day's Merkle
+        tree, with Tempo anchor and Sigsum witness-cosigning evidence for
+        that day's root (gh#885 daily-root-only anchoring). Returned by
+        `GET /receipts/{payload_hash}/proof`.
+      required:
+        - schema_version
+        - payload_hash
+        - citable_id
+        - day
+        - tree_size
+        - leaf_index
+        - leaf_hash
+        - root_hash
+        - audit_path
+        - anchor
+        - sigsum
+      properties:
+        schema_version:
+          type: string
+          enum: [v1]
+        payload_hash:
+          type: string
+          description: 0x-prefixed SHA-256 payload hash of the receipt this proof covers
+        citable_id:
+          type: string
+          description: Stable citation id derived from the payload hash (precedent registry, gh#126)
+          example: tf-proof-1a2b3c4d5e6f7890
+        day:
+          type: string
+          format: date
+          description: UTC day (YYYY-MM-DD) whose Merkle batch this leaf belongs to
+        tree_size:
+          type: integer
+          description: Number of leaves in that day's Merkle tree
+        leaf_index:
+          type: integer
+          description: This receipt's zero-based leaf index in that day's tree
+        leaf_hash:
+          type: string
+          description: 0x-prefixed hash of this receipt's leaf
+        root_hash:
+          type: string
+          description: 0x-prefixed root hash of that day's Merkle tree
+        audit_path:
+          type: array
+          description: |
+            0x-prefixed sibling hashes proving `leaf_hash` includes under
+            `root_hash`. Selective disclosure by construction — never
+            sibling receipts' identifiers.
+          items:
+            type: string
+        anchor:
+          type: object
+          nullable: true
+          description: |
+            The Tempo on-chain anchor for that day's root. Null before the
+            day's root has been anchored (daily roll-up + anchor happens
+            once per day, the next day).
+          additionalProperties: false
+          required: [tx_hash, chain, explorer_url, contract, issuer_address, block_number]
+          properties:
+            tx_hash:
+              type: string
+            chain:
+              type: string
+              example: tempo
+            explorer_url:
+              type: string
+              format: uri
+            contract:
+              type: string
+              description: Address of the Anchor contract that emitted the `Anchored` event
+            issuer_address:
+              type: string
+              description: Address that submitted the anchor transaction
+            block_number:
+              type: integer
+        sigsum:
+          type: object
+          nullable: true
+          description: |
+            Sigsum witness-cosigning evidence for that day's root. Null when
+            no log round-trip happened for that day (for example
+            `SIGSUM_LOG_URL` unset).
+          additionalProperties: false
+          required: [log_url, cosignatures]
+          properties:
+            log_url:
+              type: string
+              nullable: true
+            cosignatures:
+              type: array
+              items:
+                type: object
+            inclusion_proof:
+              type: object
+              nullable: true
+              description: |
+                Sigsum log inclusion proof for TaskFast's leaf within the log's
+                multi-submitter tree. Null when the leaf is not yet sequenced
+                or verification failed.
+              additionalProperties: false
+              required: [leaf_index, node_hashes, log_tree_size, log_root_hash]
+              properties:
+                leaf_index:
+                  type: integer
+                  minimum: 0
+                node_hashes:
+                  type: array
+                  items:
+                    type: string
+                log_tree_size:
+                  type: integer
+                  minimum: 1
+                log_root_hash:
+                  type: string
+
     OperatorIdentityCheck:
       type: object
       additionalProperties: false
@@ -7267,7 +7482,10 @@ components:
           type: string
         envelope_version:
           type: string
-          enum: [v0, v1]
+          description: |
+            v1 is the sole envelope format (gh#885 deleted v0 issuance and
+            every v0 receipt row outright).
+          enum: [v1]
         verified:
           type: boolean
           description: |

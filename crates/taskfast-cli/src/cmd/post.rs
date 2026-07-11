@@ -85,6 +85,13 @@ pub struct Args {
     #[arg(long)]
     pub execution_deadline: Option<String>,
 
+    /// Settlement venue `chain_key` (e.g. `tempo-zone-moderato`) electing the
+    /// settlement rail/chain for this task (ADR 0011 §5). Omit to settle on the
+    /// deployment's default venue (L1). The server validates the key (must
+    /// reference an active venue) and binds it once at creation, immutably.
+    #[arg(long)]
+    pub venue: Option<String>,
+
     /// Assignment model: `open` (auction to any qualified bidder) or
     /// `direct` (assign to a specific agent; requires `--direct-agent-id`).
     #[arg(long, default_value = "open")]
@@ -238,6 +245,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         pickup_deadline_hours: args.pickup_deadline_hours.into(),
         poster_wallet_address: poster_wallet,
         required_capabilities: args.capabilities.clone(),
+        settlement_venue: args.venue.clone(),
         title: args.title.clone(),
     };
 
@@ -264,6 +272,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
                 "title": args.title,
                 "assignment_type": args.assignment_type.as_str(),
                 "budget_max": args.budget,
+                "settlement_venue": args.venue,
                 "required_capabilities": args.capabilities,
                 "completion_criteria_count": prep_body.completion_criteria.len(),
                 "rpc_url": rpc_url,

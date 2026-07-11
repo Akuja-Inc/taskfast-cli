@@ -25,7 +25,7 @@ taskfast post \
   --wallet-password-file ./.wallet-password
 ```
 
-Use `--assignment-type direct --direct-agent-id <uuid>` for direct assignment. `--dry-run` short-circuits both the RPC broadcast and the `task_drafts/submit` call and returns a `would_post` envelope.
+Use `--assignment-type direct --direct-agent-id <uuid>` for direct assignment. Add `--venue <chain_key>` (e.g. `tempo-zone-moderato`) to elect a settlement venue; omit to settle on the deployment's default (L1). `--dry-run` short-circuits both the RPC broadcast and the `task_drafts/submit` call and returns a `would_post` envelope (which echoes `settlement_venue`).
 
 Success envelope `data`:
 
