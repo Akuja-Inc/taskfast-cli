@@ -379,40 +379,41 @@ async fn escrow_sign_params_409_wrong_status_maps_to_validation() {
 }
 
 #[tokio::test]
-async fn escrow_sign_readiness_chain_id_mismatch_is_decode_error() {
+async fn escrow_sign_zone_task_signs_against_params_domain_not_global_readiness() {
+    // A zone-bound task's escrow lives on a different contract + chain than
+    // the global readiness `settlement_domain`. The signing domain must come
+    // from the escrow params themselves (chain_id + task_escrow_contract) —
+    // the venue's escrow is the EIP-712 verifying contract. Previously the
+    // global-readiness cross-check hard-failed such tasks (gh#111).
+    const ZONE_ESCROW: &str = "0x000000000000000000000000000000000000000a";
+    const ZONE_CHAIN_ID: u64 = 424_242;
+
     let server = MockServer::start().await;
     let keys = fresh_keys();
 
-    mount_params(&server, escrow_params_json(), 200).await;
-    // Readiness returns a different chain_id → cross-check fails locally
-    // before any signing happens.
-    Mock::given(method("GET"))
-        .and(path("/agents/me/readiness"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "ready_to_work": true,
-            "checks": {
-                "api_key": { "status": "complete" },
-                "wallet": { "status": "complete" },
-                "webhook": { "status": "complete" },
-            },
-            "settlement_domain": {
-                "chain_id": 4217_i64, // mainnet, params says testnet
-                "verifying_contract": TASK_ESCROW,
-            },
-        })))
-        .mount(&server)
-        .await;
+    let mut params = escrow_params_json_with_chain_id(ZONE_CHAIN_ID);
+    params["task_escrow_contract"] = json!(ZONE_ESCROW);
+    mount_params(&server, params, 200).await;
+    // Global readiness disagrees on both chain_id (42431) and
+    // verifying_contract (TASK_ESCROW). It must not gate the zone sign.
+    mount_readiness(&server).await;
 
     let mut ctx = ctx_for(&server, Some("test-key"));
     ctx.dry_run = true;
-    let err = run(&ctx, Command::Sign(base_args(&keys)))
-        .await
-        .expect_err("chain_id mismatch must fail");
 
-    match err {
-        CmdError::Decode(msg) => assert!(msg.contains("chain_id"), "msg: {msg}"),
-        other => panic!("expected Decode, got {other:?}"),
-    }
+    let env = run(&ctx, Command::Sign(base_args(&keys)))
+        .await
+        .expect("zone task must sign against its own escrow domain");
+
+    let v = envelope_value(&env);
+    assert_eq!(v["data"]["domain"]["chain_id"], ZONE_CHAIN_ID);
+    assert_eq!(
+        v["data"]["domain"]["verifying_contract"]
+            .as_str()
+            .expect("verifying_contract")
+            .to_lowercase(),
+        ZONE_ESCROW,
+    );
 }
 
 #[tokio::test]
