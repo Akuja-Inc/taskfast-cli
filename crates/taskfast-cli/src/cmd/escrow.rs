@@ -6,7 +6,8 @@
 //! `taskfast bid accept` and drives them to `:accepted` without a browser:
 //!
 //!  1. `GET /bids/:id/escrow/params` → server-derived on-chain params.
-//!  2. `GET /agents/me/readiness` → EIP-712 `DistributionDomain`.
+//!  2. EIP-712 `DistributionDomain` from those params (chain_id +
+//!     task_escrow_contract) — the venue's escrow for zone-bound tasks.
 //!  3. ERC-20 `allowance` preflight; `approve` if short.
 //!  4. Random 32-byte salt → `compute_escrow_id` (matches Solidity).
 //!  5. EIP-712 `DistributionApproval(escrowId, deadline)` — `sign_distribution`.
@@ -35,7 +36,6 @@ use super::{
 };
 use crate::envelope::Envelope;
 
-use taskfast_agent::bootstrap;
 use taskfast_agent::chain::{compute_escrow_id, EscrowIdParams, TaskEscrow, IERC20};
 use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
 use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
@@ -170,31 +170,12 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         }
     };
 
-    // 3. Readiness → EIP-712 domain. settlement_domain must be populated
-    //    and cross-consistent with params.chain_id.
-    let readiness = bootstrap::get_readiness(&client)
-        .await
-        .map_err(CmdError::from)?;
-    let domain_spec = readiness.settlement_domain;
-    if domain_spec.chain_id != params.chain_id {
-        return Err(CmdError::Decode(format!(
-            "readiness chain_id={} disagrees with escrow params chain_id={}",
-            domain_spec.chain_id, params.chain_id
-        )));
-    }
-    let verifying_contract_str = domain_spec.verifying_contract.to_string();
-    let verifying_contract: Address = verifying_contract_str.parse().map_err(|e| {
-        CmdError::Decode(format!(
-            "readiness returned invalid verifying_contract `{verifying_contract_str}`: {e}"
-        ))
-    })?;
-    let chain_id_u64 = u64::try_from(params.chain_id).map_err(|_| {
-        CmdError::Decode(format!(
-            "escrow params chain_id={} is negative",
-            params.chain_id
-        ))
-    })?;
-    let domain = DistributionDomain::new(chain_id_u64, verifying_contract);
+    // 3. The EIP-712 signing domain comes from the escrow params themselves
+    //    (chain_id + task_escrow_contract), built below once task_escrow is
+    //    parsed. For a zone-bound task that is the venue's escrow — the
+    //    contract that verifies the DistributionApproval. Sourcing the domain
+    //    from the global `GET /agents/me/readiness` settlement_domain instead
+    //    hard-failed zone tasks whose escrow lives off the L1 contract (gh#111).
 
     // 4. Parse addresses + scale decimal amounts to U256 raw units.
     let token_address: Address = params.token_address.parse().map_err(|e| {
@@ -241,16 +222,18 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         ));
     }
 
-    // Cross-check: the readiness domain's verifying_contract must equal the
-    // task_escrow contract returned by params. A mismatch means the server
-    // is stitching two different chain configs — signing against that would
-    // yield an unrecoverable signature.
-    if verifying_contract != task_escrow {
-        return Err(CmdError::Decode(format!(
-            "readiness verifying_contract={verifying_contract:#x} \
-             disagrees with escrow params task_escrow_contract={task_escrow:#x}"
-        )));
-    }
+    // Signing domain: the escrow that will verify the DistributionApproval is
+    // task_escrow_contract itself (the venue's escrow for a zone-bound task),
+    // so it is the EIP-712 verifying contract. chain_id likewise comes from the
+    // per-task params, not the global readiness domain (gh#111).
+    let chain_id_u64 = u64::try_from(params.chain_id).map_err(|_| {
+        CmdError::Decode(format!(
+            "escrow params chain_id={} is negative",
+            params.chain_id
+        ))
+    })?;
+    let verifying_contract = task_escrow;
+    let domain = DistributionDomain::new(chain_id_u64, verifying_contract);
 
     let decimals = u8::try_from(params.decimals).map_err(|_| {
         CmdError::Decode(format!(
