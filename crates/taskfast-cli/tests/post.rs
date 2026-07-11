@@ -47,6 +47,7 @@ fn base_args(wallet_address: Option<String>, keystore: Option<String>) -> Args {
         criteria_file: None,
         pickup_deadline_hours: PickupDeadlineHours::H24,
         execution_deadline: None,
+        venue: None,
         assignment_type: AssignmentType::Open,
         direct_agent_id: None,
         wallet_address,
@@ -489,6 +490,78 @@ async fn post_forwards_completion_criteria() {
     let envelope = run(&ctx_for(&api_server, Some("test-key")), args)
         .await
         .expect("post with criteria should succeed");
+    let v = envelope_value(&envelope);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["task_id"], task_id.to_string());
+}
+
+/// `--venue` must forward `settlement_venue` in the `POST /task_drafts` body so
+/// the task binds the elected settlement chain (ADR 0011 §5). The mock only
+/// matches when the field is present with the exact chain_key, so a dropped
+/// `settlement_venue` fails the prepare request rather than silently binding
+/// the default venue.
+#[tokio::test]
+async fn post_forwards_settlement_venue() {
+    let api_server = MockServer::start().await;
+    let rpc_server = MockServer::start().await;
+    let _ = mount_network_config_mock(&api_server).await;
+
+    let signer = PrivateKeySigner::random();
+    let wallet_addr = format!("{:#x}", signer.address());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let keystore_path = tmp.path().join("wallet.json");
+    taskfast_agent::keystore::save_signer(&signer, &keystore_path, "pw").expect("keystore");
+    let password_path = tmp.path().join("pw");
+    std::fs::write(&password_path, b"pw").unwrap();
+
+    let draft_id = uuid::Uuid::new_v4();
+    let task_id = uuid::Uuid::new_v4();
+    let calldata_hex = {
+        let mut buf = vec![0xa9u8, 0x05, 0x9c, 0xbb];
+        buf.extend([0u8; 32]);
+        buf.extend([0u8; 32]);
+        format!("0x{}", hex::encode(buf))
+    };
+    let token_addr = "0x20c0000000000000000000000000000000000000";
+    let tx_hash_hex = format!("0x{}", "aa".repeat(32));
+
+    Mock::given(method("POST"))
+        .and(path("/task_drafts"))
+        .and(body_partial_json(json!({
+            "settlement_venue": "tempo-zone-moderato"
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "draft_id": draft_id,
+            "payload_to_sign": calldata_hex,
+            "token_address": token_addr,
+        })))
+        .mount(&api_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path(format!("/task_drafts/{draft_id}/submit")))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": task_id,
+            "status": "open",
+            "submission_fee_status": "pending_confirmation",
+            "submission_fee_tx_hash": tx_hash_hex,
+        })))
+        .mount(&api_server)
+        .await;
+
+    mount_rpc_mocks(&rpc_server, &tx_hash_hex).await;
+
+    let mut args = base_args(
+        Some(wallet_addr.clone()),
+        Some(keystore_path.display().to_string()),
+    );
+    args.wallet_password_file = Some(password_path);
+    args.rpc_url = Some(rpc_server.uri());
+    args.venue = Some("tempo-zone-moderato".into());
+
+    let envelope = run(&ctx_for(&api_server, Some("test-key")), args)
+        .await
+        .expect("post with --venue should succeed");
     let v = envelope_value(&envelope);
     assert_eq!(v["ok"], true);
     assert_eq!(v["data"]["task_id"], task_id.to_string());

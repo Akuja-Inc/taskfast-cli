@@ -33,6 +33,7 @@ fn sample_prepare_request() -> TaskDraftPrepareRequest {
             .try_into()
             .expect("valid addr"),
         required_capabilities: vec!["coding".into()],
+        settlement_venue: None,
         title: "haiku".into(),
     }
 }

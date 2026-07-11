@@ -87,8 +87,11 @@ Omitting criteria is allowed but disables the objective payout gate (workers rel
 ```bash
 --pickup-deadline-hours <1|4|12|24|72>  # required; bidding-window length
 --execution-deadline <duration>    # e.g. 24h, 3d
+--venue <chain_key>                # elect settlement venue (e.g. tempo-zone-moderato); omit for default (L1)
 --network mainnet|testnet          # overrides config.json; see Network-Configuration
 ```
+
+`--venue` binds the task's settlement rail/chain (ADR 0011 §5). The server rejects an unknown, provisioning, draining, or suspended key; the election is immutable once the task is created.
 
 ## Dry-run
 

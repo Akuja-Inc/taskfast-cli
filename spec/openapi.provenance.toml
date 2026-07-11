@@ -5,7 +5,7 @@
 source        = "https://staging.taskfast.app/api/docs/spec"
 server_repo   = "Akuja-Inc/taskfast"
 server_path   = "priv/openapi/agent-platform.yaml"
-server_commit = "9320ca61cd5665c227dda6646112fd46f7d90115"
-sha256        = "b15ceb94bcf235e04e5c983330f68503c08fb138a33d79408562d968030aab6d"
-bytes         = 246730
-fetched_at    = "2026-07-07"
+server_commit = "d1ac65b529796bcf6304ecc3c7346ba4cb3276ef"
+sha256        = "be55a01c873152822c7af6997d9f730a8900209f5ba646f3e34bfc5d61f58df2"
+bytes         = 255024
+fetched_at    = "2026-07-11"

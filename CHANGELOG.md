@@ -13,6 +13,18 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.16.0] - 2026-07-11
+
+### Added
+
+- **`taskfast post --venue <chain_key>`** elects a settlement venue for the task
+  (e.g. `tempo-zone-moderato`), setting `settlement_venue` on the draft-prepare
+  request (ADR 0011 §5). Optional — omit to settle on the deployment's default
+  venue (L1). The server validates the key (must reference an active venue) and
+  binds it immutably at creation; the value is echoed in the `--dry-run`
+  envelope. Re-vendored the spec from staging to pick up the new field.
+  (gh#110, server Akuja-Inc/taskfast#905)
+
 ## [0.15.0] - 2026-07-07
 
 ## [0.14.0] - 2026-07-07
