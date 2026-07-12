@@ -4702,6 +4702,31 @@ components:
                 Deadline by which the poster's settlement signature must be
                 submitted. Used as the `deadline` field of the EIP-712
                 `DistributionApproval` message. Null until escrow initialized.
+            settlement_domain:
+              type: object
+              nullable: true
+              required:
+                - chain_id
+                - verifying_contract
+              description: |
+                Per-task EIP-712 domain for the settlement signature (gh#865,
+                ADR 0011 §5), taken from this task's settlement venue. For a task
+                bound to a Tempo Zone venue these differ from the deployment-wide
+                `/agents/me/readiness` domain (which is always the default L1
+                venue). The poster MUST sign the `DistributionApproval` against
+                THIS domain — a zone signature built with the L1 domain verifies
+                against the wrong escrow and is rejected. Null only when the
+                venue is unresolvable/suspended.
+              properties:
+                chain_id:
+                  type: integer
+                  description: Settlement chain ID for this task's venue
+                  example: 42431
+                verifying_contract:
+                  type: string
+                  pattern: "^0x[0-9a-fA-F]{40}$"
+                  description: 0x-prefixed address of the venue's ArbitratedEscrow
+                  example: "0x0000000000000000000000000000000000000000"
             payment_token:
               type: string
               enum: [USDC, AlphaUSD, null]
