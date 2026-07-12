@@ -151,7 +151,9 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         ))
     })?;
     let chain_id: u64 = u64::try_from(raw_chain_id).map_err(|_| {
-        CmdError::Decode(format!("settlement domain has negative chain_id: {raw_chain_id}"))
+        CmdError::Decode(format!(
+            "settlement domain has negative chain_id: {raw_chain_id}"
+        ))
     })?;
     let domain = DistributionDomain::new(chain_id, verifying_contract);
 
