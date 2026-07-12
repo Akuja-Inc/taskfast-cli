@@ -3,13 +3,16 @@
 //! POSTs it to `/tasks/{id}/settle` to release escrowed funds.
 //!
 //! Pairs with server bead am-iyp6. The signing surface is identical to the
-//! one pinned in `taskfast_chains::tempo::sign_distribution`; the domain
-//! (`chain_id`, `verifying_contract`) is sourced at runtime from
-//! `GET /agents/me/readiness` so the same binary signs correctly on testnet
-//! and mainnet without client-side chain config.
+//! one pinned in `taskfast_chains::tempo::sign_distribution`. The domain
+//! (`chain_id`, `verifying_contract`) prefers the task's per-task
+//! `settlement_domain` (venue-scoped — a Tempo Zone escrow for a zone-bound
+//! task; gh#865, ADR 0011 §5) and falls back to the global
+//! `GET /agents/me/readiness` domain when the task carries none, so the same
+//! binary signs correctly on L1 testnet/mainnet and in a zone without
+//! client-side chain config.
 //!
-//! Flow: parse UUID → `get_task` (pull `escrow_id` + `settlement_deadline`) →
-//! `get_readiness` (pull `settlement_domain`) → load keystore → sign →
+//! Flow: parse UUID → `get_task` (pull `escrow_id` + `settlement_deadline` +
+//! `settlement_domain`) → readiness only if no per-task domain → sign →
 //! `POST /tasks/{id}/settle`. Dry-run skips the final POST but still signs
 //! so the envelope carries a real signature the caller can audit.
 //!
@@ -123,23 +126,33 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         }
     };
 
-    // 4. Fetch readiness for the EIP-712 domain (chain_id + verifying_contract).
-    //    Both fields are required by the spec, so a malformed response surfaces
-    //    as a Decode error from progenitor before reaching this site.
-    let readiness = bootstrap::get_readiness(&client)
-        .await
-        .map_err(CmdError::from)?;
-    let domain_spec = readiness.settlement_domain;
-    let verifying_contract_str = domain_spec.verifying_contract.to_string();
+    // 4. EIP-712 domain. Prefer the task's per-task `settlement_domain` — the
+    //    venue-scoped domain (a Tempo Zone escrow + chain_id for a zone-bound
+    //    task) that this task's escrow actually verifies against. Fall back to
+    //    the global `GET /agents/me/readiness` domain only when the task carries
+    //    none — a default-venue task, whose venue IS the readiness L1 domain, so
+    //    the two are identical. Signing a zone task against the L1 domain would
+    //    verify against the wrong escrow and the server would reject it (gh#865,
+    //    ADR 0011 §5; mirrors the `escrow sign` fix in gh#111).
+    let (raw_chain_id, verifying_contract_str): (i64, String) =
+        match task.settlement_domain.as_ref() {
+            Some(d) => (d.chain_id, d.verifying_contract.to_string()),
+            None => {
+                let readiness = bootstrap::get_readiness(&client)
+                    .await
+                    .map_err(CmdError::from)?;
+                let d = readiness.settlement_domain;
+                (d.chain_id, d.verifying_contract.to_string())
+            }
+        };
     let verifying_contract: Address = verifying_contract_str.parse().map_err(|e| {
         CmdError::Decode(format!(
-            "readiness returned invalid verifying_contract `{verifying_contract_str}`: {e}"
+            "settlement domain has invalid verifying_contract `{verifying_contract_str}`: {e}"
         ))
     })?;
-    let chain_id: u64 = u64::try_from(domain_spec.chain_id).map_err(|_| {
+    let chain_id: u64 = u64::try_from(raw_chain_id).map_err(|_| {
         CmdError::Decode(format!(
-            "readiness returned negative chain_id: {}",
-            domain_spec.chain_id
+            "settlement domain has negative chain_id: {raw_chain_id}"
         ))
     })?;
     let domain = DistributionDomain::new(chain_id, verifying_contract);

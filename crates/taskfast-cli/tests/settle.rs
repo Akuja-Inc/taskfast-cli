@@ -424,6 +424,73 @@ async fn settle_wallet_address_mismatch_is_usage_error() {
 }
 
 #[tokio::test]
+async fn settle_prefers_per_task_settlement_domain_over_readiness() {
+    // gh#865 / #111 (settle half): a zone-bound task carries its own
+    // `settlement_domain` (the venue's escrow + chain_id). settle MUST sign
+    // against that, never the global L1 readiness domain — else the signature
+    // verifies against the wrong escrow and the zone rejects it. Readiness is
+    // deliberately NOT mounted: if settle fetched it, wiremock would 404 and
+    // this test would fail, proving the per-task domain short-circuits it.
+    const ZONE_CHAIN_ID: u64 = 421_700_005;
+    const ZONE_CONTRACT: &str = "0x00000000000000000000000000000000000000ee";
+
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+
+    let mut task = task_detail_json();
+    task["settlement_domain"] = json!({
+        "chain_id": ZONE_CHAIN_ID as i64,
+        "verifying_contract": ZONE_CONTRACT,
+    });
+    mount_task_get(&server, task).await;
+    // NO readiness mount, NO /settle mount — dry-run signs locally.
+
+    let mut ctx = ctx_for(&server, Some("test-key"));
+    ctx.dry_run = true;
+
+    let envelope = run(&ctx, base_args(&keys))
+        .await
+        .expect("zone settle dry-run should succeed without readiness");
+    let v = envelope_value(&envelope);
+    assert_eq!(v["data"]["domain"]["chain_id"], ZONE_CHAIN_ID as i64);
+    assert_eq!(v["data"]["domain"]["verifying_contract"], ZONE_CONTRACT);
+
+    // Strongest assertion: the signature recovers under the ZONE domain and
+    // NOT under the L1 readiness domain — proving which domain was signed.
+    let sig = v["data"]["signature"].as_str().expect("signature string");
+    let deadline_signed = v["data"]["deadline"].as_u64().expect("deadline u64");
+    let escrow_id = B256::from_str(ESCROW_ID).unwrap();
+
+    let zone_domain =
+        DistributionDomain::new(ZONE_CHAIN_ID, Address::from_str(ZONE_CONTRACT).unwrap());
+    assert!(
+        verify_distribution(
+            sig,
+            &zone_domain,
+            escrow_id,
+            U256::from(deadline_signed),
+            keys.address
+        )
+        .expect("verify zone"),
+        "signature must recover under the task's zone domain"
+    );
+
+    let l1_domain =
+        DistributionDomain::new(CHAIN_ID, Address::from_str(VERIFYING_CONTRACT).unwrap());
+    assert!(
+        !verify_distribution(
+            sig,
+            &l1_domain,
+            escrow_id,
+            U256::from(deadline_signed),
+            keys.address
+        )
+        .expect("verify l1"),
+        "signature must NOT recover under the global L1 readiness domain"
+    );
+}
+
+#[tokio::test]
 async fn settle_missing_settlement_domain_decodes_as_error() {
     // settlement_domain is now a required field on AgentReadiness — a server
     // omitting it is a contract violation, surfaced as a Decode error rather

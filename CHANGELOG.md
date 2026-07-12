@@ -13,6 +13,19 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Fixed
+
+- **`taskfast settle` signs the `DistributionApproval` against the task's
+  per-task `settlement_domain`** (venue-scoped — a Tempo Zone escrow + chain_id)
+  instead of the global `GET /agents/me/readiness` domain, which is always the
+  default L1 venue. A zone-bound task's escrow verifies against the venue
+  contract, so signing with the L1 domain was rejected — the fail-closed wall
+  for zone settlements. Falls back to the readiness domain when the task carries
+  none (a default-venue task, whose venue is the identical L1 domain), so default
+  settles are byte-unchanged. Completes the `settle` half of gh#111 (the
+  `escrow sign` half shipped in #113). Re-vendored the spec from staging to pick
+  up `TaskDetail.settlement_domain`. (gh#111, server Akuja-Inc/taskfast#913)
+
 ## [0.16.0] - 2026-07-11
 
 ### Added
