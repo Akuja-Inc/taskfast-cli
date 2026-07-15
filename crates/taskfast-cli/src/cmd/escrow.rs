@@ -494,9 +494,8 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         // Checked back to i64 at the API boundary — `deadline_unix` originates as
         // the i64 `poster_approval_deadline`, so this always fits, but an explicit
         // conversion refuses to silently wrap if the generated type ever widens.
-        let deadline_i64 = i64::try_from(deadline_unix).map_err(|_| {
-            CmdError::Decode(format!("deadline {deadline_unix} exceeds i64 range"))
-        })?;
+        let deadline_i64 = i64::try_from(deadline_unix)
+            .map_err(|_| CmdError::Decode(format!("deadline {deadline_unix} exceeds i64 range")))?;
         let body = BidEscrowFinalizeRequest {
             voucher: voucher_hex.clone(),
             poster_approval_signature: signature_hex.clone(),
