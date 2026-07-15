@@ -124,8 +124,11 @@ pub struct ListArgs {
     #[arg(long)]
     pub cursor: Option<String>,
 
-    /// Max items per page. Defaults to 20 — keeps `task list` envelopes
-    /// compact for routine worker polling.
+    /// Page size requested from the server. The default active-only mine
+    /// view treats this as a stop threshold: it pages in whole pages so a
+    /// resume never skips rows, and may return a few more items than this.
+    /// Defaults to 20 — keeps `task list` envelopes compact for routine
+    /// worker polling.
     #[arg(long, default_value_t = 20)]
     pub limit: i64,
 }

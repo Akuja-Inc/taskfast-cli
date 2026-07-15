@@ -297,22 +297,38 @@ async fn list_mine_active_pages_whole_pages_without_skipping() {
 
 #[tokio::test]
 async fn list_mine_default_filter_returns_whole_final_page() {
-    // `--limit` is a stop threshold, not a truncation: every active row of
-    // a consumed page is surfaced, because dropping rows while reusing the
-    // page's cursor would skip them permanently on resume.
+    // `--limit` is a stop threshold, not a truncation: the loop stops at the
+    // first page *boundary* with at least `limit` matches, so every active
+    // row of the final consumed page is surfaced even when that overshoots
+    // `limit`. Truncating instead, while reusing the page's cursor, would
+    // skip the dropped rows permanently on resume.
     let server = MockServer::start().await;
-    let body = json!({
-        "data": [
-            mine_task("00000000-0000-0000-0000-000000000001", "in_progress"),
-            mine_task("00000000-0000-0000-0000-000000000002", "assigned"),
-            mine_task("00000000-0000-0000-0000-000000000003", "under_review"),
-            mine_task("00000000-0000-0000-0000-000000000004", "disputed"),
-        ],
-        "meta": paginated(Some("next-abc")),
-    });
+    // Page 2 first (more specific matcher): two actives — crossing the
+    // `limit: 2` threshold mid-page — and a live cursor.
     Mock::given(method("GET"))
         .and(path("/agents/me/tasks"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .and(query_param("cursor", "p2"))
+        .and(query_param("limit", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                mine_task("00000000-0000-0000-0000-000000000003", "under_review"),
+                mine_task("00000000-0000-0000-0000-000000000004", "disputed"),
+            ],
+            "meta": paginated(Some("next-abc")),
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/agents/me/tasks"))
+        .and(query_param_is_missing("cursor"))
+        .and(query_param("limit", "2")) // no over-fetch multiplier
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                mine_task("00000000-0000-0000-0000-000000000001", "in_progress"),
+                mine_task("00000000-0000-0000-0000-000000000002", "completed"),
+            ],
+            "meta": paginated(Some("p2")),
+        })))
         .mount(&server)
         .await;
 
@@ -327,8 +343,21 @@ async fn list_mine_default_filter_returns_whole_final_page() {
         .expect("list mine should succeed");
 
     let v = envelope_value(&envelope);
-    let tasks = v["data"]["tasks"].as_array().expect("tasks array");
-    assert_eq!(tasks.len(), 4, "whole consumed page, no lossy truncation");
+    let ids: Vec<&str> = v["data"]["tasks"]
+        .as_array()
+        .expect("tasks array")
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-0000-0000-000000000003",
+            "00000000-0000-0000-0000-000000000004",
+        ],
+        "whole final page surfaced: 3 actives despite --limit 2"
+    );
     assert_eq!(v["data"]["meta"]["next_cursor"], "next-abc");
 }
 
