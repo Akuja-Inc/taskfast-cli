@@ -159,7 +159,9 @@ impl From<AssignmentType> for TaskDraftPrepareRequestAssignmentType {
 /// vendored spec. The generated newtype is the only encoding of the allowed
 /// set — the CLI never restates it, so a server policy change flows in via a
 /// spec re-vendor with no code edit here.
-fn pickup_hours_to_wire(hours: i64) -> Result<TaskDraftPrepareRequestPickupDeadlineHours, CmdError> {
+fn pickup_hours_to_wire(
+    hours: i64,
+) -> Result<TaskDraftPrepareRequestPickupDeadlineHours, CmdError> {
     TaskDraftPrepareRequestPickupDeadlineHours::try_from(hours).map_err(|_| CmdError::Validation {
         code: "pickup_deadline_invalid".into(),
         message: format!(

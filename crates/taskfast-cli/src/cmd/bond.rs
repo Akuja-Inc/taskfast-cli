@@ -42,10 +42,10 @@ use crate::envelope::Envelope;
 
 use taskfast_agent::chain::{compute_task_ref, TaskBond, IERC20};
 use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
+use taskfast_chains::tempo::TEMPO_MAINNET_CHAIN_ID;
 use taskfast_client::api::types::{
     GetStakeQuoteStakeSource, ReportStakePostTxBody, ReportStakePostTxBodyStakeSource,
 };
-use taskfast_chains::tempo::TEMPO_MAINNET_CHAIN_ID;
 use taskfast_client::map_api_error;
 
 /// `TaskBond.post` receipt polling defaults (same shape as `escrow sign`):
@@ -222,7 +222,9 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
         .as_deref()
         .map(|tb| {
             tb.parse().map_err(|e| {
-                CmdError::Usage(format!("--task-bond `{tb}` is not a valid EVM address: {e}"))
+                CmdError::Usage(format!(
+                    "--task-bond `{tb}` is not a valid EVM address: {e}"
+                ))
             })
         })
         .transpose()?;
