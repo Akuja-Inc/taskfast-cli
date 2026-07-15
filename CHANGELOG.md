@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.16.1] - 2026-07-15
+
 ### Changed
 
 - **`taskfast bond post` reads the task-bond contract address from the
