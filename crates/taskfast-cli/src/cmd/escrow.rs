@@ -41,6 +41,7 @@ use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
 use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
 use taskfast_client::api::types::{
     BidEscrowFinalizeRequest, BidEscrowFinalizeRequestPosterApprovalDeadline,
+    BidEscrowParamsResponse,
 };
 use taskfast_client::map_api_error;
 
@@ -49,13 +50,6 @@ use taskfast_client::map_api_error;
 /// longer hardcoded here; they come from `GET /config/network`.
 const TEMPO_MAINNET_CHAIN_ID: i64 = 4217;
 const TEMPO_TESTNET_CHAIN_ID: i64 = 42_431;
-
-/// Poster approval deadline horizon — built-in default when neither the
-/// `--approval-horizon` flag nor `approval_horizon` in the config file
-/// is set. 7 days tightens the blast radius on a leaked keystore vs the
-/// prior 30-day hardcode; CI flows that need the old window set
-/// `TASKFAST_APPROVAL_HORIZON=30d` or the config field.
-const DEFAULT_APPROVAL_HORIZON: Duration = Duration::from_hours(24 * 7);
 
 /// `TaskEscrow.open()` receipt polling defaults. Mainnet gets a 3min
 /// ceiling to ride out block-time jitter under congestion; testnet keeps
@@ -110,16 +104,6 @@ pub struct SignArgs {
     #[arg(long)]
     pub skip_allowance_check: bool,
 
-    /// Poster approval-deadline horizon — accepts human durations like
-    /// `7d`, `24h`, `3600s`. Falls back to `approval_horizon` in config,
-    /// then the built-in 7-day default.
-    #[arg(
-        long,
-        env = "TASKFAST_APPROVAL_HORIZON",
-        value_parser = humantime::parse_duration,
-    )]
-    pub approval_horizon: Option<Duration>,
-
     /// Receipt-polling ceiling — human duration (`3min`, `90s`). Falls
     /// back to `receipt_timeout` in config, then a chain-aware default
     /// (3min mainnet, 1min testnet).
@@ -163,6 +147,21 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                     message: "server omitted `arbitrator_address`; this deployment predates \
                               v2 arbitrated escrow — upgrade the server or use a CLI version \
                               that matches it"
+                        .into(),
+                });
+            }
+            // Same version-skew shape for the server-issued deadline: a server
+            // predating the deadline-floor rollout omits `poster_approval_*`,
+            // which this CLI now requires (it no longer computes a deadline).
+            if matches!(&mapped, taskfast_client::Error::Decode(_))
+                && (mapped.to_string().contains("poster_approval_deadline")
+                    || mapped.to_string().contains("poster_approval_min_lifetime"))
+            {
+                return Err(CmdError::Validation {
+                    code: "server_missing_approval_deadline".into(),
+                    message: "server omitted `poster_approval_deadline`; this deployment predates \
+                              the server-issued escrow deadline — upgrade the server or use a CLI \
+                              version that matches it"
                         .into(),
                 });
             }
@@ -302,18 +301,16 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         salt,
     });
 
-    // 8. Sign DistributionApproval(escrowId, deadline). Deadline is absolute
-    //    seconds. Horizon precedence: flag > config > 7d built-in default.
-    let approval_horizon = super::resolve_duration(
-        args.approval_horizon,
-        ctx.approval_horizon,
-        DEFAULT_APPROVAL_HORIZON,
-    );
-    let deadline_unix = u64::try_from(chrono::Utc::now().timestamp())
-        .map_err(|_| CmdError::Decode("system clock before epoch".into()))?
-        .saturating_add(approval_horizon.as_secs());
-    let deadline = U256::from(deadline_unix);
-    let signature_hex = sign_distribution(&signer, &domain, escrow_id, deadline)?;
+    // 8. Sign DistributionApproval(escrowId, deadline). The deadline is the
+    //    server-issued `poster_approval_deadline` (absolute Unix seconds), signed
+    //    verbatim — the CLI is a dumb orchestrator and does not own this policy
+    //    value. Defense-in-depth: if the just-fetched deadline already has less
+    //    than `poster_approval_min_lifetime` remaining, abort *before* any tx so
+    //    we never strand funds behind an approval the server would reject at
+    //    finalize (gh#118 / taskfast#935).
+    let mut deadline_unix = server_deadline_or_abort(&params)?;
+    let mut signature_hex =
+        sign_distribution(&signer, &domain, escrow_id, U256::from(deadline_unix))?;
 
     // 9. Build open / openWithMemo calldata up front — we reuse it for the
     //    dry-run envelope and the live broadcast.
@@ -486,18 +483,45 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     }
     let voucher_hex = format!("{voucher_tx:#x}");
 
-    // 12. POST finalize.
-    let body = BidEscrowFinalizeRequest {
-        voucher: voucher_hex.clone(),
-        poster_approval_signature: signature_hex.clone(),
-        poster_approval_deadline: BidEscrowFinalizeRequestPosterApprovalDeadline::Integer(
-            deadline_unix as i64,
-        ),
-        memo_hash: params.memo_hash.clone(),
-    };
-    let resp = match client.inner().finalize_bid_escrow(&bid_id, &body).await {
-        Ok(r) => r.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
+    // 12. POST finalize. The escrow is already funded on-chain, so the voucher
+    //     (open tx hash / escrowId) and salt are fixed. If the server rejects the
+    //     signed deadline as `deadline_below_minimum` (a fetch gone stale between
+    //     params and finalize), re-fetch params and re-sign *the same voucher*
+    //     with the fresh deadline — a cheap re-sign, no new tx, no orphaned
+    //     escrow. Bounded to one retry; the pre-broadcast abort makes it rare.
+    let mut attempts = 0u8;
+    let resp = loop {
+        // Checked back to i64 at the API boundary — `deadline_unix` originates as
+        // the i64 `poster_approval_deadline`, so this always fits, but an explicit
+        // conversion refuses to silently wrap if the generated type ever widens.
+        let deadline_i64 = i64::try_from(deadline_unix)
+            .map_err(|_| CmdError::Decode(format!("deadline {deadline_unix} exceeds i64 range")))?;
+        let body = BidEscrowFinalizeRequest {
+            voucher: voucher_hex.clone(),
+            poster_approval_signature: signature_hex.clone(),
+            poster_approval_deadline: BidEscrowFinalizeRequestPosterApprovalDeadline::Integer(
+                deadline_i64,
+            ),
+            memo_hash: params.memo_hash.clone(),
+        };
+        match client.inner().finalize_bid_escrow(&bid_id, &body).await {
+            Ok(r) => break r.into_inner(),
+            Err(e) => {
+                let mapped = map_api_error(e).await;
+                if attempts == 0 && is_deadline_below_minimum(&mapped) {
+                    attempts += 1;
+                    let fresh = match client.inner().get_bid_escrow_params(&bid_id).await {
+                        Ok(v) => v.into_inner(),
+                        Err(e) => return Err(map_api_error(e).await.into()),
+                    };
+                    deadline_unix = server_deadline_or_abort(&fresh)?;
+                    signature_hex =
+                        sign_distribution(&signer, &domain, escrow_id, U256::from(deadline_unix))?;
+                    continue;
+                }
+                return Err(mapped.into());
+            }
+        }
     };
 
     Ok(Envelope::success(
@@ -514,6 +538,50 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             "deadline": deadline_unix,
         }),
     ))
+}
+
+/// Return the server-issued `poster_approval_deadline` (Unix seconds) after the
+/// defense-in-depth floor check: if it already carries less than
+/// `poster_approval_min_lifetime` remaining, abort so no tx is ever broadcast
+/// against an approval the server would reject at finalize (gh#118). This should
+/// never fire when params are fetched immediately before signing — it catches a
+/// stale fetch, clock skew, or a retry.
+fn server_deadline_or_abort(params: &BidEscrowParamsResponse) -> Result<u64, CmdError> {
+    let deadline = u64::try_from(params.poster_approval_deadline).map_err(|_| {
+        CmdError::Decode(format!(
+            "server poster_approval_deadline={} is negative",
+            params.poster_approval_deadline
+        ))
+    })?;
+    let min_lifetime = u64::try_from(params.poster_approval_min_lifetime).map_err(|_| {
+        CmdError::Decode(format!(
+            "server poster_approval_min_lifetime={} is negative",
+            params.poster_approval_min_lifetime
+        ))
+    })?;
+    let now = u64::try_from(chrono::Utc::now().timestamp())
+        .map_err(|_| CmdError::Decode("system clock before epoch".into()))?;
+    let remaining = deadline.saturating_sub(now);
+    if remaining < min_lifetime {
+        return Err(CmdError::Validation {
+            code: "deadline_below_minimum".into(),
+            message: format!(
+                "server-issued deadline has {remaining}s remaining, below the \
+                 {min_lifetime}s minimum — aborting rather than sign an approval the \
+                 server will reject. Re-run once the server re-issues a deadline."
+            ),
+        });
+    }
+    Ok(deadline)
+}
+
+/// True when the API surfaced the server's `deadline_below_minimum` finalize
+/// rejection, so the caller can re-fetch params + re-sign rather than fail hard.
+fn is_deadline_below_minimum(err: &taskfast_client::Error) -> bool {
+    matches!(
+        err,
+        taskfast_client::Error::Validation { code, .. } if code == "deadline_below_minimum"
+    )
 }
 
 async fn erc20_balance_of(
@@ -648,9 +716,21 @@ mod tests {
     }
 
     #[test]
-    fn default_approval_horizon_is_seven_days() {
-        // Pinned: the whole point of #9 is trimming the 30-day hardcode to
-        // 7 days. If someone widens it, the gate-tightening premise breaks.
-        assert_eq!(DEFAULT_APPROVAL_HORIZON, Duration::from_hours(24 * 7));
+    fn deadline_below_minimum_detects_only_that_code() {
+        assert!(is_deadline_below_minimum(
+            &taskfast_client::Error::Validation {
+                code: "deadline_below_minimum".into(),
+                message: "x".into(),
+            }
+        ));
+        assert!(!is_deadline_below_minimum(
+            &taskfast_client::Error::Validation {
+                code: "validation_error".into(),
+                message: "x".into(),
+            }
+        ));
+        assert!(!is_deadline_below_minimum(&taskfast_client::Error::Server(
+            "deadline_below_minimum".into()
+        )));
     }
 }

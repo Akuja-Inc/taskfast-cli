@@ -13,6 +13,27 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Changed
+
+- **`taskfast escrow sign` signs the server-issued `DistributionApproval`
+  deadline instead of computing one locally.** The CLI is a dumb orchestrator:
+  it now reads `poster_approval_deadline` (server-issued, ~130 days out) from
+  `GET /bids/{id}/escrow/params` and signs it verbatim, so the deadline is
+  valid by construction and can never be a self-computed short value that
+  finalize rejects *after* funds are already escrowed on-chain (the
+  money-stranding defect). Two defense-in-depth safety nets, off the same API:
+  the sign aborts **before broadcasting any tx** if the deadline already has
+  less than the server's `poster_approval_min_lifetime` remaining, and a
+  `deadline_below_minimum` finalize rejection triggers a re-fetch + re-sign of
+  the same (already-funded) voucher rather than a hard failure. Must ship
+  before the server-side floor deploys. (gh#118, server Akuja-Inc/taskfast#935)
+
+### Removed
+
+- **`taskfast escrow sign --approval-horizon` flag, the `approval_horizon`
+  config field, and the `TASKFAST_APPROVAL_HORIZON` env var.** The deadline is
+  the server's policy value now; there is nothing local to override. (gh#118)
+
 ### Fixed
 
 - **`taskfast settle` signs the `DistributionApproval` against the task's

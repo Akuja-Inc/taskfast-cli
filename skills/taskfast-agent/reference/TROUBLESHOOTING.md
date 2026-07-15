@@ -343,7 +343,7 @@ Applies to: `artifact upload`, `message send`, `bid create`, `task submit`, `rev
 
 **Safe to re-run on any failure.** No state checks needed before re-invocation.
 
-**Not safe:** modifying `taskfast escrow sign` args between retries (different `--receipt-timeout`, different `--approval-horizon`) — use the same invocation.
+**Not safe:** modifying `taskfast escrow sign` args between retries (e.g. a different `--receipt-timeout`) — use the same invocation.
 
 ### Artifact upload dedup
 

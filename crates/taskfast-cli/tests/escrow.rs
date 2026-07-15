@@ -29,6 +29,11 @@ const WORKER_ADDR: &str = "0x0000000000000000000000000000000000000003";
 const PLATFORM_WALLET: &str = "0x0000000000000000000000000000000000000004";
 const ARBITRATOR_ADDR: &str = "0x0000000000000000000000000000000000000005";
 const CHAIN_ID: u64 = 42_431;
+/// Server-issued deadline the CLI signs verbatim. Far future (2100-01-01) so it
+/// clears the min-lifetime floor in happy-path fixtures.
+const POSTER_APPROVAL_DEADLINE: i64 = 4_102_444_800;
+/// 120 days — matches the on-chain DISPUTE_TIMEOUT floor the server mirrors.
+const POSTER_APPROVAL_MIN_LIFETIME: i64 = 10_368_000;
 
 fn ctx_for(server: &MockServer, key: Option<&str>) -> Ctx {
     Ctx {
@@ -77,7 +82,6 @@ fn base_args(keys: &Keys) -> SignArgs {
         wallet_address: None,
         rpc_url: Some("http://rpc.invalid".into()), // never hit in dry-run
         skip_allowance_check: false,
-        approval_horizon: None,
         receipt_timeout: None,
     }
 }
@@ -101,6 +105,8 @@ fn escrow_params_json_with_chain_id(chain_id: u64) -> Value {
         "decimals": 6,
         "memo_text": null,
         "memo_hash": null,
+        "poster_approval_deadline": POSTER_APPROVAL_DEADLINE,
+        "poster_approval_min_lifetime": POSTER_APPROVAL_MIN_LIFETIME,
     })
 }
 
@@ -149,27 +155,10 @@ async fn mount_readiness_with_chain_id(server: &MockServer, chain_id: u64) {
         .await;
 }
 
-/// Absolute tolerance for deadline-window assertions: the test grabs
-/// `now` seconds before/after the call, so any clock skew inside `sign()`
-/// sits inside this envelope.
-const DEADLINE_SLOP_SECS: u64 = 10;
-
-fn assert_deadline_near(deadline: u64, expected_horizon_secs: u64) {
-    let now = u64::try_from(chrono::Utc::now().timestamp()).expect("clock");
-    let low = now
-        .saturating_add(expected_horizon_secs)
-        .saturating_sub(DEADLINE_SLOP_SECS);
-    let high = now
-        .saturating_add(expected_horizon_secs)
-        .saturating_add(DEADLINE_SLOP_SECS);
-    assert!(
-        deadline >= low && deadline <= high,
-        "deadline {deadline} outside [{low}, {high}] for horizon {expected_horizon_secs}s"
-    );
-}
-
 #[tokio::test]
-async fn escrow_sign_dry_run_uses_seven_day_default_deadline() {
+async fn escrow_sign_dry_run_signs_server_issued_deadline_verbatim() {
+    // The CLI no longer computes a deadline — it signs the exact
+    // `poster_approval_deadline` the server returned in escrow params.
     let server = MockServer::start().await;
     let keys = fresh_keys();
     mount_params(&server, escrow_params_json(), 200).await;
@@ -184,66 +173,65 @@ async fn escrow_sign_dry_run_uses_seven_day_default_deadline() {
     let deadline = envelope_value(&env)["data"]["deadline"]
         .as_u64()
         .expect("deadline");
-    assert_deadline_near(deadline, 7 * 24 * 60 * 60);
+    assert_eq!(deadline, POSTER_APPROVAL_DEADLINE as u64);
 }
 
 #[tokio::test]
-async fn escrow_sign_dry_run_flag_overrides_default_horizon() {
+async fn escrow_sign_aborts_before_broadcast_when_deadline_below_min_lifetime() {
+    // Defense-in-depth: a server-issued deadline already inside its minimum
+    // lifetime (here, a past deadline) must abort before any tx is broadcast,
+    // so on-chain funds are never stranded behind an approval finalize rejects.
     let server = MockServer::start().await;
     let keys = fresh_keys();
-    mount_params(&server, escrow_params_json(), 200).await;
+    let mut params = escrow_params_json();
+    params["poster_approval_deadline"] = json!(1_700_000_000i64); // 2023 — long past
+    mount_params(&server, params, 200).await;
     mount_readiness(&server).await;
 
-    let mut ctx = ctx_for(&server, Some("k"));
-    ctx.dry_run = true;
-    let mut args = base_args(&keys);
-    args.approval_horizon = Some(std::time::Duration::from_hours(24)); // 1d
+    // Not dry-run: the abort must gate the real broadcast path. rpc_url points
+    // at an invalid host, so reaching RPC at all would surface a different error.
+    let err = run(
+        &ctx_for(&server, Some("k")),
+        Command::Sign(base_args(&keys)),
+    )
+    .await
+    .expect_err("below-minimum deadline must abort");
 
-    let env = run(&ctx, Command::Sign(args)).await.expect("dry-run");
-    let deadline = envelope_value(&env)["data"]["deadline"]
-        .as_u64()
-        .expect("deadline");
-    assert_deadline_near(deadline, 24 * 60 * 60);
+    match err {
+        CmdError::Validation { code, .. } => assert_eq!(code, "deadline_below_minimum"),
+        other => panic!("expected Validation(deadline_below_minimum), got {other:?}"),
+    }
 }
 
 #[tokio::test]
-async fn escrow_sign_dry_run_ctx_horizon_used_when_flag_absent() {
+async fn escrow_sign_params_missing_deadline_is_actionable_version_skew() {
+    // A server predating the deadline rollout omits `poster_approval_*`; the
+    // 200 body then fails to deserialize. Surface an actionable code instead of
+    // a raw serde "missing field" decode error.
     let server = MockServer::start().await;
     let keys = fresh_keys();
-    mount_params(&server, escrow_params_json(), 200).await;
-    mount_readiness(&server).await;
+    let mut params = escrow_params_json();
+    params
+        .as_object_mut()
+        .unwrap()
+        .remove("poster_approval_deadline");
+    params
+        .as_object_mut()
+        .unwrap()
+        .remove("poster_approval_min_lifetime");
+    mount_params(&server, params, 200).await;
 
-    let mut ctx = ctx_for(&server, Some("k"));
-    ctx.dry_run = true;
-    ctx.approval_horizon = Some(std::time::Duration::from_hours(2)); // 2h
+    let err = run(
+        &ctx_for(&server, Some("k")),
+        Command::Sign(base_args(&keys)),
+    )
+    .await
+    .expect_err("missing deadline field must fail");
 
-    let env = run(&ctx, Command::Sign(base_args(&keys)))
-        .await
-        .expect("dry-run");
-    let deadline = envelope_value(&env)["data"]["deadline"]
-        .as_u64()
-        .expect("deadline");
-    assert_deadline_near(deadline, 2 * 60 * 60);
-}
-
-#[tokio::test]
-async fn escrow_sign_dry_run_flag_beats_ctx() {
-    let server = MockServer::start().await;
-    let keys = fresh_keys();
-    mount_params(&server, escrow_params_json(), 200).await;
-    mount_readiness(&server).await;
-
-    let mut ctx = ctx_for(&server, Some("k"));
-    ctx.dry_run = true;
-    ctx.approval_horizon = Some(std::time::Duration::from_hours(24)); // 1d
-    let mut args = base_args(&keys);
-    args.approval_horizon = Some(std::time::Duration::from_hours(1)); // 1h — flag wins
-
-    let env = run(&ctx, Command::Sign(args)).await.expect("dry-run");
-    let deadline = envelope_value(&env)["data"]["deadline"]
-        .as_u64()
-        .expect("deadline");
-    assert_deadline_near(deadline, 60 * 60);
+    match err {
+        CmdError::Validation { code, .. } => assert_eq!(code, "server_missing_approval_deadline"),
+        other => panic!("expected Validation(server_missing_approval_deadline), got {other:?}"),
+    }
 }
 
 #[tokio::test]
