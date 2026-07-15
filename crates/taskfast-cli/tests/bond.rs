@@ -67,7 +67,7 @@ fn fresh_keys() -> Keys {
 fn base_args(keys: &Keys) -> PostArgs {
     PostArgs {
         task_id: TASK_ID.into(),
-        task_bond: TASK_BOND.into(),
+        task_bond: Some(TASK_BOND.into()),
         token: None, // exercises the default_stablecoin path
         amount: None,
         source: BondStakeSource::OperatorSelf,
@@ -98,9 +98,20 @@ fn network_config_json() -> Value {
                 "wss_url": "wss://rpc.moderato.tempo.xyz",
                 "explorer_url": "https://explore.testnet.tempo.xyz",
                 "default_stablecoin": STABLECOIN,
+                "task_bond_contract": TASK_BOND,
             }
         }
     })
+}
+
+/// Older/incomplete deployments: no `task_bond_contract` advertised.
+fn network_config_json_without_task_bond() -> Value {
+    let mut v = network_config_json();
+    v["networks"]["testnet"]
+        .as_object_mut()
+        .unwrap()
+        .remove("task_bond_contract");
+    v
 }
 
 async fn mount_quote(server: &MockServer, status: u16, body: Value) {
@@ -155,6 +166,53 @@ async fn dry_run_emits_would_post_bond_with_derived_task_ref_and_default_token()
     // salt is random 32 bytes; calldata is present.
     assert_eq!(data["salt"].as_str().unwrap().len(), 66);
     assert!(data["post_calldata"].as_str().unwrap().starts_with("0x"));
+}
+
+#[tokio::test]
+async fn task_bond_defaults_to_server_advertised_contract() {
+    let server = MockServer::start().await;
+    mount_quote(&server, 200, quote_json(None)).await;
+    mount_network_config(&server).await;
+    let keys = fresh_keys();
+
+    let mut ctx = ctx_for(&server, Some("test-key"));
+    ctx.dry_run = true;
+
+    let mut args = base_args(&keys);
+    args.task_bond = None; // no flag/env: server's task_bond_contract wins
+    let env = run(&ctx, Command::Post(args)).await.expect("dry-run ok");
+    let v = envelope_value(&env);
+    assert_eq!(
+        v["data"]["task_bond"].as_str().unwrap().to_lowercase(),
+        TASK_BOND.to_lowercase()
+    );
+}
+
+#[tokio::test]
+async fn missing_task_bond_everywhere_fails_closed() {
+    let server = MockServer::start().await;
+    mount_quote(&server, 200, quote_json(None)).await;
+    Mock::given(method("GET"))
+        .and(path("/config/network"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(network_config_json_without_task_bond()),
+        )
+        .mount(&server)
+        .await;
+    let keys = fresh_keys();
+
+    let mut ctx = ctx_for(&server, Some("test-key"));
+    ctx.dry_run = true;
+
+    let mut args = base_args(&keys);
+    args.task_bond = None;
+    let err = run(&ctx, Command::Post(args))
+        .await
+        .expect_err("no contract anywhere must fail");
+    match err {
+        CmdError::Server(msg) => assert!(msg.contains("task_bond_contract"), "msg: {msg}"),
+        other => panic!("expected Server, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -214,7 +272,7 @@ async fn bad_task_bond_address_is_usage_error() {
     ctx.dry_run = true;
 
     let mut args = base_args(&keys);
-    args.task_bond = "0xnothex".into();
+    args.task_bond = Some("0xnothex".into());
     let err = run(&ctx, Command::Post(args))
         .await
         .expect_err("bad task-bond must fail");

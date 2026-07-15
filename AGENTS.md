@@ -2,6 +2,17 @@
 
 This is the TaskFast CLI for autonomous agents. It is a thin orchestrator over the taskfast API, not a place where business logic or policy lives. The API is the single source of truth; the CLI's job is to call endpoints and stitch them together, plus the one thing only it can do (sign with the poster's passkey, since v2 is non-custodial and the server holds no party keys). It should never compute or hardcode values the server owns.
 
+### Deliberate client-side exceptions
+
+These look like violations of the above but are intentional — don't "fix" them:
+
+- **Fee-token allowlist** (`taskfast-chains/src/tempo/mod.rs`): a refuse-to-sign guard against a compromised server steering the fee `transfer` to an arbitrary ERC-20 — signing safety is the CLI's one unique job, so it deliberately does not trust the field it guards. Switch to server-sourced values once the API exposes a per-network fee-token address list.
+- **Client-operational tuning**: HTTP/receipt timeouts, poll cadence, retry backoff — the CLI's own runtime behavior, not protocol policy.
+- **Env→network mapping** (`taskfast-cli/src/lib.rs`): transitional until the server's one-network invariant lets the CLI select the sole advertised `/config/network` entry.
+- **`taskRef` derivation** (`cmd/bond.rs`): verifier protocol layout computed client-side because it feeds locally-signed calldata; ideally server-issued bond-post params later.
+- **Webhook `--default-events` list** (`cmd/webhook.rs`): CLI convenience default for a flag, not server policy.
+- **Active-status filters** (`cmd/task.rs`, `cmd/bid.rs`): presentation-only workarounds for missing server-side status query params; delete when the API grows them.
+
 ## Guidance
 
 - Apply Red Green Refactor TDD
