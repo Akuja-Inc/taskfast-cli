@@ -491,11 +491,17 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     //     escrow. Bounded to one retry; the pre-broadcast abort makes it rare.
     let mut attempts = 0u8;
     let resp = loop {
+        // Checked back to i64 at the API boundary — `deadline_unix` originates as
+        // the i64 `poster_approval_deadline`, so this always fits, but an explicit
+        // conversion refuses to silently wrap if the generated type ever widens.
+        let deadline_i64 = i64::try_from(deadline_unix).map_err(|_| {
+            CmdError::Decode(format!("deadline {deadline_unix} exceeds i64 range"))
+        })?;
         let body = BidEscrowFinalizeRequest {
             voucher: voucher_hex.clone(),
             poster_approval_signature: signature_hex.clone(),
             poster_approval_deadline: BidEscrowFinalizeRequestPosterApprovalDeadline::Integer(
-                deadline_unix as i64,
+                deadline_i64,
             ),
             memo_hash: params.memo_hash.clone(),
         };
@@ -562,8 +568,8 @@ fn server_deadline_or_abort(params: &BidEscrowParamsResponse) -> Result<u64, Cmd
             code: "deadline_below_minimum".into(),
             message: format!(
                 "server-issued deadline has {remaining}s remaining, below the \
-                 {min_lifetime}s minimum — refusing to broadcast (funds would strand). \
-                 Re-run once the server re-issues a deadline."
+                 {min_lifetime}s minimum — aborting rather than sign an approval the \
+                 server will reject. Re-run once the server re-issues a deadline."
             ),
         });
     }
