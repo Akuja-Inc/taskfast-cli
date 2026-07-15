@@ -4926,6 +4926,8 @@ components:
         - platform_wallet
         - chain_id
         - decimals
+        - poster_approval_deadline
+        - poster_approval_min_lifetime
       properties:
         bid_id:
           type: string
@@ -4973,6 +4975,21 @@ components:
           type: string
           nullable: true
           description: 0x-prefixed keccak256 of canonical memo text, or null if no memo
+        poster_approval_deadline:
+          type: integer
+          description: >-
+            Server-issued Unix timestamp (seconds) that the poster must sign into
+            the EIP-712 DistributionApproval verbatim and echo back at finalize.
+            The CLI no longer computes this — it is the server's policy value.
+          example: 1799999999
+        poster_approval_min_lifetime:
+          type: integer
+          description: >-
+            Minimum remaining lifetime (seconds) the deadline must still carry.
+            The CLI aborts before broadcasting any tx if
+            `poster_approval_deadline - now` is below this, so funds are never
+            stranded behind a too-short approval.
+          example: 10368000
 
     BidEscrowFinalizeRequest:
       type: object
