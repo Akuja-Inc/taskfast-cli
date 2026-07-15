@@ -76,10 +76,10 @@ pub struct Args {
     pub criteria_file: Option<PathBuf>,
 
     /// Pickup window in hours: how long the task stays open for bidding
-    /// before closing. Required; one of 1, 4, 12, 24, 72 (server contract).
-    /// Validated client-side so a bad value fails before the server 422.
+    /// before closing. Required. The server owns the set of allowed windows
+    /// (`422 pickup_deadline_required` on an invalid choice).
     #[arg(long)]
-    pub pickup_deadline_hours: PickupDeadlineHours,
+    pub pickup_deadline_hours: i64,
 
     /// Execution deadline (RFC3339 timestamp).
     #[arg(long)]
@@ -155,41 +155,20 @@ impl From<AssignmentType> for TaskDraftPrepareRequestAssignmentType {
     }
 }
 
-/// Allowed pickup-window lengths (hours). The server rejects anything outside
-/// this set (`422 pickup_deadline_required`); clap enforces it up front so a
-/// typoed value fails before the paid round-trip.
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum PickupDeadlineHours {
-    #[value(name = "1")]
-    H1,
-    #[value(name = "4")]
-    H4,
-    #[value(name = "12")]
-    H12,
-    #[value(name = "24")]
-    H24,
-    #[value(name = "72")]
-    H72,
-}
-
-impl PickupDeadlineHours {
-    fn as_i64(self) -> i64 {
-        match self {
-            Self::H1 => 1,
-            Self::H4 => 4,
-            Self::H12 => 12,
-            Self::H24 => 24,
-            Self::H72 => 72,
-        }
-    }
-}
-
-impl From<PickupDeadlineHours> for TaskDraftPrepareRequestPickupDeadlineHours {
-    fn from(h: PickupDeadlineHours) -> Self {
-        // Infallible: the variants are exactly the schema's allowed set, so the
-        // generated newtype's membership check cannot reject them here.
-        Self::try_from(h.as_i64()).expect("pickup window is a schema-valid choice")
-    }
+/// Convert `--pickup-deadline-hours` to the wire type generated from the
+/// vendored spec. The generated newtype is the only encoding of the allowed
+/// set — the CLI never restates it, so a server policy change flows in via a
+/// spec re-vendor with no code edit here.
+fn pickup_hours_to_wire(
+    hours: i64,
+) -> Result<TaskDraftPrepareRequestPickupDeadlineHours, CmdError> {
+    TaskDraftPrepareRequestPickupDeadlineHours::try_from(hours).map_err(|_| CmdError::Validation {
+        code: "pickup_deadline_invalid".into(),
+        message: format!(
+            "pickup window of {hours}h is not an allowed bidding window per the \
+             API contract; the server owns the valid set (422 pickup_deadline_required)"
+        ),
+    })
 }
 
 pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
@@ -242,7 +221,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         description: args.description.clone(),
         direct_agent_id,
         execution_deadline,
-        pickup_deadline_hours: args.pickup_deadline_hours.into(),
+        pickup_deadline_hours: pickup_hours_to_wire(args.pickup_deadline_hours)?,
         poster_wallet_address: poster_wallet,
         required_capabilities: args.capabilities.clone(),
         settlement_venue: args.venue.clone(),
@@ -605,14 +584,14 @@ mod tests {
     }
 
     #[test]
-    fn pickup_hours_rejects_out_of_set_and_maps_to_wire() {
-        use clap::ValueEnum;
-        // clap rejects a value outside the schema's allowed set — client-side,
-        // before any request is built.
-        assert!(PickupDeadlineHours::from_str("3", false).is_err());
-        // A valid choice parses and converts to the exact wire integer.
-        let hours = PickupDeadlineHours::from_str("24", false).expect("24 is valid");
-        let wire: TaskDraftPrepareRequestPickupDeadlineHours = hours.into();
+    fn pickup_hours_conversion_follows_api_contract() {
+        // The allowed set lives only in the vendored spec (via the generated
+        // newtype) — an out-of-set value maps to a validation error without
+        // the CLI restating the list anywhere.
+        let err = pickup_hours_to_wire(3).expect_err("3 is outside the contract set");
+        assert!(matches!(err, CmdError::Validation { .. }));
+        // A contract-valid choice converts to the exact wire integer.
+        let wire = pickup_hours_to_wire(24).expect("24 is contract-valid");
         assert_eq!(i64::from(wire), 24);
     }
 

@@ -38,32 +38,27 @@ use crate::envelope::Envelope;
 
 use taskfast_agent::chain::{compute_escrow_id, EscrowIdParams, TaskEscrow, IERC20};
 use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
-use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
+use taskfast_chains::tempo::{sign_distribution, DistributionDomain, TEMPO_MAINNET_CHAIN_ID};
 use taskfast_client::api::types::{
     BidEscrowFinalizeRequest, BidEscrowFinalizeRequestPosterApprovalDeadline,
     BidEscrowParamsResponse,
 };
 use taskfast_client::map_api_error;
 
-/// Tempo chain IDs — must match `DistributionDomain::mainnet`/`testnet`.
-/// Used by the network-aware receipt-timeout default. RPC URLs are no
-/// longer hardcoded here; they come from `GET /config/network`.
-const TEMPO_MAINNET_CHAIN_ID: i64 = 4217;
-const TEMPO_TESTNET_CHAIN_ID: i64 = 42_431;
-
 /// `TaskEscrow.open()` receipt polling defaults. Mainnet gets a 3min
-/// ceiling to ride out block-time jitter under congestion; testnet keeps
-/// the prior 1min budget. Unknown chain_ids fall back to 1min.
+/// ceiling to ride out block-time jitter under congestion; testnet and
+/// unknown chain_ids keep the prior 1min budget.
 const DEFAULT_RECEIPT_TIMEOUT_MAINNET: Duration = Duration::from_mins(3);
 const DEFAULT_RECEIPT_TIMEOUT_TESTNET: Duration = Duration::from_mins(1);
 const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Network-aware default receipt-timeout used when the caller supplies
-/// neither `--receipt-timeout` nor `receipt_timeout` in config.
+/// neither `--receipt-timeout` nor `receipt_timeout` in config. The mapping
+/// is client-side tuning; the chain-id constant it keys on lives once, in
+/// `taskfast_chains::tempo`. Negative ids fall through to the short budget.
 fn default_receipt_timeout(chain_id: i64) -> Duration {
-    match chain_id {
-        TEMPO_MAINNET_CHAIN_ID => DEFAULT_RECEIPT_TIMEOUT_MAINNET,
-        TEMPO_TESTNET_CHAIN_ID => DEFAULT_RECEIPT_TIMEOUT_TESTNET,
+    match u64::try_from(chain_id) {
+        Ok(TEMPO_MAINNET_CHAIN_ID) => DEFAULT_RECEIPT_TIMEOUT_MAINNET,
         _ => DEFAULT_RECEIPT_TIMEOUT_TESTNET,
     }
 }
@@ -686,6 +681,7 @@ mod tests {
 
     #[test]
     fn chain_id_constants_match_tempo_protocol() {
+        use taskfast_chains::tempo::TEMPO_TESTNET_CHAIN_ID;
         // Pinned against server truth (`lib/task_fast/payments/tempo_constants.ex`)
         // and the `DistributionDomain` domain-separator consumer. Drift here
         // would desync the EIP-712 signing domain from the on-chain verifier.
@@ -695,18 +691,12 @@ mod tests {
 
     #[test]
     fn default_receipt_timeout_mainnet_is_three_minutes() {
-        assert_eq!(
-            default_receipt_timeout(TEMPO_MAINNET_CHAIN_ID),
-            Duration::from_mins(3),
-        );
+        assert_eq!(default_receipt_timeout(4_217), Duration::from_mins(3));
     }
 
     #[test]
     fn default_receipt_timeout_testnet_is_one_minute() {
-        assert_eq!(
-            default_receipt_timeout(TEMPO_TESTNET_CHAIN_ID),
-            Duration::from_mins(1),
-        );
+        assert_eq!(default_receipt_timeout(42_431), Duration::from_mins(1));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use taskfast_cli::cmd::post::{run, Args, AssignmentType, PickupDeadlineHours};
+use taskfast_cli::cmd::post::{run, Args, AssignmentType};
 use taskfast_cli::cmd::{CmdError, Ctx};
 use taskfast_cli::{Envelope, Environment};
 
@@ -45,7 +45,7 @@ fn base_args(wallet_address: Option<String>, keystore: Option<String>) -> Args {
         capabilities: vec!["testing".into()],
         criteria: vec![],
         criteria_file: None,
-        pickup_deadline_hours: PickupDeadlineHours::H24,
+        pickup_deadline_hours: 24,
         execution_deadline: None,
         venue: None,
         assignment_type: AssignmentType::Open,

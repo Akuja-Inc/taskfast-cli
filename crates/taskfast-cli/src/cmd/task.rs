@@ -124,8 +124,11 @@ pub struct ListArgs {
     #[arg(long)]
     pub cursor: Option<String>,
 
-    /// Max items per page. Defaults to 20 — keeps `task list` envelopes
-    /// compact for routine worker polling.
+    /// Page size requested from the server. The default active-only mine
+    /// view treats this as a stop threshold: it pages in whole pages so a
+    /// resume never skips rows, and may return a few more items than this.
+    /// Defaults to 20 — keeps `task list` envelopes compact for routine
+    /// worker polling.
     #[arg(long, default_value_t = 20)]
     pub limit: i64,
 }
@@ -771,6 +774,10 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
 /// filter. Everything outside this set (completed, cancelled, expired,
 /// …) is treated as closed noise and dropped unless the caller opts in
 /// with `--status all` or a specific `--status <name>`.
+///
+/// ponytail: presentation-only workaround — this classification is server
+/// state-machine knowledge; delete it (and the paging loop below) once the
+/// API grows an active/status filter on `GET /agents/me/tasks`.
 const ACTIVE_STATUSES: &[&str] = &[
     "assigned",
     "in_progress",
@@ -779,52 +786,66 @@ const ACTIVE_STATUSES: &[&str] = &[
     "remedied",
 ];
 
-/// Multiplier applied to `--limit` when the active-only filter is in
-/// effect. The server doesn't expose an `Active` aggregate, so we
-/// over-fetch and filter client-side to keep the user-visible page
-/// roughly limit-sized even when some rows get dropped. A strict
-/// pagination invariant is impossible without server support; this is
-/// a best-effort mitigation.
-const ACTIVE_FETCH_MULTIPLIER: i64 = 2;
-
 async fn list_mine(
     client: &TaskFastClient,
     args: &ListArgs,
 ) -> Result<serde_json::Value, CmdError> {
-    let apply_active_filter = args.status.is_none();
-    let status = args.status.map(ListMyTasksStatus::from);
-    let fetch_limit = if apply_active_filter {
-        args.limit.saturating_mul(ACTIVE_FETCH_MULTIPLIER)
-    } else {
-        args.limit
-    };
-    let resp = match client
-        .inner()
-        .list_my_tasks(
-            args.cursor.as_deref(),
-            taskfast_client::page_limit(fetch_limit),
-            status,
-        )
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
-    let tasks = if apply_active_filter {
-        let limit_usize = usize::try_from(args.limit.max(0)).unwrap_or(usize::MAX);
-        resp.data
-            .into_iter()
-            .filter(|t| ACTIVE_STATUSES.contains(&t.status.as_str()))
-            .take(limit_usize)
-            .collect::<Vec<_>>()
-    } else {
-        resp.data
-    };
-    Ok(json!({
-        "kind": "mine",
-        "tasks": tasks,
-        "meta": resp.meta,
-    }))
+    if let Some(status) = args.status {
+        let resp = match client
+            .inner()
+            .list_my_tasks(
+                args.cursor.as_deref(),
+                taskfast_client::page_limit(args.limit),
+                Some(ListMyTasksStatus::from(status)),
+            )
+            .await
+        {
+            Ok(v) => v.into_inner(),
+            Err(e) => return Err(map_api_error(e).await.into()),
+        };
+        return Ok(json!({
+            "kind": "mine",
+            "tasks": resp.data,
+            "meta": resp.meta,
+        }));
+    }
+    // Active-only default view. The server has no active-status filter yet
+    // (upstream ask), so filter client-side — but advance in whole pages so
+    // the emitted `next_cursor` only ever points past fully-consumed pages
+    // and a resume never skips a filtered-out row. `--limit` is a stop
+    // threshold: paging stops at the first page boundary with at least that
+    // many matches, so a page may surface a few extra rows.
+    let want = usize::try_from(args.limit.max(0)).unwrap_or(usize::MAX);
+    let mut cursor = args.cursor.clone();
+    let mut tasks = Vec::new();
+    loop {
+        let resp = match client
+            .inner()
+            .list_my_tasks(
+                cursor.as_deref(),
+                taskfast_client::page_limit(args.limit),
+                None,
+            )
+            .await
+        {
+            Ok(v) => v.into_inner(),
+            Err(e) => return Err(map_api_error(e).await.into()),
+        };
+        tasks.extend(
+            resp.data
+                .into_iter()
+                .filter(|t| ACTIVE_STATUSES.contains(&t.status.as_str())),
+        );
+        let next = resp.meta.next_cursor.clone();
+        if tasks.len() >= want || next.is_none() {
+            return Ok(json!({
+                "kind": "mine",
+                "tasks": tasks,
+                "meta": resp.meta,
+            }));
+        }
+        cursor = next;
+    }
 }
 
 async fn list_queue(

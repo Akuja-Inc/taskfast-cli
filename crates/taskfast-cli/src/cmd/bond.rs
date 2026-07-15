@@ -7,8 +7,8 @@
 //! hand-run with raw `cast`. This command drives it end to end:
 //!
 //!  1. `GET /tasks/:id/stake/quote` → `required_amount` (bond base units).
-//!  2. Resolve the bond ERC-20 token + chain from `GET /config/network`
-//!     (`default_stablecoin`), and the TaskBond contract from `--task-bond`.
+//!  2. Resolve the bond ERC-20 token, chain, and TaskBond contract from
+//!     `GET /config/network` (`default_stablecoin`, `task_bond_contract`).
 //!  3. Derive `taskRef` (16 zero bytes ++ task UUID) + a random `salt`.
 //!  4. ERC-20 `allowance` preflight; `approve` the TaskBond contract if short.
 //!  5. `TaskBond.post(token, amount, taskRef, salt)` — broadcast + wait receipt.
@@ -16,12 +16,12 @@
 //!  7. Poll the quote until `bond_status=posted` (server verifies `BondPosted`
 //!     asynchronously).
 //!
-//! The server exposes neither the bond token address (beyond the deployment
-//! `default_stablecoin`) nor the TaskBond contract address, and the quote does
-//! not yet return `task_ref`/`salt` — so token defaults to `default_stablecoin`
-//! (override with `--token`) and the TaskBond address is a required flag. The
-//! verifier matches contract/token/taskRef/amount and does not pin salt, so a
-//! random salt is accepted.
+//! Token and TaskBond contract both come from the deployment's network config
+//! (`--token`/`--task-bond` override for custom-endpoint development). The
+//! quote does not yet return `task_ref`/`salt`, so `taskRef` is derived
+//! locally per the verifier's layout. The verifier matches
+//! contract/token/taskRef/amount and does not pin salt, so a random salt is
+//! accepted.
 //!
 //! Error mapping delegates to `map_api_error` (401|403→Auth, 409|422→
 //! Validation). Keystore / signing failures surface as `Wallet` (exit 5).
@@ -42,17 +42,15 @@ use crate::envelope::Envelope;
 
 use taskfast_agent::chain::{compute_task_ref, TaskBond, IERC20};
 use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
+use taskfast_chains::tempo::TEMPO_MAINNET_CHAIN_ID;
 use taskfast_client::api::types::{
     GetStakeQuoteStakeSource, ReportStakePostTxBody, ReportStakePostTxBodyStakeSource,
 };
 use taskfast_client::map_api_error;
 
-/// Tempo mainnet chain ID — mirrors the `escrow sign` receipt-timeout default
-/// (mainnet gets a longer ceiling; testnet/unknown share the shorter one).
-const TEMPO_MAINNET_CHAIN_ID: i64 = 4217;
-
 /// `TaskBond.post` receipt polling defaults (same shape as `escrow sign`):
-/// 3min mainnet, 1min testnet, 1min for unknown chains.
+/// 3min mainnet, 1min testnet, 1min for unknown chains. The mainnet chain-id
+/// constant lives once, in `taskfast_chains::tempo`.
 const DEFAULT_RECEIPT_TIMEOUT_MAINNET: Duration = Duration::from_mins(3);
 const DEFAULT_RECEIPT_TIMEOUT_TESTNET: Duration = Duration::from_mins(1);
 const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -64,8 +62,8 @@ const DEFAULT_VERIFY_TIMEOUT: Duration = Duration::from_mins(1);
 const VERIFY_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 fn default_receipt_timeout(chain_id: i64) -> Duration {
-    match chain_id {
-        TEMPO_MAINNET_CHAIN_ID => DEFAULT_RECEIPT_TIMEOUT_MAINNET,
+    match u64::try_from(chain_id) {
+        Ok(TEMPO_MAINNET_CHAIN_ID) => DEFAULT_RECEIPT_TIMEOUT_MAINNET,
         _ => DEFAULT_RECEIPT_TIMEOUT_TESTNET,
     }
 }
@@ -106,11 +104,11 @@ pub struct PostArgs {
     /// Target task UUID. The auction task whose operator bond you are posting.
     pub task_id: String,
 
-    /// TaskBond contract address (`0x`-prefixed). The server does not advertise
-    /// it. On Tempo Moderato testnet this is
-    /// `0x31de2fd7d1d4bfcfb3d2b4bfc30f6b46f2b55db2`.
+    /// TaskBond contract address (`0x`-prefixed). Defaults to the deployment's
+    /// `task_bond_contract` from `GET /config/network`; pass this only to
+    /// override (e.g. custom-endpoint development).
     #[arg(long, env = "BOND_ADDRESS")]
-    pub task_bond: String,
+    pub task_bond: Option<String>,
 
     /// Bond ERC-20 token address (`0x`-prefixed). Defaults to the deployment's
     /// `default_stablecoin` from `GET /config/network`.
@@ -216,13 +214,20 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
         return Err(CmdError::Usage("bond amount resolves to 0".into()));
     }
 
-    // 4. Parse the TaskBond contract (required; not server-advertised).
-    let task_bond: Address = args.task_bond.parse().map_err(|e| {
-        CmdError::Usage(format!(
-            "--task-bond `{}` is not a valid EVM address: {e}",
-            args.task_bond
-        ))
-    })?;
+    // 4. Parse an explicit TaskBond override up front so a typo fails before
+    //    any signing or network round-trip; the server-advertised default is
+    //    resolved after the network-config fetch (step 6).
+    let task_bond_override: Option<Address> = args
+        .task_bond
+        .as_deref()
+        .map(|tb| {
+            tb.parse().map_err(|e| {
+                CmdError::Usage(format!(
+                    "--task-bond `{tb}` is not a valid EVM address: {e}"
+                ))
+            })
+        })
+        .transpose()?;
 
     // 5. Load signer + preflight the wallet address.
     let keystore_ref = args.keystore.as_deref().map(str::to_string).or_else(|| {
@@ -251,8 +256,28 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
         }
     }
 
-    // 6. Resolve chain + token + RPC URL from the deployment's network config.
-    let (rpc_url, chain_id, default_stablecoin) = resolve_network(ctx, &client, &args).await?;
+    // 6. Resolve chain + token + contracts + RPC URL from the deployment's
+    //    network config.
+    let (rpc_url, chain_id, default_stablecoin, task_bond_contract) =
+        resolve_network(ctx, &client, &args).await?;
+    let task_bond: Address = match task_bond_override {
+        Some(a) => a,
+        None => {
+            let tb = task_bond_contract.ok_or_else(|| {
+                CmdError::Server(
+                    "deployment does not advertise a TaskBond contract \
+                     (`task_bond_contract` in /config/network) for this network; \
+                     pass --task-bond to override"
+                        .into(),
+                )
+            })?;
+            tb.parse().map_err(|e| {
+                CmdError::Server(format!(
+                    "deployment task_bond_contract `{tb}` is not a valid EVM address: {e}"
+                ))
+            })?
+        }
+    };
     let token: Address = match args.token.as_deref() {
         Some(t) => t.parse().map_err(|e| {
             CmdError::Usage(format!("--token `{t}` is not a valid EVM address: {e}"))
@@ -439,15 +464,16 @@ async fn poll_until_posted(
     }
 }
 
-/// Resolve `(rpc_url, chain_id, default_stablecoin)` from `GET /config/network`
-/// for this environment's network. Mirrors `post::resolve_rpc_url`'s override
-/// handling and same-host proxy guard, but also surfaces `chain_id` and the
-/// bond token address, which the bond flow needs from the same entry.
+/// Resolve `(rpc_url, chain_id, default_stablecoin, task_bond_contract)` from
+/// `GET /config/network` for this environment's network. Mirrors
+/// `post::resolve_rpc_url`'s override handling and same-host proxy guard, but
+/// also surfaces `chain_id` and the bond token + contract addresses, which
+/// the bond flow needs from the same entry.
 async fn resolve_network(
     ctx: &Ctx,
     client: &taskfast_client::TaskFastClient,
     args: &PostArgs,
-) -> Result<(String, i64, Option<String>), CmdError> {
+) -> Result<(String, i64, Option<String>, Option<String>), CmdError> {
     let network = ctx.environment.network();
     let cfg = client.fetch_network_config().await.map_err(|e| match e {
         taskfast_client::Error::Auth(_) | taskfast_client::Error::Validation { .. } => {
@@ -481,7 +507,12 @@ async fn resolve_network(
         }
         entry.rpc_url.clone()
     };
-    Ok((rpc_url, entry.chain_id, entry.default_stablecoin.clone()))
+    Ok((
+        rpc_url,
+        entry.chain_id,
+        entry.default_stablecoin.clone(),
+        entry.task_bond_contract.clone(),
+    ))
 }
 
 // ponytail: these three ERC-20 read helpers are copied verbatim from

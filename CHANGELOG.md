@@ -15,6 +15,19 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Changed
 
+- **`taskfast bond post` reads the task-bond contract address from the
+  server's `GET /config/network` (`task_bond_contract`).** `--task-bond` is
+  now an override for custom-endpoint development rather than the primary
+  input, and the command fails closed with a clear error when the deployment
+  publishes no contract. (#120)
+
+- **`taskfast post --pickup-deadline-hours` validates against the API
+  contract's allowed bidding windows** instead of a CLI-hardcoded value list.
+  The spec-generated wire type is the only encoding of the valid set, so a
+  server policy change reaches the CLI via a spec re-vendor with no code
+  edit; an out-of-contract value is a normal usage error instead of a latent
+  panic path. (#120)
+
 - **`taskfast escrow sign` signs the server-issued `DistributionApproval`
   deadline instead of computing one locally.** The CLI is a dumb orchestrator:
   it now reads `poster_approval_deadline` (server-issued, ~130 days out) from
@@ -35,6 +48,13 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   the server's policy value now; there is nothing local to override. (gh#118)
 
 ### Fixed
+
+- **`taskfast task list --active` no longer emits a `next_cursor` that skips
+  rows.** Pagination now advances in whole server pages: `--limit` is a stop
+  threshold rather than a hard cap, the final page is surfaced in full, and
+  the emitted cursor always resumes exactly where the listing stopped —
+  previously, rows filtered out of a partially-consumed page were permanently
+  lost to the next invocation. (#120)
 
 - **`taskfast settle` signs the `DistributionApproval` against the task's
   per-task `settlement_domain`** (venue-scoped — a Tempo Zone escrow + chain_id)
