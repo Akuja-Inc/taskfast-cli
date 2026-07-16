@@ -17,7 +17,7 @@ use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_client::api::types::{
-    BidDetailStatus, BidRequest, RejectBidBody, RejectBidBodyReason,
+    BidRequest, GetAgentBidsStatusItem, RejectBidBody, RejectBidBodyReason,
 };
 use taskfast_client::map_api_error;
 use taskfast_client::TaskFastClient;
@@ -47,34 +47,34 @@ pub struct ListArgs {
     #[arg(long, default_value_t = 20)]
     pub limit: i64,
 
-    /// Filter results by bid status. Applied client-side — the
-    /// `getAgentBids` endpoint has no status query param, so filtering here
-    /// avoids a jq/grep fallback at call sites without forcing a spec change.
+    /// Filter results by bid status. Forwarded to the `getAgentBids`
+    /// `status` query param — the server owns the filtering (taskfast#941).
     #[arg(long)]
     pub status: Option<BidStatusFilter>,
 }
 
-/// clap-friendly mirror of the generated `BidDetailStatus` enum. Lives here
-/// rather than in the codegen because `ValueEnum` needs `Clone + PartialEq`
-/// (which the generated enum already has) plus kebab-case — it's cheaper to
-/// maintain a 4-variant mirror than to teach clap about foreign serde attrs.
+/// clap-friendly mirror of the generated `GetAgentBidsStatusItem` enum. Lives
+/// here rather than in the codegen because `ValueEnum` needs kebab-case
+/// variants — cheaper to maintain a thin mirror than to teach clap about
+/// foreign serde attrs.
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum BidStatusFilter {
     Pending,
+    AcceptedPendingEscrow,
     Accepted,
     Rejected,
     Withdrawn,
 }
 
-impl BidStatusFilter {
-    fn matches(self, status: BidDetailStatus) -> bool {
-        matches!(
-            (self, status),
-            (Self::Pending, BidDetailStatus::Pending)
-                | (Self::Accepted, BidDetailStatus::Accepted)
-                | (Self::Rejected, BidDetailStatus::Rejected)
-                | (Self::Withdrawn, BidDetailStatus::Withdrawn)
-        )
+impl From<BidStatusFilter> for GetAgentBidsStatusItem {
+    fn from(f: BidStatusFilter) -> Self {
+        match f {
+            BidStatusFilter::Pending => Self::Pending,
+            BidStatusFilter::AcceptedPendingEscrow => Self::AcceptedPendingEscrow,
+            BidStatusFilter::Accepted => Self::Accepted,
+            BidStatusFilter::Rejected => Self::Rejected,
+            BidStatusFilter::Withdrawn => Self::Withdrawn,
+        }
     }
 }
 
@@ -134,44 +134,27 @@ async fn list_bids(
     client: &TaskFastClient,
     args: &ListArgs,
 ) -> Result<serde_json::Value, CmdError> {
+    // Server owns the status filtering (taskfast#941): forward `--status` as
+    // the `status` query param and return the page as-is. No client-side
+    // post-filter, so `meta` describes the result set directly.
+    let status = args.status.map(|f| vec![GetAgentBidsStatusItem::from(f)]);
     let resp = match client
         .inner()
         .get_agent_bids(
+            None,
             args.cursor.as_deref(),
             taskfast_client::page_limit(args.limit),
+            status.as_ref(),
         )
         .await
     {
         Ok(v) => v.into_inner(),
         Err(e) => return Err(map_api_error(e).await.into()),
     };
-    // Client-side filter: server has no status query param on /agents/me/bids.
-    // Bids lacking a status field (shouldn't happen on real responses) are
-    // dropped when a filter is supplied so we don't silently pass them through.
-    // `meta` describes the *server* page pre-filter; `filtered_count` is added
-    // when a filter applies so consumers can distinguish page semantics from
-    // the filtered result count.
-    let filter_applied = args.status.is_some();
-    let bids = match args.status {
-        Some(f) => resp
-            .data
-            .into_iter()
-            .filter(|b| b.status.is_some_and(|s| f.matches(s)))
-            .collect::<Vec<_>>(),
-        None => resp.data,
-    };
-    if filter_applied {
-        Ok(json!({
-            "bids": bids,
-            "meta": resp.meta,
-            "filtered_count": bids.len(),
-        }))
-    } else {
-        Ok(json!({
-            "bids": bids,
-            "meta": resp.meta,
-        }))
-    }
+    Ok(json!({
+        "bids": resp.data,
+        "meta": resp.meta,
+    }))
 }
 
 async fn create(ctx: &Ctx, args: CreateArgs) -> CmdResult {

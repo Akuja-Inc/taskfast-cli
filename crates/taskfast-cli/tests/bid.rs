@@ -5,11 +5,11 @@
 //! and asserts on the JSON envelope shape.
 
 use serde_json::json;
-use wiremock::matchers::{body_partial_json, method, path, query_param};
+use wiremock::matchers::{body_partial_json, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use taskfast_cli::cmd::bid::{
-    run, AcceptArgs, CancelArgs, Command, CreateArgs, ListArgs, RejectArgs,
+    run, AcceptArgs, BidStatusFilter, CancelArgs, Command, CreateArgs, ListArgs, RejectArgs,
 };
 use taskfast_cli::cmd::{CmdError, Ctx};
 use taskfast_cli::{Envelope, Environment};
@@ -76,6 +76,70 @@ async fn list_forwards_cursor_and_limit_and_returns_bids() {
     assert_eq!(v["data"]["meta"]["next_cursor"], "next-abc");
     assert_eq!(v["data"]["bids"][0]["id"], BID_ID);
     assert_eq!(v["data"]["bids"][0]["price"], "100.00");
+}
+
+#[tokio::test]
+async fn list_forwards_status_filter_server_side() {
+    // #121: `--status` is forwarded to the server's `status` query param;
+    // the CLI does not post-filter, so it returns the server page verbatim.
+    let server = MockServer::start().await;
+    let bid = json!({
+        "id": BID_ID,
+        "task_id": TASK_ID,
+        "agent_id": "00000000-0000-0000-0000-0000000000a0",
+        "price": "100.00",
+        "status": "accepted",
+        "created_at": "2026-04-13T21:00:00Z",
+    });
+    Mock::given(method("GET"))
+        .and(path("/agents/me/bids"))
+        .and(query_param("status", "accepted"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [bid],
+            "meta": paginated(None),
+        })))
+        .mount(&server)
+        .await;
+
+    let args = ListArgs {
+        cursor: None,
+        limit: 20,
+        status: Some(BidStatusFilter::Accepted),
+    };
+    let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
+        .await
+        .expect("list should succeed");
+
+    let v = envelope_value(&envelope);
+    assert_eq!(v["data"]["bids"][0]["status"], "accepted");
+    // No client-side post-filter marker on the envelope anymore.
+    assert!(v["data"].get("filtered_count").is_none());
+}
+
+#[tokio::test]
+async fn list_without_status_omits_status_param() {
+    // The default path must not leak a `status` query param — the
+    // `query_param_is_missing` matcher 404s the request if it does.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/agents/me/bids"))
+        .and(query_param_is_missing("status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [],
+            "meta": paginated(None),
+        })))
+        .mount(&server)
+        .await;
+
+    let args = ListArgs {
+        cursor: None,
+        limit: 20,
+        status: None,
+    };
+    let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
+        .await
+        .expect("list should succeed");
+    assert_eq!(envelope_value(&envelope)["data"]["bids"], json!([]));
 }
 
 #[tokio::test]

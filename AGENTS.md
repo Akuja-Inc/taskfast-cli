@@ -11,7 +11,6 @@ These look like violations of the above but are intentional — don't "fix" them
 - **Env→network mapping** (`crates/taskfast-cli/src/lib.rs`): transitional until the server's one-network invariant lets the CLI select the sole advertised `/config/network` entry.
 - **`taskRef` derivation** (`crates/taskfast-cli/src/cmd/bond.rs`): verifier protocol layout computed client-side because it feeds locally-signed calldata; ideally server-issued bond-post params later.
 - **Webhook `--default-events` list** (`crates/taskfast-cli/src/cmd/webhook.rs`): CLI convenience default for a flag, not server policy.
-- **Active-status filters** (`crates/taskfast-cli/src/cmd/task.rs`, `crates/taskfast-cli/src/cmd/bid.rs`): presentation-only workarounds for missing server-side status query params; delete when the API grows them.
 
 ## Guidance
 
