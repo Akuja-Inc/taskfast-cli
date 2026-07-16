@@ -33,7 +33,7 @@ use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_client::api::types::{
-    CompletionSubmission, DisputeRequest, ListMyTasksStatus, ReassignTaskBody, TaskEditRequest,
+    CompletionSubmission, DisputeRequest, ListMyTasksStatusItem, ReassignTaskBody, TaskEditRequest,
 };
 use taskfast_client::map_api_error;
 use taskfast_client::TaskFastClient;
@@ -113,10 +113,10 @@ pub struct ListArgs {
     pub kind: ListKind,
 
     /// Filter by task status. Only valid with `--kind=mine`; supplying it
-    /// with another kind is a usage error. When omitted on `--kind=mine`,
-    /// results are filtered client-side to the active set (assigned /
-    /// in_progress / under_review / disputed / remedied). Pass
-    /// `--status all` to restore the unfiltered historical view.
+    /// with another kind is a usage error. Omit it to get the server's
+    /// active set (assigned / in_progress / under_review / disputed /
+    /// remedied) — this endpoint only ever returns active-state tasks, so
+    /// the active set is both the default and the maximum.
     #[arg(long)]
     pub status: Option<TaskStatus>,
 
@@ -124,11 +124,8 @@ pub struct ListArgs {
     #[arg(long)]
     pub cursor: Option<String>,
 
-    /// Page size requested from the server. The default active-only mine
-    /// view treats this as a stop threshold: it pages in whole pages so a
-    /// resume never skips rows, and may return a few more items than this.
-    /// Defaults to 20 — keeps `task list` envelopes compact for routine
-    /// worker polling.
+    /// Page size requested from the server. Defaults to 20 — keeps
+    /// `task list` envelopes compact for routine worker polling.
     #[arg(long, default_value_t = 20)]
     pub limit: i64,
 }
@@ -211,7 +208,7 @@ pub enum ListKind {
     Posted,
 }
 
-/// Mirror of `ListMyTasksStatus` carved as a clap-friendly `ValueEnum`.
+/// Mirror of `ListMyTasksStatusItem` carved as a clap-friendly `ValueEnum`.
 ///
 /// The generated enum already derives `ValueEnum`-compatible serde, but
 /// clap's `ValueEnum` needs kebab-case variants and the `Display` impl
@@ -224,10 +221,9 @@ pub enum TaskStatus {
     Disputed,
     Remedied,
     Assigned,
-    All,
 }
 
-impl From<TaskStatus> for ListMyTasksStatus {
+impl From<TaskStatus> for ListMyTasksStatusItem {
     fn from(s: TaskStatus) -> Self {
         match s {
             TaskStatus::InProgress => Self::InProgress,
@@ -235,7 +231,6 @@ impl From<TaskStatus> for ListMyTasksStatus {
             TaskStatus::Disputed => Self::Disputed,
             TaskStatus::Remedied => Self::Remedied,
             TaskStatus::Assigned => Self::Assigned,
-            TaskStatus::All => Self::All,
         }
     }
 }
@@ -770,82 +765,33 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
     Ok(Envelope::success(ctx.environment, ctx.dry_run, data))
 }
 
-/// Task statuses considered "active" by the default `list --kind mine`
-/// filter. Everything outside this set (completed, cancelled, expired,
-/// …) is treated as closed noise and dropped unless the caller opts in
-/// with `--status all` or a specific `--status <name>`.
-///
-/// ponytail: presentation-only workaround — this classification is server
-/// state-machine knowledge; delete it (and the paging loop below) once the
-/// API grows an active/status filter on `GET /agents/me/tasks`.
-const ACTIVE_STATUSES: &[&str] = &[
-    "assigned",
-    "in_progress",
-    "under_review",
-    "disputed",
-    "remedied",
-];
-
 async fn list_mine(
     client: &TaskFastClient,
     args: &ListArgs,
 ) -> Result<serde_json::Value, CmdError> {
-    if let Some(status) = args.status {
-        let resp = match client
-            .inner()
-            .list_my_tasks(
-                args.cursor.as_deref(),
-                taskfast_client::page_limit(args.limit),
-                Some(ListMyTasksStatus::from(status)),
-            )
-            .await
-        {
-            Ok(v) => v.into_inner(),
-            Err(e) => return Err(map_api_error(e).await.into()),
-        };
-        return Ok(json!({
-            "kind": "mine",
-            "tasks": resp.data,
-            "meta": resp.meta,
-        }));
-    }
-    // Active-only default view. The server has no active-status filter yet
-    // (upstream ask), so filter client-side — but advance in whole pages so
-    // the emitted `next_cursor` only ever points past fully-consumed pages
-    // and a resume never skips a filtered-out row. `--limit` is a stop
-    // threshold: paging stops at the first page boundary with at least that
-    // many matches, so a page may surface a few extra rows.
-    let want = usize::try_from(args.limit.max(0)).unwrap_or(usize::MAX);
-    let mut cursor = args.cursor.clone();
-    let mut tasks = Vec::new();
-    loop {
-        let resp = match client
-            .inner()
-            .list_my_tasks(
-                cursor.as_deref(),
-                taskfast_client::page_limit(args.limit),
-                None,
-            )
-            .await
-        {
-            Ok(v) => v.into_inner(),
-            Err(e) => return Err(map_api_error(e).await.into()),
-        };
-        tasks.extend(
-            resp.data
-                .into_iter()
-                .filter(|t| ACTIVE_STATUSES.contains(&t.status.as_str())),
-        );
-        let next = resp.meta.next_cursor.clone();
-        if tasks.len() >= want || next.is_none() {
-            return Ok(json!({
-                "kind": "mine",
-                "tasks": tasks,
-                "meta": resp.meta,
-            }));
-        }
-        cursor = next;
-    }
+    // The server owns the active-status classification: with no `status`
+    // filter, `GET /agents/me/tasks` returns exactly the active set
+    // (assigned / in_progress / under_review / disputed / remedied), and a
+    // supplied `--status` narrows within it (taskfast#941). One page in, one
+    // page out — no client-side filtering or re-paging.
+    let status = args.status.map(|s| vec![ListMyTasksStatusItem::from(s)]);
+    let resp = match client
+        .inner()
+        .list_my_tasks(
+            args.cursor.as_deref(),
+            taskfast_client::page_limit(args.limit),
+            status.as_ref(),
+        )
+        .await
+    {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    Ok(json!({
+        "kind": "mine",
+        "tasks": resp.data,
+        "meta": resp.meta,
+    }))
 }
 
 async fn list_queue(
@@ -916,17 +862,16 @@ mod tests {
     fn task_status_maps_to_generated_enum() {
         // Pin the mapping — changing it would be a silent wire-shape change.
         for (ours, theirs) in [
-            (TaskStatus::InProgress, ListMyTasksStatus::InProgress),
-            (TaskStatus::UnderReview, ListMyTasksStatus::UnderReview),
-            (TaskStatus::Disputed, ListMyTasksStatus::Disputed),
-            (TaskStatus::Remedied, ListMyTasksStatus::Remedied),
-            (TaskStatus::Assigned, ListMyTasksStatus::Assigned),
-            (TaskStatus::All, ListMyTasksStatus::All),
+            (TaskStatus::InProgress, ListMyTasksStatusItem::InProgress),
+            (TaskStatus::UnderReview, ListMyTasksStatusItem::UnderReview),
+            (TaskStatus::Disputed, ListMyTasksStatusItem::Disputed),
+            (TaskStatus::Remedied, ListMyTasksStatusItem::Remedied),
+            (TaskStatus::Assigned, ListMyTasksStatusItem::Assigned),
         ] {
-            // `ListMyTasksStatus: Display` — compare as strings to avoid
+            // `ListMyTasksStatusItem: Display` — compare as strings to avoid
             // needing PartialEq on the foreign type.
             assert_eq!(
-                ListMyTasksStatus::from(ours).to_string(),
+                ListMyTasksStatusItem::from(ours).to_string(),
                 theirs.to_string()
             );
         }

@@ -158,23 +158,24 @@ fn mine_task(id: &str, status: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn list_mine_defaults_to_active_filter_when_status_absent() {
-    // PLAN #12: raw `task list --kind mine` with no `--status` should
-    // drop closed/cancelled noise client-side. Active set =
-    // {assigned,in_progress,under_review,disputed,remedied}.
+async fn list_mine_omits_status_param_and_passes_server_page_through() {
+    // #121: the server owns the active-status classification. With no
+    // `--status`, the CLI sends no `status` param and returns the server's
+    // page verbatim — no client-side filtering or re-paging. The
+    // `query_param_is_missing` matcher fails the request (→ 404) if the CLI
+    // ever leaks a `status` param on the default path.
     let server = MockServer::start().await;
     let body = json!({
         "data": [
             mine_task("00000000-0000-0000-0000-000000000001", "in_progress"),
-            mine_task("00000000-0000-0000-0000-000000000002", "completed"),
             mine_task("00000000-0000-0000-0000-000000000003", "assigned"),
-            mine_task("00000000-0000-0000-0000-000000000004", "cancelled"),
             mine_task("00000000-0000-0000-0000-000000000005", "under_review"),
         ],
         "meta": paginated(None),
     });
     Mock::given(method("GET"))
         .and(path("/agents/me/tasks"))
+        .and(query_param_is_missing("status"))
         .respond_with(ResponseTemplate::new(200).set_body_json(body))
         .mount(&server)
         .await;
@@ -190,175 +191,14 @@ async fn list_mine_defaults_to_active_filter_when_status_absent() {
         .expect("list mine should succeed");
 
     let v = envelope_value(&envelope);
-    let tasks = v["data"]["tasks"].as_array().expect("tasks array");
-    let statuses: Vec<String> = tasks
+    let statuses: Vec<String> = v["data"]["tasks"]
+        .as_array()
+        .expect("tasks array")
         .iter()
         .map(|t| t["status"].as_str().unwrap().to_string())
         .collect();
+    // Returned verbatim — the CLI neither drops nor reorders the server page.
     assert_eq!(statuses, vec!["in_progress", "assigned", "under_review"]);
-}
-
-#[tokio::test]
-async fn list_mine_status_all_disables_active_filter() {
-    // Escape hatch: `--status all` preserves the historical "everything"
-    // view for operators who rely on it.
-    let server = MockServer::start().await;
-    let body = json!({
-        "data": [
-            mine_task("00000000-0000-0000-0000-000000000001", "in_progress"),
-            mine_task("00000000-0000-0000-0000-000000000002", "completed"),
-            mine_task("00000000-0000-0000-0000-000000000003", "cancelled"),
-        ],
-        "meta": paginated(None),
-    });
-    Mock::given(method("GET"))
-        .and(path("/agents/me/tasks"))
-        .and(query_param("status", "all"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body))
-        .mount(&server)
-        .await;
-
-    let args = ListArgs {
-        kind: ListKind::Mine,
-        status: Some(TaskStatus::All),
-        cursor: None,
-        limit: 20,
-    };
-    let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
-        .await
-        .expect("list mine should succeed");
-
-    let v = envelope_value(&envelope);
-    let tasks = v["data"]["tasks"].as_array().expect("tasks array");
-    assert_eq!(tasks.len(), 3, "--status all must not filter");
-}
-
-#[tokio::test]
-async fn list_mine_active_pages_whole_pages_without_skipping() {
-    // The active view filters client-side (no server-side status filter
-    // yet), so it must advance in whole pages: the emitted next_cursor may
-    // only ever point past pages that were fully consumed, otherwise
-    // filtered-out rows are skipped forever on resume.
-    let server = MockServer::start().await;
-    // Page 2 first (more specific matcher).
-    Mock::given(method("GET"))
-        .and(path("/agents/me/tasks"))
-        .and(query_param("cursor", "p2"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [
-                mine_task("00000000-0000-0000-0000-000000000003", "assigned"),
-                mine_task("00000000-0000-0000-0000-000000000004", "cancelled"),
-            ],
-            "meta": paginated(None),
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/agents/me/tasks"))
-        .and(query_param_is_missing("cursor"))
-        .and(query_param("limit", "2")) // no over-fetch multiplier
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [
-                mine_task("00000000-0000-0000-0000-000000000001", "in_progress"),
-                mine_task("00000000-0000-0000-0000-000000000002", "completed"),
-            ],
-            "meta": paginated(Some("p2")),
-        })))
-        .mount(&server)
-        .await;
-
-    let args = ListArgs {
-        kind: ListKind::Mine,
-        status: None,
-        cursor: None,
-        limit: 2,
-    };
-    let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
-        .await
-        .expect("list mine should succeed");
-
-    let v = envelope_value(&envelope);
-    let ids: Vec<&str> = v["data"]["tasks"]
-        .as_array()
-        .expect("tasks array")
-        .iter()
-        .map(|t| t["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        ids,
-        vec![
-            "00000000-0000-0000-0000-000000000001",
-            "00000000-0000-0000-0000-000000000003",
-        ],
-        "actives from both pages, none skipped"
-    );
-    assert_eq!(v["data"]["meta"]["next_cursor"], serde_json::Value::Null);
-}
-
-#[tokio::test]
-async fn list_mine_default_filter_returns_whole_final_page() {
-    // `--limit` is a stop threshold, not a truncation: the loop stops at the
-    // first page *boundary* with at least `limit` matches, so every active
-    // row of the final consumed page is surfaced even when that overshoots
-    // `limit`. Truncating instead, while reusing the page's cursor, would
-    // skip the dropped rows permanently on resume.
-    let server = MockServer::start().await;
-    // Page 2 first (more specific matcher): two actives — crossing the
-    // `limit: 2` threshold mid-page — and a live cursor.
-    Mock::given(method("GET"))
-        .and(path("/agents/me/tasks"))
-        .and(query_param("cursor", "p2"))
-        .and(query_param("limit", "2"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [
-                mine_task("00000000-0000-0000-0000-000000000003", "under_review"),
-                mine_task("00000000-0000-0000-0000-000000000004", "disputed"),
-            ],
-            "meta": paginated(Some("next-abc")),
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/agents/me/tasks"))
-        .and(query_param_is_missing("cursor"))
-        .and(query_param("limit", "2")) // no over-fetch multiplier
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [
-                mine_task("00000000-0000-0000-0000-000000000001", "in_progress"),
-                mine_task("00000000-0000-0000-0000-000000000002", "completed"),
-            ],
-            "meta": paginated(Some("p2")),
-        })))
-        .mount(&server)
-        .await;
-
-    let args = ListArgs {
-        kind: ListKind::Mine,
-        status: None,
-        cursor: None,
-        limit: 2,
-    };
-    let envelope = run(&ctx_for(&server, Some("test-key")), Command::List(args))
-        .await
-        .expect("list mine should succeed");
-
-    let v = envelope_value(&envelope);
-    let ids: Vec<&str> = v["data"]["tasks"]
-        .as_array()
-        .expect("tasks array")
-        .iter()
-        .map(|t| t["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        ids,
-        vec![
-            "00000000-0000-0000-0000-000000000001",
-            "00000000-0000-0000-0000-000000000003",
-            "00000000-0000-0000-0000-000000000004",
-        ],
-        "whole final page surfaced: 3 actives despite --limit 2"
-    );
-    assert_eq!(v["data"]["meta"]["next_cursor"], "next-abc");
 }
 
 #[tokio::test]

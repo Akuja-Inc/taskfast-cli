@@ -2,14 +2,10 @@
 # DO NOT EDIT BY HAND. The spec-drift CI gate and the scheduled upstream
 # drift-check both compare against the sha256 recorded here. To refresh, re-run
 # scripts/vendor-spec.sh (then: cargo xtask sync-spec && cargo build --workspace).
-# CONTRACT-FIRST EDIT (taskfast-cli#118): poster_approval_deadline +
-# poster_approval_min_lifetime were added to BidEscrowParamsResponse ahead
-# of the server deploy (Akuja-Inc/taskfast#935). The --upstream drift-check
-# will stay red until #935 ships that spec to staging; this is expected.
 source        = "https://staging.taskfast.app/api/docs/spec"
 server_repo   = "Akuja-Inc/taskfast"
 server_path   = "priv/openapi/agent-platform.yaml"
-server_commit = "d5629b5a75ed511abbc1e3c3aafbca6b54451d70"
-sha256        = "10e93c33876fd1f03ce71e07948881a956caa87f25727de17b409e3c116d302f"
-bytes         = 257113
-fetched_at    = "2026-07-15"
+server_commit = "6d1ab2996f697e711a61d2f097b2f091bbe3d955"
+sha256        = "5582ae4e82e63e8355705da57fbcacc549fa95e29fb3a026486daab0fc086b9a"
+bytes         = 261377
+fetched_at    = "2026-07-16"

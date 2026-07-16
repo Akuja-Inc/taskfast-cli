@@ -13,6 +13,22 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.17.0] - 2026-07-16
+
+### Changed
+
+- **`taskfast task list --kind mine` and `taskfast bid list` now filter by
+  status server-side.** The backend owns the active-status classification on
+  `GET /agents/me/tasks` and `GET /agents/me/bids` (taskfast#941), so the CLI
+  no longer re-derives the active set: the client-side `ACTIVE_STATUSES`
+  filter, the active-view paging loop, and the bid `filtered_count` envelope
+  field are gone. Omitting `--status` returns the server's active set
+  directly; a supplied `--status` is forwarded as the `status` query param.
+  `--status all` is removed — `GET /agents/me/tasks` only ever returns
+  active-state tasks, so the default (no flag) already is the full set.
+  `taskfast-client` is bumped for the regenerated (breaking) `list_my_tasks` /
+  `get_agent_bids` signatures. (#121)
+
 ## [0.16.1] - 2026-07-15
 
 ### Changed
