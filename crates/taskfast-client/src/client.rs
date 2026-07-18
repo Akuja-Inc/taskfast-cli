@@ -376,9 +376,16 @@ pub struct NetworkConfigEntry {
     /// (`{api_base}/rpc/{network}`). NOT the upstream Tempo gateway.
     pub rpc_url: String,
     /// WebSocket JSON-RPC URL on the native Tempo gateway (no proxy).
-    pub wss_url: String,
-    /// Block-explorer base URL for this network.
-    pub explorer_url: String,
+    /// `None` for Tempo Zone entries — a zone venue advertises only its RPC
+    /// proxy (the server emits `null`), and rejecting the whole
+    /// `/config/network` payload over it would break every command that
+    /// resolves the default proxy route while any zone venue is active.
+    #[serde(default)]
+    pub wss_url: Option<String>,
+    /// Block-explorer base URL for this network; `None` for Tempo Zone
+    /// entries (zones have no public explorer).
+    #[serde(default)]
+    pub explorer_url: Option<String>,
     /// Default stablecoin ticker; `None` when the deployment has not
     /// finalized a token for the network (e.g. mainnet pre-launch).
     pub default_stablecoin: Option<String>,
