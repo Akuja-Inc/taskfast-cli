@@ -13,6 +13,30 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.17.2] - 2026-07-18
+
+### Fixed
+
+- **Tempo Zone in-zone commands now work end-to-end** (taskfast gh#865/#949). A
+  zone's rail TIP-20 (e.g. AlphaUSD) enforces balance privacy —
+  `balanceOf(X)` / `allowance(X, …)` revert `Unauthorized` unless `msg.sender`
+  is a party — so the `escrow` and `bond` balance/allowance preflights now
+  self-scope the `eth_call` with `from == owner` (`TempoRpcClient::eth_call_from`;
+  a no-op on L1). Without it, `escrow sign` / `bond post` against a zone RPC
+  failed `Unauthorized`.
+- **`GET /config/network` parses when a zone venue is active.** `wss_url` and
+  `explorer_url` are now `Option<String>` — a zone entry advertises only its RPC
+  proxy and the server emits `null` for both; the previous non-nullable fields
+  rejected the whole payload and broke every command while a zone was
+  registered.
+
+### Changed
+
+- **RPC calls retry on `429`.** `TempoRpcClient` retries a throttled endpoint up
+  to 5 times with exponential backoff (honoring `Retry-After`) before surfacing
+  the error, so a shared public RPC's rate limit no longer fails an
+  otherwise-healthy call. Other non-2xx statuses surface immediately.
+
 ## [0.17.1] - 2026-07-16
 
 ## [0.17.0] - 2026-07-16

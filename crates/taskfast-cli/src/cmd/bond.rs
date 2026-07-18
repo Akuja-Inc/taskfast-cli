@@ -525,8 +525,9 @@ async fn erc20_balance_of(
     owner: Address,
 ) -> Result<U256, CmdError> {
     let calldata: Bytes = IERC20::balanceOfCall { account: owner }.abi_encode().into();
+    // from = owner: zone TIP-20 balance privacy (see TempoRpcClient::eth_call_from).
     let raw = rpc
-        .eth_call(token, &calldata)
+        .eth_call_from(owner, token, &calldata)
         .await
         .map_err(|e| CmdError::Server(format!("balanceOf rpc: {e}")))?;
     decode_u256(&raw, "balanceOf")
@@ -539,8 +540,9 @@ async fn erc20_allowance(
     spender: Address,
 ) -> Result<U256, CmdError> {
     let calldata: Bytes = IERC20::allowanceCall { owner, spender }.abi_encode().into();
+    // from = owner: zone TIP-20 balance privacy (see TempoRpcClient::eth_call_from).
     let raw = rpc
-        .eth_call(token, &calldata)
+        .eth_call_from(owner, token, &calldata)
         .await
         .map_err(|e| CmdError::Server(format!("allowance rpc: {e}")))?;
     decode_u256(&raw, "allowance")

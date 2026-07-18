@@ -172,6 +172,34 @@ impl TempoRpcClient {
         decode_0x(&raw)
     }
 
+    /// `eth_call({from, to, data}, "latest")` → returned bytes.
+    ///
+    /// Like [`Self::eth_call`] but with an explicit sender. Tempo Zone TIP-20s
+    /// enforce balance privacy — `balanceOf(X)`/`allowance(X, …)` revert
+    /// `Unauthorized` unless `msg.sender` is a party — so self-reads must
+    /// impersonate the queried address (needs no signature; a no-op on L1).
+    pub async fn eth_call_from(
+        &self,
+        from: Address,
+        to: Address,
+        data: &Bytes,
+    ) -> Result<Vec<u8>, RpcError> {
+        let raw: String = self
+            .call(
+                "eth_call",
+                json!([
+                    {
+                        "from": format!("{from:#x}"),
+                        "to": format!("{to:#x}"),
+                        "data": format!("0x{}", hex::encode(data)),
+                    },
+                    "latest",
+                ]),
+            )
+            .await?;
+        decode_0x(&raw)
+    }
+
     /// `eth_getTransactionReceipt(tx_hash)` → `Some(status_ok)` once mined,
     /// `None` if still pending.
     ///
@@ -269,16 +297,29 @@ impl TempoRpcClient {
             method,
             params,
         };
-        let resp = self.http.post(&self.url).json(&req).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
+        // Public RPC endpoints throttle shared callers with 429. Retry a few
+        // times with exponential backoff — honoring `Retry-After` — before
+        // surfacing the error, so a rate limit doesn't fail an otherwise-healthy
+        // call. Every other non-2xx (incl. 5xx) surfaces immediately.
+        let mut attempt: u32 = 0;
+        let parsed: RpcResponse = loop {
+            let resp = self.http.post(&self.url).json(&req).send().await?;
+            let status = resp.status();
+            if status.is_success() {
+                break resp.json().await?;
+            }
+            if status.as_u16() == 429 && attempt < MAX_RPC_RETRIES {
+                let delay = retry_after(&resp).unwrap_or_else(|| rpc_backoff(attempt));
+                attempt += 1;
+                tokio::time::sleep(delay).await;
+                continue;
+            }
             let body = resp.text().await.unwrap_or_default();
             return Err(RpcError::Http {
                 status: status.as_u16(),
                 body,
             });
-        }
-        let parsed: RpcResponse = resp.json().await?;
+        };
         if let Some(err) = parsed.error {
             let message = match err.data {
                 Some(d) => format!("{} (data: {})", err.message, d),
@@ -381,6 +422,27 @@ fn parse_hex_u128(s: &str) -> Result<u128, RpcError> {
 fn decode_0x(s: &str) -> Result<Vec<u8>, RpcError> {
     let stripped = s.strip_prefix("0x").unwrap_or(s);
     hex::decode(stripped).map_err(|e| RpcError::Hex(e.to_string()))
+}
+
+/// Max retries for a throttled/blipping RPC endpoint (429 / 5xx).
+const MAX_RPC_RETRIES: u32 = 5;
+
+/// Exponential backoff, capped: 250ms, 500ms, 1s, 2s, 4s, 4s…
+fn rpc_backoff(attempt: u32) -> std::time::Duration {
+    let ms = 250u64.saturating_mul(1u64 << attempt.min(4));
+    std::time::Duration::from_millis(ms.min(4_000))
+}
+
+/// Honor a numeric `Retry-After: <seconds>` header when the endpoint sends one.
+fn retry_after(resp: &reqwest::Response) -> Option<std::time::Duration> {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(std::time::Duration::from_secs)
 }
 
 #[cfg(test)]
@@ -519,6 +581,54 @@ mod tests {
             matches!(err, RpcError::Http { status: 502, .. }),
             "got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn eth_call_from_sets_the_sender() {
+        // Zone TIP-20 balance privacy: the self-read must carry `from` == owner.
+        let server = MockServer::start().await;
+        let from: Address = "0x00000000000000000000000000000000000000aa"
+            .parse()
+            .unwrap();
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_partial_json(json!({
+                "method": "eth_call",
+                "params": [{ "from": format!("{from:#x}") }, "latest"],
+            })))
+            .respond_with(rpc_ok(json!("0x1234")))
+            .mount(&server)
+            .await;
+        let rpc = TempoRpcClient::with_default_client(server.uri());
+        let to: Address = "0x00000000000000000000000000000000000000bb"
+            .parse()
+            .unwrap();
+        let out = rpc
+            .eth_call_from(from, to, &Bytes::from(vec![0xab]))
+            .await
+            .unwrap();
+        assert_eq!(out, vec![0x12, 0x34]);
+    }
+
+    #[tokio::test]
+    async fn rpc_retries_on_429_then_succeeds() {
+        let server = MockServer::start().await;
+        // First response 429 (throttled), then a normal 200.
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(429))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(rpc_ok(json!("0xa5bf")))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        let rpc = TempoRpcClient::with_default_client(server.uri());
+        assert_eq!(rpc.chain_id().await.unwrap(), 42_431);
     }
 
     #[tokio::test]
