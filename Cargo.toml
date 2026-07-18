@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.17.2"
+version = "0.17.3"
 edition = "2021"
 license = "MIT"
 authors = ["Akuja Inc. <onyekwelu+taskfast@obukwelu.com>"]
@@ -54,9 +54,9 @@ toml_edit = "0.25"
 rust_decimal = { version = "1", default-features = false, features = ["std"] }
 
 taskfast-codegen = { path = "crates/taskfast-codegen", version = "0.1.0" }
-taskfast-client = { path = "crates/taskfast-client", version = "0.11.0" }
+taskfast-client = { path = "crates/taskfast-client", version = "0.11.1" }
 taskfast-chains = { path = "crates/taskfast-chains", version = "0.1.0", default-features = false }
-taskfast-agent = { path = "crates/taskfast-agent", version = "0.17.2" }
+taskfast-agent = { path = "crates/taskfast-agent", version = "0.17.3" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
