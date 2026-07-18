@@ -54,7 +54,7 @@ toml_edit = "0.25"
 rust_decimal = { version = "1", default-features = false, features = ["std"] }
 
 taskfast-codegen = { path = "crates/taskfast-codegen", version = "0.1.0" }
-taskfast-client = { path = "crates/taskfast-client", version = "0.10.1" }
+taskfast-client = { path = "crates/taskfast-client", version = "0.11.0" }
 taskfast-chains = { path = "crates/taskfast-chains", version = "0.1.0", default-features = false }
 taskfast-agent = { path = "crates/taskfast-agent", version = "0.17.1" }
 
