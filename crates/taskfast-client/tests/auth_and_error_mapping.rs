@@ -336,6 +336,40 @@ async fn fetch_network_config_parses_and_caches() {
 }
 
 #[tokio::test]
+async fn fetch_network_config_tolerates_null_zone_urls() {
+    // Tempo Zone entries advertise only their RPC proxy, so the server emits
+    // null wss_url/explorer_url for them (gh#949). The pre-0.17.2 non-nullable
+    // fields rejected the whole payload and broke every command while a zone
+    // venue was registered.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/config/network"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "networks": {
+                "zone-421700005": {
+                    "chain_id": 421700005,
+                    "rpc_url": "http://example/rpc/zone-421700005",
+                    "wss_url": null,
+                    "explorer_url": null,
+                    "default_stablecoin": "AlphaUSD",
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = fixture_client(&server.uri());
+    let cfg = client
+        .fetch_network_config()
+        .await
+        .expect("payload with null zone urls parses");
+    let zone = cfg.entry("zone-421700005").expect("zone entry present");
+    assert_eq!(zone.chain_id, 421_700_005);
+    assert!(zone.wss_url.is_none());
+    assert!(zone.explorer_url.is_none());
+}
+
+#[tokio::test]
 async fn post_json_rpc_forwards_body_verbatim() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

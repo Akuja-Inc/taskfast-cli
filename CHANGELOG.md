@@ -33,9 +33,9 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 ### Changed
 
 - **RPC calls retry on `429`.** `TempoRpcClient` retries a throttled endpoint up
-  to 5 times with exponential backoff (honoring `Retry-After`) before surfacing
-  the error, so a shared public RPC's rate limit no longer fails an
-  otherwise-healthy call. Other non-2xx statuses surface immediately.
+  to 5 times with exponential backoff (honoring `Retry-After`, capped at 30s)
+  before surfacing the error, so a shared public RPC's rate limit no longer
+  fails an otherwise-healthy call. Other non-2xx statuses surface immediately.
 
 ## [0.17.1] - 2026-07-16
 

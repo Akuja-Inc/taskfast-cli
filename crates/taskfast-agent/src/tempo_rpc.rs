@@ -309,7 +309,9 @@ impl TempoRpcClient {
                 break resp.json().await?;
             }
             if status.as_u16() == 429 && attempt < MAX_RPC_RETRIES {
-                let delay = retry_after(&resp).unwrap_or_else(|| rpc_backoff(attempt));
+                let delay = retry_after(&resp)
+                    .map_or_else(|| rpc_backoff(attempt), |d| d.min(MAX_RETRY_AFTER));
+                tracing::debug!(attempt = %(attempt + 1), ?delay, "rpc throttled (429); retrying");
                 attempt += 1;
                 tokio::time::sleep(delay).await;
                 continue;
@@ -424,8 +426,13 @@ fn decode_0x(s: &str) -> Result<Vec<u8>, RpcError> {
     hex::decode(stripped).map_err(|e| RpcError::Hex(e.to_string()))
 }
 
-/// Max retries for a throttled/blipping RPC endpoint (429 / 5xx).
+/// Max retries for a throttled RPC endpoint (429 only; every other non-2xx,
+/// incl. 5xx, surfaces immediately).
 const MAX_RPC_RETRIES: u32 = 5;
+
+/// Cap on a server-supplied `Retry-After` so a broken or malicious endpoint
+/// can't park the CLI for hours.
+const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Exponential backoff, capped: 250ms, 500ms, 1s, 2s, 4s, 4s…
 fn rpc_backoff(attempt: u32) -> std::time::Duration {
