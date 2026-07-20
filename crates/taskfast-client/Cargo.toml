@@ -36,7 +36,7 @@ futures = { workspace = true }
 progenitor = "0.14"
 openapiv3 = { version = "2", default-features = false }
 prettyplease = "0.2"
-syn = { version = "2", features = ["full"] }
+syn = { version = "3", features = ["full"] }
 quote = "1"
 serde_yaml.workspace = true
 taskfast-codegen.workspace = true
