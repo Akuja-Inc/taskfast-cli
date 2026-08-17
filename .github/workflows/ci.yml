@@ -85,7 +85,8 @@ jobs:
           #   RUSTSEC-2024-0436  paste              unmaintained; via alloy-primitives / ark-*
           #   RUSTSEC-2026-0097  rand 0.8           unsound only under custom-logger reseed; not triggered here
           #   RUSTSEC-2026-0173  proc-macro-error2  unmaintained; via alloy-sol-macro, no safe upgrade
-          ignore: RUSTSEC-2024-0388,RUSTSEC-2024-0436,RUSTSEC-2026-0097,RUSTSEC-2026-0173
+          #   RUSTSEC-2026-0235  rkyv 0.7           OOB read; optional dep of rust_decimal, feature never enabled (not compiled)
+          ignore: RUSTSEC-2024-0388,RUSTSEC-2024-0436,RUSTSEC-2026-0097,RUSTSEC-2026-0173,RUSTSEC-2026-0235
 
   deny:
     name: cargo-deny
