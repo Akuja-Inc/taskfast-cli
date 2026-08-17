@@ -13,6 +13,15 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Changed
+
+- **WebSocket TLS backend switched from native-tls to rustls**
+  (`tokio-tungstenite` feature `rustls-tls-native-roots`; still uses the OS
+  trust store). This drops the `openssl`/`openssl-sys` C dependency chain from
+  the build entirely and unblocks the scheduled `minimal-versions` advisory
+  job, where `-Z minimal-versions` resolved the unbuildable
+  `openssl-sys 0.9.55` (beads tfcli-89t).
+
 ## [0.17.3] - 2026-07-18
 
 ## [0.17.2] - 2026-07-18
