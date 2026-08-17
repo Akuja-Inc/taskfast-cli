@@ -11,6 +11,8 @@ ignore = [
     "RUSTSEC-2026-0097",
     # proc-macro-error2 — unmaintained; build-time transitive of the clap/typify macro tree (no runtime exposure)
     "RUSTSEC-2026-0173",
+    # rkyv 0.7 — OOB read; optional dep of rust_decimal, rkyv feature never enabled (not compiled)
+    "RUSTSEC-2026-0235",
 ]
 
 [licenses]
