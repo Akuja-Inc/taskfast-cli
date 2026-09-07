@@ -487,3 +487,102 @@ async fn existing_config_key_takes_precedence_over_human_api_key() {
     // agent field is only set on mint — absence means we didn't mint.
     assert!(v["data"].get("agent").is_none(), "should not have minted");
 }
+
+#[tokio::test]
+async fn unfunded_wallet_at_init_end_surfaces_machine_signals_and_stays_ok() {
+    // gh#142: faucet failure / zero balance must not sit quietly next to
+    // success. The stderr warning text itself is unit-tested against
+    // `build_funding_warning`; here we pin the machine-readable contract —
+    // the run stays ok:true (a warning, not a failure) while the envelope
+    // carries the server's `funded` gate + `funding_hint`, and the
+    // end-of-init balance check actually consulted the balance endpoint
+    // (zero) and the advertised rpc_url for the fallback hint.
+    let server = MockServer::start().await;
+    mount_profile_active(&server).await;
+
+    Mock::given(method("GET"))
+        .and(path("/agents/me/readiness"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ready_to_work": false,
+            "checks": {
+                "api_key": {"status": "complete"},
+                "wallet": {"status": "complete"},
+                "funded": {
+                    "status": "unfunded",
+                    "funding_hint": "https://wallet.tempo.xyz/",
+                },
+                "webhook": {"status": "not_configured", "required": false},
+            },
+            "settlement_domain": {
+                "chain_id": 42431,
+                "verifying_contract": "0x0000000000000000000000000000000000000000",
+            },
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/agents/me/wallet"))
+        .and(body_partial_json(json!({
+            "tempo_wallet_address": BYOW_ADDRESS,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tempo_wallet_address": BYOW_ADDRESS,
+            "payout_method": "tempo_wallet",
+            "payment_method": "tempo",
+            "ready_to_work": false,
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/agents/me/wallet/balance"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "chain": "tempo",
+            "wallet_address": BYOW_ADDRESS,
+            "available_balance": "0x0",
+            "currency": "USDC",
+            "checked_at": "2026-09-07T12:00:00Z",
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/config/network"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "networks": {
+                "testnet": {
+                    "chain_id": 42431,
+                    "rpc_url": format!("{}/rpc", server.uri()),
+                    "wss_url": null,
+                    "explorer_url": null,
+                },
+            },
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let mut args = base_args();
+    args.wallet_address = Some(BYOW_ADDRESS.to_string());
+
+    let envelope = run(
+        &ctx_for(&server, Some("test-key"), config_path_in(tmp.path()), false),
+        args,
+    )
+    .await
+    .expect("init stays ok:true — funding gap is a warning, not a failure");
+
+    let v = envelope_value(&envelope);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["faucet"]["status"], "skipped");
+    assert_eq!(v["data"]["ready_to_work"], false);
+    assert_eq!(
+        v["data"]["readiness"]["checks"]["funded"]["status"],
+        "unfunded"
+    );
+    assert_eq!(
+        v["data"]["readiness"]["checks"]["funded"]["funding_hint"],
+        "https://wallet.tempo.xyz/"
+    );
+}
