@@ -26,6 +26,17 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Fixed
 
+- **`taskfast init` no longer lets a funding failure sit quietly next to
+  `ready_to_work: true`** (gh#142). When `--fund` fails (e.g. the HTTP faucet
+  405s) or the wallet balance is zero at the end of init, the CLI now prints a
+  prominent stderr warning with the manual fallback — `cast rpc
+  tempo_fundAddress '["<address>"]' --raw --rpc-url <rpc_url>` against the
+  deployment's advertised RPC, or fund at https://wallet.tempo.xyz — plus the
+  server's `funding_hint` when the readiness `funded` gate emits one. The run
+  stays `ok:true` (a warning, not a failure); `ready_to_work` continues to
+  mirror server readiness, which now gates on the deployed `funded` check.
+  Pairs with the server-side readiness funding change
+  (Akuja-Inc/taskfast#1158).
 - **`taskfast bid accept` treats the HTTP 202 pending-escrow answer as
   success with a next action** (gh#141). The deployed deferred-escrow flow
   answers `POST /bids/{bid_id}/accept` with `202` ("bid acceptance locked

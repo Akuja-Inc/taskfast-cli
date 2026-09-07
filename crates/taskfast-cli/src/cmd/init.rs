@@ -39,6 +39,15 @@
 //! Deferred to separate beads so this slice stays reviewable:
 //! * `am-c74` — balance polling after faucet dispense.
 //!
+//! # Scope (gh#142 extension)
+//!
+//! * End-of-init funding sanity check: a failed `--fund` faucet request
+//!   or a zero wallet balance prints a prominent stderr warning with the
+//!   manual fallback (`cast rpc tempo_fundAddress …` against the
+//!   deployment's advertised rpc_url, or <https://wallet.tempo.xyz>) and
+//!   the server's `funding_hint` when the readiness `funded` gate emits
+//!   one. The run stays `ok:true` — the gap is a warning, not a failure.
+//!
 //! # `--dry-run` semantics
 //!
 //! Mutations short-circuit: no wallet POST, no config file write, no
@@ -354,6 +363,18 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
     // 5. Final readiness check — surfaces any remaining gates (webhook,
     //    funding) the caller still has to clear.
     let final_readiness = get_readiness(&client).await.map_err(CmdError::from)?;
+
+    // 5b. Funding sanity check (gh#142): a faucet failure or zero wallet
+    //     balance gets a prominent stderr warning with the manual fallback,
+    //     so it can't sit quietly next to a successful envelope.
+    warn_if_unfunded(
+        &client,
+        ctx,
+        cfg.wallet_address.as_deref(),
+        &faucet_outcome,
+        &final_readiness,
+    )
+    .await;
 
     let data = build_envelope_data(
         &cfg_path,
@@ -764,6 +785,125 @@ async fn maybe_request_faucet(
     }
 }
 
+/// Parse the server's hex-encoded wei balance string (`"0x0"` = zero,
+/// all-zero hex = zero). Anything unparseable yields `None` = unknown.
+fn parse_wei_hex(s: Option<&str>) -> Option<u128> {
+    let s = s?.trim();
+    let hex = s.strip_prefix("0x").unwrap_or(s);
+    if hex.is_empty() {
+        return None;
+    }
+    u128::from_str_radix(hex, 16).ok()
+}
+
+/// Build the end-of-init funding warning (gh#142). Fires when the faucet
+/// step failed or the wallet balance is zero — a funding gap must not sit
+/// quietly next to a successful init, because the next on-chain command
+/// (post, escrow sign, settle) would fail. Returns `None` on healthy or
+/// unknown states so the warning never becomes noise.
+fn build_funding_warning(
+    faucet_error: Option<&str>,
+    balance_wei: Option<u128>,
+    address: &str,
+    rpc_url: Option<&str>,
+    funding_hint: Option<&str>,
+) -> Option<String> {
+    let zero_balance = balance_wei.is_some_and(|b| b == 0);
+    if faucet_error.is_none() && !zero_balance {
+        return None;
+    }
+    let mut lines = Vec::new();
+    match (faucet_error, zero_balance) {
+        (Some(err), _) => lines.push(format!(
+            "WARNING: testnet faucet funding failed (--fund): {err}"
+        )),
+        (None, true) => lines.push(format!(
+            "WARNING: wallet {address} balance is zero at the end of init"
+        )),
+        (None, false) => return None,
+    }
+    lines.push(
+        "  the next on-chain command will fail until the wallet is funded. \
+         manual fallback:"
+            .to_string(),
+    );
+    if let Some(rpc) = rpc_url {
+        lines.push(format!(
+            "    cast rpc tempo_fundAddress '[\"{address}\"]' --raw --rpc-url {rpc}"
+        ));
+    }
+    lines.push("  or fund at https://wallet.tempo.xyz".to_string());
+    if let Some(hint) = funding_hint {
+        lines.push(format!("  server funding hint: {hint}"));
+    }
+    Some(lines.join("\n"))
+}
+
+/// End-of-init funding sanity check (gh#142). Consults the server's
+/// balance proxy once and, when the wallet looks unfunded, prints the
+/// stderr warning with the manual fallback (Tempo RPC faucet via `cast`,
+/// or the web wallet). Best-effort: any balance/RPC lookup failure stays
+/// silent — the faucet step's own error (if any) still warns, and the
+/// envelope keeps carrying the server's `readiness.checks.funded` gate
+/// for machine consumers. Testnet only; mainnet wallets are the owning
+/// human's to fund and the envelope already points at wallet.tempo.xyz.
+async fn warn_if_unfunded(
+    client: &TaskFastClient,
+    ctx: &Ctx,
+    wallet_address: Option<&str>,
+    faucet: &FaucetOutcome,
+    readiness: &AgentReadiness,
+) {
+    if ctx.dry_run {
+        return;
+    }
+    if !matches!(ctx.environment.network(), crate::Network::Testnet) {
+        return;
+    }
+    let Some(address) = wallet_address else {
+        return;
+    };
+    let faucet_error = match faucet {
+        FaucetOutcome::Failed { error } => Some(error.as_str()),
+        _ => None,
+    };
+    let balance_wei = match client.inner().get_wallet_balance().await {
+        Ok(resp) => parse_wei_hex(resp.into_inner().available_balance.as_deref()),
+        Err(e) => {
+            tracing::warn!(error = %e, "init: balance check unavailable; skipping zero-balance warning");
+            None
+        }
+    };
+    if build_funding_warning(
+        faucet_error,
+        balance_wei,
+        address,
+        None,
+        readiness.checks.funded.funding_hint.as_deref(),
+    )
+    .is_none()
+    {
+        return;
+    }
+    // Warning will fire — resolve the advertised rpc_url for the cast
+    // fallback. Failure just drops the cast line, keeping the web fallback.
+    let rpc_url = client
+        .fetch_network_config()
+        .await
+        .ok()
+        .and_then(|cfg| cfg.entry(ctx.environment.network().as_str()).ok())
+        .map(|entry| entry.rpc_url.clone());
+    if let Some(warning) = build_funding_warning(
+        faucet_error,
+        balance_wei,
+        address,
+        rpc_url.as_deref(),
+        readiness.checks.funded.funding_hint.as_deref(),
+    ) {
+        eprintln!("{warning}");
+    }
+}
+
 /// Outcome of the optional webhook step. `Skipped` is the default when
 /// `--webhook-url` wasn't passed; the remaining variants mirror the
 /// shell-script states (`registered`, `registered + subscribed`,
@@ -1149,6 +1289,110 @@ mod tests {
             ..base_args()
         };
         assert_eq!(resolve_webhook_events(&args), vec!["bid_accepted"]);
+    }
+
+    // ─── end-of-init funding warning (gh#142) ─────────────────────────────
+
+    #[test]
+    fn funding_warning_faucet_failure_lists_manual_fallback() {
+        let w = build_funding_warning(
+            Some("faucet returned status 405: method not allowed"),
+            Some(0),
+            "0xabc0000000000000000000000000000000000000",
+            Some("https://rpc.testnet.example"),
+            None,
+        )
+        .expect("faucet failure must warn");
+        assert!(w.contains("faucet returned status 405"), "got: {w}");
+        assert!(w.contains("0xabc0000000000000000000000000000000000000"));
+        assert!(w.contains(
+            "cast rpc tempo_fundAddress \
+             '[\"0xabc0000000000000000000000000000000000000\"]' \
+             --raw --rpc-url https://rpc.testnet.example"
+        ));
+        assert!(w.contains("https://wallet.tempo.xyz"));
+    }
+
+    #[test]
+    fn funding_warning_zero_balance_without_faucet_failure_still_warns() {
+        // The issue's second trigger: `--fund` succeeded or was never
+        // passed, but the wallet balance is zero at the end of init —
+        // the next on-chain command would fail.
+        let w = build_funding_warning(
+            None,
+            Some(0),
+            "0xabc0000000000000000000000000000000000000",
+            Some("https://rpc.testnet.example"),
+            None,
+        )
+        .expect("zero balance must warn");
+        assert!(w.contains("zero"), "got: {w}");
+        assert!(w.contains("https://wallet.tempo.xyz"));
+    }
+
+    #[test]
+    fn funding_warning_silent_when_funded() {
+        assert!(build_funding_warning(
+            None,
+            Some(42),
+            "0xabc0000000000000000000000000000000000000",
+            Some("https://rpc.testnet.example"),
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn funding_warning_silent_when_balance_unknown_and_faucet_did_not_fail() {
+        // Balance endpoint down + faucet didn't fail → no signal, no noise.
+        assert!(build_funding_warning(
+            None,
+            None,
+            "0xabc0000000000000000000000000000000000000",
+            Some("https://rpc.testnet.example"),
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn funding_warning_without_rpc_url_omits_cast_line_keeps_web_fallback() {
+        let w = build_funding_warning(
+            Some("faucet http request failed"),
+            Some(0),
+            "0xabc0000000000000000000000000000000000000",
+            None,
+            None,
+        )
+        .expect("must still warn");
+        assert!(!w.contains("cast rpc"), "got: {w}");
+        assert!(w.contains("https://wallet.tempo.xyz"));
+    }
+
+    #[test]
+    fn funding_warning_surfaces_server_funding_hint() {
+        let w = build_funding_warning(
+            None,
+            Some(0),
+            "0xabc0000000000000000000000000000000000000",
+            None,
+            Some("https://wallet.tempo.xyz/topup"),
+        )
+        .expect("must warn");
+        assert!(w.contains("https://wallet.tempo.xyz/topup"), "got: {w}");
+    }
+
+    #[test]
+    fn parse_wei_hex_handles_0x_zero_and_plain_hex_forms() {
+        assert_eq!(parse_wei_hex(Some("0x0")), Some(0));
+        assert_eq!(
+            parse_wei_hex(Some(
+                "0x000000000000000000000000000000000000000000000000000000000000000a"
+            )),
+            Some(10)
+        );
+        assert_eq!(parse_wei_hex(None), None);
+        assert_eq!(parse_wei_hex(Some("0x")), None);
     }
 
     #[tokio::test]
