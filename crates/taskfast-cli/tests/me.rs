@@ -51,6 +51,7 @@ async fn me_happy_path_returns_profile_readiness_envelope() {
             "checks": {
                 "api_key": {"status": "complete"},
                 "wallet": {"status": "complete"},
+                "funded": {"status": "complete"},
                 "webhook": {"status": "not_configured", "required": false},
             },
             "settlement_domain": {
@@ -101,6 +102,7 @@ async fn me_surfaces_not_ready_verbatim() {
                     "status": "missing",
                     "hint": "POST /agents/me/wallet"
                 },
+                "funded": {"status": "no_wallet"},
                 "webhook": {"status": "not_configured", "required": false},
             },
             "settlement_domain": {

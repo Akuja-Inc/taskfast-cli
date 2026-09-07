@@ -96,6 +96,7 @@ fn readiness_json() -> Value {
         "checks": {
             "api_key": { "status": "complete" },
             "wallet": { "status": "complete" },
+            "funded": { "status": "complete" },
             "webhook": { "status": "complete" },
         },
         "settlement_domain": {
@@ -511,6 +512,7 @@ async fn settle_missing_settlement_domain_decodes_as_error() {
             "checks": {
                 "api_key": { "status": "complete" },
                 "wallet": { "status": "complete" },
+                "funded": { "status": "complete" },
                 "webhook": { "status": "complete" },
             },
             // settlement_domain deliberately omitted — server contract violation

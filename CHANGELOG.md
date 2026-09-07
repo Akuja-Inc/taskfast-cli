@@ -26,6 +26,20 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Fixed
 
+- **`taskfast bid accept` treats the HTTP 202 pending-escrow answer as
+  success with a next action** (gh#141). The deployed deferred-escrow flow
+  answers `POST /bids/{bid_id}/accept` with `202` ("bid acceptance locked
+  pending escrow signature"), but the vendored spec still declared a plain
+  `200`, so the CLI surfaced the happy path as `ok:false` with a non-zero
+  exit and autonomous agents retried or aborted. Re-vendored the spec from
+  staging (which also picks up the readiness `funded` check +
+  `funding_hint` and drops the removed `MppChallenge` 402 contract), and
+  the accept envelope now echoes the server's follow-up contract at the
+  data top level — `next_action: "escrow_sign"`,
+  `next_action_command` (`taskfast escrow sign <bid_id>`),
+  `poster_signature_deadline`, `signing_url` — next to the full bid.
+  Pairs with the server-side 202 contract change
+  (Akuja-Inc/taskfast#1157).
 - **`taskfast ping` now diagnoses the api-host rewrite 404** (gh#145). The
   server rewrites bare CLI paths to `/api/*` only for hosts in its
   `:api_hosts` list; against any other host every call 404s with no hint

@@ -185,6 +185,11 @@ async fn mount_profile_active(server: &MockServer) {
 }
 
 async fn mount_readiness(server: &MockServer, wallet_status: &str, ready_to_work: bool) {
+    let funded_status = if wallet_status == "complete" {
+        "complete"
+    } else {
+        "no_wallet"
+    };
     Mock::given(method("GET"))
         .and(path("/agents/me/readiness"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -192,6 +197,7 @@ async fn mount_readiness(server: &MockServer, wallet_status: &str, ready_to_work
             "checks": {
                 "api_key": {"status": "complete"},
                 "wallet": {"status": wallet_status},
+                "funded": {"status": funded_status},
                 "webhook": {"status": "not_configured", "required": false},
             },
             "settlement_domain": {

@@ -456,32 +456,58 @@ async fn cancel_409_surfaces() {
 // ─── bid accept (poster; deferred-escrow two-phase per am-4w2) ─────────────
 
 fn accept_body() -> serde_json::Value {
-    // BidAcceptResponse is now a 3-field envelope (additionalProperties: false);
-    // the escrow signing_url/deadline moved to the EIP-712 settle flow.
+    // The deployed deferred-escrow contract: HTTP 202 with a 10-field
+    // BidAcceptResponse (additionalProperties: false) whose next_action
+    // fields name the follow-up (`taskfast escrow sign <bid_id>`).
     json!({
         "bid_id": BID_ID,
         "task_id": TASK_ID,
+        "payment_id": "00000000-0000-0000-0000-000000009a91",
         "task_status": "payment_pending",
+        "status": "accepted_pending_escrow",
+        "next_action": "escrow_sign",
+        "next_action_command": format!("taskfast escrow sign {BID_ID}"),
+        "poster_signature_deadline": "2026-09-09T12:00:00Z",
+        "signing_url": format!("https://staging.taskfast.app/bids/{BID_ID}/sign"),
+        "message": "Bid acceptance locked pending escrow signature.",
     })
 }
 
 #[tokio::test]
-async fn accept_happy_path_surfaces_deferred_escrow_envelope() {
+async fn accept_202_pending_escrow_is_success_not_error() {
+    // Regression (gh#141): the deferred-escrow happy path answers HTTP 202
+    // "locked pending escrow signature" — that is success with a next
+    // action, not an error. The CLI must exit ok:true and surface the
+    // server's follow-up contract for orchestrators.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(format!("/bids/{BID_ID}/accept")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(accept_body()))
+        .respond_with(ResponseTemplate::new(202).set_body_json(accept_body()))
         .mount(&server)
         .await;
     let args = AcceptArgs { id: BID_ID.into() };
     let envelope = run(&ctx_for(&server, Some("test-key")), Command::Accept(args))
         .await
-        .expect("accept should succeed");
+        .expect("202 pending-escrow must be ok:true");
     let v = envelope_value(&envelope);
     assert_eq!(v["ok"], true);
     assert_eq!(v["data"]["bid"]["bid_id"], BID_ID);
     assert_eq!(v["data"]["bid"]["task_id"], TASK_ID);
+    assert_eq!(v["data"]["bid"]["status"], "accepted_pending_escrow");
     assert_eq!(v["data"]["bid"]["task_status"], "payment_pending");
+    assert_eq!(v["data"]["next_action"], "escrow_sign");
+    assert_eq!(
+        v["data"]["next_action_command"],
+        format!("taskfast escrow sign {BID_ID}")
+    );
+    assert_eq!(
+        v["data"]["poster_signature_deadline"],
+        "2026-09-09T12:00:00Z"
+    );
+    assert_eq!(
+        v["data"]["signing_url"],
+        format!("https://staging.taskfast.app/bids/{BID_ID}/sign")
+    );
 }
 
 #[tokio::test]
