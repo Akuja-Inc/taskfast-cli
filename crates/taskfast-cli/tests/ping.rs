@@ -161,3 +161,38 @@ async fn ping_does_not_retry_on_5xx() {
     // Mock server asserts expect(1) on drop; explicit verify for clarity.
     server.verify().await;
 }
+
+#[tokio::test]
+async fn ping_404_diagnoses_api_host_rewrite_trap() {
+    // gh#145: the server rewrites bare CLI paths to /api/* only for hosts in
+    // its :api_hosts list. A 404 from a reachable server therefore means
+    // "this host was not rewritten" — the error must diagnose that and name
+    // the fix, not dump a bare 404 (or a raw HTML error page) at the user.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/agents/me"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_string("<html><body>no route found</body></html>"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let err = run(&ctx_for(&server), Args)
+        .await
+        .expect_err("404 must surface");
+
+    match err {
+        CmdError::Validation { message, .. } => {
+            assert!(message.contains("rewrite"), "msg: {message}");
+            assert!(message.contains("api."), "msg: {message}");
+            assert!(message.contains("127.0.0.1"), "msg: {message}");
+            assert!(
+                !message.contains("<html>"),
+                "raw HTML body must not leak into the diagnosis: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+    server.verify().await;
+}
