@@ -466,7 +466,7 @@ async fn poll_until_posted(
 
 /// Resolve `(rpc_url, chain_id, default_stablecoin, task_bond_contract)` from
 /// `GET /config/network` for this environment's network. Mirrors
-/// `post::resolve_rpc_url`'s override handling and same-host proxy guard, but
+/// `post::resolve_proxy_rpc_url`'s same-host proxy guard, but
 /// also surfaces `chain_id` and the bond token + contract addresses, which
 /// the bond flow needs from the same entry.
 async fn resolve_network(

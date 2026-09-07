@@ -666,3 +666,58 @@ async fn post_criteria_file_merges_with_inline() {
         .await
         .expect("merged criteria should succeed");
 }
+
+#[tokio::test]
+async fn post_preflight_reports_all_problems_in_one_pass() {
+    // gh#144: every locally-checkable problem must surface in a single
+    // error — no more one-retry-cycle-per-missing-input. No mocks are
+    // mounted: any HTTP call fails the test (preflight is pre-network).
+    let api_server = MockServer::start().await;
+    let mut args = base_args(None, None); // missing wallet
+    args.description = "   ".into(); // blank description
+    args.assignment_type = AssignmentType::Direct; // without --direct-agent-id
+    args.direct_agent_id = None;
+    args.execution_deadline = Some("not-a-date".into());
+    args.criteria = vec!["{not json".into()];
+    args.pickup_deadline_hours = 3; // outside the contract set
+    args.rpc_url = Some("https://mallory.example".into()); // custom endpoint…
+    let mut ctx = ctx_for(&api_server, Some("test-key"));
+    ctx.allow_custom_endpoints = false; // …without the opt-in
+
+    let err = run(&ctx, args).await.expect_err("preflight must fail");
+    match err {
+        CmdError::Usage(msg) => {
+            for fragment in [
+                "--description",
+                "--wallet-address",
+                "--direct-agent-id",
+                "--execution-deadline",
+                "--criterion[0]",
+                "pickup",
+                "--allow-custom-endpoints",
+            ] {
+                assert!(msg.contains(fragment), "missing {fragment:?} in: {msg}");
+            }
+            assert!(
+                msg.contains("1.") && msg.contains("2."),
+                "problems must be enumerated: {msg}"
+            );
+        }
+        other => panic!("expected Usage, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn post_preflight_single_problem_reports_without_enumeration_noise() {
+    // gh#144: one problem still reads as one clear error (and the existing
+    // per-error message text is preserved).
+    let api_server = MockServer::start().await;
+    let args = base_args(None, None);
+    let err = run(&ctx_for(&api_server, Some("test-key")), args)
+        .await
+        .expect_err("missing wallet must fail");
+    match err {
+        CmdError::Usage(msg) => assert!(msg.contains("--wallet-address"), "msg: {msg}"),
+        other => panic!("expected Usage, got {other:?}"),
+    }
+}

@@ -13,6 +13,17 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Added
+
+- **`taskfast post` validates all inputs in one preflight pass** (gh#144).
+  Missing/blank values, malformed addresses and UUIDs, bad timestamps,
+  unparseable criteria, out-of-contract pickup windows, endpoint-guard
+  conflicts, and the budget gate are now collected and reported together in
+  one enumerated `usage` error — fixing one problem no longer reveals
+  exactly one more on the next attempt. The preflight runs before any HTTP,
+  keystore prompt, or signing, so `post --dry-run` reports the full list
+  too. Individual message texts are unchanged.
+
 ### Fixed
 
 - **`taskfast ping` now diagnoses the api-host rewrite 404** (gh#145). The

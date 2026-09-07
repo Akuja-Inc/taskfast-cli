@@ -360,7 +360,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                 params.chain_id
             ))
         })?;
-        // Same-host guard as post::resolve_rpc_url — the proxy may be mounted
+        // Same-host guard as post::resolve_proxy_rpc_url — the proxy may be mounted
         // at any path on api_base (`/rpc/…` or `/api/rpc/…`); only the host
         // must match so the API key never leaves the approved deployment.
         if !is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
