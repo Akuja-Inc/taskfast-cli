@@ -35,8 +35,8 @@ use taskfast_agent::tempo_rpc::{sign_and_broadcast_erc20_transfer, TempoRpcClien
 use taskfast_chains::tempo::{is_allowed_fee_token, is_known_network};
 use taskfast_client::api::types::{
     CompletionCriterionInput, TaskDraftPrepareRequest, TaskDraftPrepareRequestAssignmentType,
-    TaskDraftPrepareRequestPickupDeadlineHours, TaskDraftPrepareRequestPosterWalletAddress,
-    TaskDraftSubmitRequest, TaskDraftSubmitRequestSignature,
+    TaskDraftPrepareRequestPickupDeadlineHours, TaskDraftSubmitRequest,
+    TaskDraftSubmitRequestSignature,
 };
 use taskfast_client::{map_api_error, TaskFastClient};
 
@@ -172,57 +172,23 @@ fn pickup_hours_to_wire(
 }
 
 pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
-    if args.description.trim().is_empty() {
-        return Err(CmdError::Usage(
-            "--description must not be empty (server requires a non-blank description)".into(),
-        ));
-    }
-    ctx.enforce_budget_gate(args.budget.as_deref(), args.yes, "post a task")?;
-    let wallet_address = args
-        .wallet_address
-        .as_deref()
-        .or(ctx.wallet_address.as_deref())
-        .ok_or_else(|| {
-            CmdError::Usage(
-                "--wallet-address (or TEMPO_WALLET_ADDRESS, or wallet_address in config) required to post a task".into(),
-            )
-        })?;
-    // Validate shape upfront so a typo never makes it to the server.
-    let _: Address = wallet_address.parse().map_err(|e| {
-        CmdError::Usage(format!("--wallet-address is not a valid EVM address: {e}"))
-    })?;
-
-    let direct_agent_id = match (args.assignment_type, args.direct_agent_id.as_deref()) {
-        (AssignmentType::Direct, Some(s)) => Some(
-            Uuid::parse_str(s)
-                .map_err(|e| CmdError::Usage(format!("--direct-agent-id not a UUID: {e}")))?,
-        ),
-        (AssignmentType::Direct, None) => {
-            return Err(CmdError::Usage(
-                "--assignment-type=direct requires --direct-agent-id".into(),
-            ));
-        }
-        (AssignmentType::Open, _) => None,
-    };
-
-    let execution_deadline =
-        parse_iso_opt(args.execution_deadline.as_deref(), "--execution-deadline")?;
-
-    let poster_wallet: TaskDraftPrepareRequestPosterWalletAddress = wallet_address
-        .parse()
-        .map_err(|e| CmdError::Usage(format!("--wallet-address rejected by schema: {e}")))?;
-
-    let completion_criteria = resolve_criteria(args.criteria_file.as_deref(), &args.criteria)?;
+    // gh#144: validate every local input in ONE pass before any HTTP,
+    // keystore prompt, or signing — the old sequential early-returns cost an
+    // agent one full retry cycle per missing flag / guard conflict.
+    let pre = preflight(ctx, &args)?;
 
     let prep_body = TaskDraftPrepareRequest {
         assignment_type: args.assignment_type.into(),
         budget_max: args.budget.clone(),
-        completion_criteria,
+        completion_criteria: pre.completion_criteria,
         description: args.description.clone(),
-        direct_agent_id,
-        execution_deadline,
-        pickup_deadline_hours: pickup_hours_to_wire(args.pickup_deadline_hours)?,
-        poster_wallet_address: poster_wallet,
+        direct_agent_id: pre.direct_agent_id,
+        execution_deadline: pre.execution_deadline,
+        pickup_deadline_hours: pre.pickup_hours,
+        poster_wallet_address: pre
+            .wallet_address
+            .parse()
+            .map_err(|e| CmdError::Usage(format!("--wallet-address rejected by schema: {e}")))?,
         required_capabilities: args.capabilities.clone(),
         settlement_venue: args.venue.clone(),
         title: args.title.clone(),
@@ -231,16 +197,13 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     // Dry-run must perform zero HTTP. Predict the proxy URL locally so the
     // envelope still reports what the real path would have used.
     if ctx.dry_run {
-        let network = ctx.environment.network();
-        let rpc_url = if let Some(ref override_url) = args.rpc_url {
-            validate_override_rpc_url(override_url, network, ctx.allow_custom_endpoints)?;
-            override_url.clone()
-        } else {
-            format!(
+        let rpc_url = match pre.rpc_url_override {
+            Some(override_url) => override_url,
+            None => format!(
                 "{}/rpc/{}",
                 ctx.base_url().trim_end_matches('/'),
-                network.as_str()
-            )
+                ctx.environment.network().as_str()
+            ),
         };
         return Ok(Envelope::success(
             ctx.environment,
@@ -255,7 +218,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
                 "required_capabilities": args.capabilities,
                 "completion_criteria_count": prep_body.completion_criteria.len(),
                 "rpc_url": rpc_url,
-                "wallet_address": wallet_address,
+                "wallet_address": pre.wallet_address,
             }),
         ));
     }
@@ -265,8 +228,11 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     // Resolve the RPC URL. Default path: pull it from the deployment's
     // `GET /config/network` (public). Override path: user supplied
     // `--rpc-url` / `TEMPO_RPC_URL` and must also pass
-    // `--allow-custom-endpoints`.
-    let (rpc_url, _via_proxy) = resolve_rpc_url(&client, &args, ctx).await?;
+    // `--allow-custom-endpoints` (already checked in preflight).
+    let rpc_url = match pre.rpc_url_override {
+        Some(override_url) => override_url,
+        None => resolve_proxy_rpc_url(&client, ctx).await?,
+    };
 
     // Phase 1 — prepare. Server returns ERC-20 transfer calldata + draft_id.
     let prep = match client.inner().prepare_task_draft(&prep_body).await {
@@ -298,14 +264,15 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     // Sanity: the wallet address in the draft must match what we're signing
     // with. A mismatch means the server recorded a charge on a wallet we
     // don't control, which would poll forever.
-    let parsed_wallet_address = wallet_address
+    let parsed_wallet_address = pre
+        .wallet_address
         .parse::<Address>()
-        .map_err(|_| CmdError::Usage(format!("invalid wallet address: {}", wallet_address)))?;
+        .map_err(|_| CmdError::Usage(format!("invalid wallet address: {}", pre.wallet_address)))?;
     if signer.address() != parsed_wallet_address {
         return Err(CmdError::Usage(format!(
             "keystore address {:#x} does not match --wallet-address {}",
             signer.address(),
-            wallet_address
+            pre.wallet_address
         )));
     }
 
@@ -404,26 +371,164 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     ))
 }
 
-/// Resolve the RPC endpoint for a post invocation.
-///
-/// Returns `(url, via_proxy)`:
-///   * `(override, false)` — user supplied `--rpc-url` / `TEMPO_RPC_URL`,
-///     passed the custom-endpoint guard, and will hit a bare upstream RPC.
-///   * `(proxy_url, true)` — default path: the deployment's
-///     `/config/network` entry for the selected network points the CLI
-///     at `{api_base}/rpc/{network}`, which the server proxies to its
-///     own Tempo upstream (Alchemy by default). The caller should carry
-///     the authenticated reqwest::Client through to `TempoRpcClient`.
-async fn resolve_rpc_url(
-    client: &TaskFastClient,
-    args: &Args,
-    ctx: &Ctx,
-) -> Result<(String, bool), CmdError> {
-    let network = ctx.environment.network();
-    if let Some(ref override_url) = args.rpc_url {
-        validate_override_rpc_url(override_url, network, ctx.allow_custom_endpoints)?;
-        return Ok((override_url.clone(), false));
+/// Everything [`run`] needs from local validation, parsed once by
+/// [`preflight`] so the runtime path never re-validates (gh#144).
+struct Preflight {
+    wallet_address: String,
+    direct_agent_id: Option<Uuid>,
+    execution_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    completion_criteria: Vec<CompletionCriterionInput>,
+    pickup_hours: TaskDraftPrepareRequestPickupDeadlineHours,
+    /// User-supplied `--rpc-url` / `TEMPO_RPC_URL`, already through the
+    /// custom-endpoint guard. `None` = resolve the deployment's proxy URL.
+    rpc_url_override: Option<String>,
+}
+
+/// Bare problem text for the preflight list — `Display` on these variants
+/// carries an `usage:` / `validation [code]:` prefix that reads as noise
+/// inside an enumerated list (the envelope's `error.code` already classifies).
+fn problem_text(e: &CmdError) -> String {
+    match e {
+        CmdError::Usage(m) => m.clone(),
+        CmdError::Validation { message, .. } => message.clone(),
+        other => other.to_string(),
     }
+}
+
+/// gh#144 one-pass input validation. Every locally-checkable problem with
+/// the invocation — missing/blank required values, malformed addresses and
+/// UUIDs, bad timestamps, unparseable criteria, out-of-contract pickup
+/// windows, endpoint-guard conflicts, the budget gate — is collected and
+/// reported in a single enumerated `Usage` error, so fixing one problem
+/// never reveals exactly one more. Runs before any HTTP, keystore prompt,
+/// or signing, and short-circuits `--dry-run` the same way.
+///
+/// Error message texts are unchanged from the former sequential checks —
+/// orchestrators scraping them see the same strings, just together.
+fn preflight(ctx: &Ctx, args: &Args) -> Result<Preflight, CmdError> {
+    let mut problems: Vec<String> = Vec::new();
+    // Each check stores one validated field as `Option`; `None` marks
+    // "check failed, problem already recorded" so every later check still
+    // runs and reports too.
+
+    if args.description.trim().is_empty() {
+        problems.push(
+            "--description must not be empty (server requires a non-blank description)".into(),
+        );
+    }
+
+    if let Err(e) = ctx.enforce_budget_gate(args.budget.as_deref(), args.yes, "post a task") {
+        problems.push(problem_text(&e));
+    }
+
+    let wallet_address = match args
+        .wallet_address
+        .as_deref()
+        .or(ctx.wallet_address.as_deref())
+    {
+        Some(w) => match w.parse::<Address>() {
+            Ok(_) => Some(w.to_string()),
+            Err(e) => {
+                problems.push(format!("--wallet-address is not a valid EVM address: {e}"));
+                None
+            }
+        },
+        None => {
+            problems.push(
+                "--wallet-address (or TEMPO_WALLET_ADDRESS, or wallet_address in config) required to post a task".into(),
+            );
+            None
+        }
+    };
+
+    let direct_agent_id = match (args.assignment_type, args.direct_agent_id.as_deref()) {
+        (AssignmentType::Direct, Some(s)) => match Uuid::parse_str(s) {
+            Ok(u) => Some(Some(u)),
+            Err(e) => {
+                problems.push(format!("--direct-agent-id not a UUID: {e}"));
+                None
+            }
+        },
+        (AssignmentType::Direct, None) => {
+            problems.push("--assignment-type=direct requires --direct-agent-id".into());
+            None
+        }
+        (AssignmentType::Open, _) => Some(None),
+    };
+
+    let execution_deadline =
+        match parse_iso_opt(args.execution_deadline.as_deref(), "--execution-deadline") {
+            Ok(v) => Some(v),
+            Err(e) => {
+                problems.push(problem_text(&e));
+                None
+            }
+        };
+
+    let completion_criteria = match resolve_criteria(args.criteria_file.as_deref(), &args.criteria)
+    {
+        Ok(v) => Some(v),
+        Err(e) => {
+            problems.push(problem_text(&e));
+            None
+        }
+    };
+
+    let pickup_hours = match pickup_hours_to_wire(args.pickup_deadline_hours) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            problems.push(problem_text(&e));
+            None
+        }
+    };
+
+    let rpc_url_override = match args.rpc_url.as_deref() {
+        Some(u) => match validate_override_rpc_url(
+            u,
+            ctx.environment.network(),
+            ctx.allow_custom_endpoints,
+        ) {
+            Ok(u) => Some(Some(u.to_string())),
+            Err(e) => {
+                problems.push(problem_text(&e));
+                None
+            }
+        },
+        None => Some(None),
+    };
+
+    if !problems.is_empty() {
+        let n = problems.len();
+        let list = problems
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("  {}. {p}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(CmdError::Usage(format!(
+            "post preflight found {n} problem{}:\n{list}",
+            if n == 1 { "" } else { "s" }
+        )));
+    }
+
+    Ok(Preflight {
+        wallet_address: wallet_address.expect("no problems ⇒ wallet present"),
+        direct_agent_id: direct_agent_id.expect("no problems ⇒ direct id resolved"),
+        execution_deadline: execution_deadline.expect("no problems ⇒ deadline resolved"),
+        completion_criteria: completion_criteria.expect("no problems ⇒ criteria resolved"),
+        pickup_hours: pickup_hours.expect("no problems ⇒ pickup hours valid"),
+        rpc_url_override: rpc_url_override.expect("no problems ⇒ rpc override resolved"),
+    })
+}
+
+/// Resolve the deployment's proxied RPC endpoint for a post invocation that
+/// did not supply `--rpc-url` (the override path is handled in [`preflight`]).
+///
+/// The deployment's `/config/network` entry for the selected network points
+/// the CLI at `{api_base}/rpc/{network}`, which the server proxies to its
+/// own Tempo upstream (Alchemy by default). The caller should carry the
+/// authenticated reqwest::Client through to `TempoRpcClient`.
+async fn resolve_proxy_rpc_url(client: &TaskFastClient, ctx: &Ctx) -> Result<String, CmdError> {
     let cfg = client.fetch_network_config().await.map_err(|e| match e {
         taskfast_client::Error::Auth(_) | taskfast_client::Error::Validation { .. } => {
             CmdError::Server(format!("fetch network config from {}: {e}", ctx.base_url()))
@@ -438,7 +543,7 @@ async fn resolve_rpc_url(
     // Set TASKFAST_STRICT_ENV_NETWORK=1 to fail-closed.
     // `--allow-custom-endpoints` and `Environment::Local` bypass entirely
     // (matches `enforce_endpoint_guard`).
-    let name = network.as_str();
+    let name = ctx.environment.network().as_str();
     if !ctx.allow_custom_endpoints
         && ctx.environment != crate::Environment::Local
         && cfg.networks.len() != 1
@@ -488,7 +593,7 @@ async fn resolve_rpc_url(
             entry.rpc_url,
         )));
     }
-    Ok((entry.rpc_url.clone(), true))
+    Ok(entry.rpc_url.clone())
 }
 
 /// Merge file-sourced and inline `--criterion` payloads into one validated
