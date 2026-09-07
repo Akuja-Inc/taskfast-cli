@@ -11,8 +11,8 @@ use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use taskfast_cli::cmd::task::{
-    run, ApproveArgs, CancelArgs, Command, DisputeArgs, GetArgs, ListArgs, ListKind, SubmitArgs,
-    TaskStatus,
+    run, ApproveArgs, CancelArgs, Command, DisputeArgs, GetArgs, IdOnlyArgs, ListArgs, ListKind,
+    SubmitArgs, TaskStatus,
 };
 use taskfast_cli::cmd::{CmdError, Ctx};
 use taskfast_cli::{Envelope, Environment};
@@ -889,4 +889,148 @@ async fn cancel_401_surfaces_as_auth() {
     .await
     .expect_err("401");
     assert!(matches!(err, CmdError::Auth(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn claim_409_invalid_status_succeeds_when_already_in_progress() {
+    // gh#143: dev work-start receipts auto-advance `assigned` → `in_progress`,
+    // so the documented explicit claim loses the race and 409s. Re-check the
+    // task and report success with a note instead of an error.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/claim")))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "success": false,
+            "error": "invalid_status",
+            "message": "Task is no longer in assigned status",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/tasks/{TASK_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": TASK_ID,
+            "status": "in_progress",
+        })))
+        .mount(&server)
+        .await;
+
+    let envelope = run(
+        &ctx_for(&server, Some("test-key")),
+        Command::Claim(IdOnlyArgs { id: TASK_ID.into() }),
+    )
+    .await
+    .expect("already-claimed task must report success");
+
+    let v = envelope_value(&envelope);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["claim"]["success"], true);
+    assert_eq!(v["data"]["claim"]["task_id"], TASK_ID);
+    assert_eq!(v["data"]["claim"]["status"], "in_progress");
+    assert_eq!(v["data"]["claim"]["message"], "already in_progress");
+}
+
+#[tokio::test]
+async fn claim_409_invalid_status_stays_error_when_task_cancelled() {
+    // gh#143: the idempotent rewrite only applies when the task is at or past
+    // the claim target. A cancelled task 409ing a claim is a real failure.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/claim")))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "success": false,
+            "error": "invalid_status",
+            "message": "Task is no longer in assigned status",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/tasks/{TASK_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": TASK_ID,
+            "status": "cancelled",
+        })))
+        .mount(&server)
+        .await;
+
+    let err = run(
+        &ctx_for(&server, Some("test-key")),
+        Command::Claim(IdOnlyArgs { id: TASK_ID.into() }),
+    )
+    .await
+    .expect_err("cancelled task claim must stay an error");
+
+    assert!(matches!(err, CmdError::Validation { .. }), "got {err:?}");
+}
+
+#[tokio::test]
+async fn claim_409_receipt_pending_stays_error_even_when_task_advanced() {
+    // gh#143: only `invalid_status` triggers the idempotent re-check. The
+    // work-start guards (`receipt_pending`, `bond_pending`) are real
+    // rejections — never rewrite them to success.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/claim")))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "success": false,
+            "error": "receipt_pending",
+            "message": "Operator receipt required before work start; retry once issued",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/tasks/{TASK_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": TASK_ID,
+            "status": "in_progress",
+        })))
+        .mount(&server)
+        .await;
+
+    let err = run(
+        &ctx_for(&server, Some("test-key")),
+        Command::Claim(IdOnlyArgs { id: TASK_ID.into() }),
+    )
+    .await
+    .expect_err("receipt_pending must stay an error");
+
+    match err {
+        CmdError::Validation { code, .. } => assert_eq!(code, "receipt_pending"),
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn claim_409_invalid_status_propagates_when_status_recheck_fails() {
+    // gh#143: if the follow-up GET fails, surface the original 409 — a
+    // failed re-check must not mask the server's answer with a new error.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/claim")))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "success": false,
+            "error": "invalid_status",
+            "message": "Task is no longer in assigned status",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/tasks/{TASK_ID}")))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "error": "internal", "message": "boom",
+        })))
+        .mount(&server)
+        .await;
+
+    let err = run(
+        &ctx_for(&server, Some("test-key")),
+        Command::Claim(IdOnlyArgs { id: TASK_ID.into() }),
+    )
+    .await
+    .expect_err("failed re-check must surface the original 409");
+
+    match err {
+        CmdError::Validation { code, .. } => assert_eq!(code, "invalid_status"),
+        other => panic!("expected Validation, got {other:?}"),
+    }
 }
