@@ -23,6 +23,16 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   for the environment (or `127.0.0.1` against a local dev server), instead of
   surfacing a bare 404 / raw HTML error page. Pairs with the server-side
   `:api_hosts` issue Akuja-Inc/taskfast#1163.
+- **`task claim` and `settle` are now idempotent when the task already
+  advanced** (gh#143). In dev, work-start receipts auto-advance `assigned` →
+  `in_progress` and settlement auto-disburses, so the documented explicit
+  `claim` / `settle` raced the server and failed (`invalid_status` 409, or
+  "no escrow_id" after auto-disburse cleared the escrow data). Both commands
+  now re-check the task status and, when it has reached or passed the target,
+  return success with a note (`"already in_progress"`, `"already settled"`,
+  `"settlement underway"`) instead of an error. Genuine rejections —
+  `receipt_pending` / `bond_pending` work-start guards, `deadline_expired`,
+  `signer_mismatch`, a re-check showing no advancement — still fail.
 
 ### Changed
 

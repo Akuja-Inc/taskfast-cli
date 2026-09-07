@@ -457,13 +457,74 @@ async fn claim(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
     let client = ctx.client()?;
     let resp = match client.inner().claim_task(&task_id).await {
         Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
+        Err(e) => {
+            let err = map_api_error(e).await;
+            // gh#143: dev work-start receipts auto-advance `assigned` →
+            // `in_progress`, racing the documented explicit claim. A 409
+            // `invalid_status` then means "already claimed" — confirm via a
+            // status re-check and report success with a note. Other 409
+            // codes (the `receipt_pending` / `bond_pending` work-start
+            // guards) are real rejections and stay errors.
+            if matches!(&err, taskfast_client::Error::Validation { code, .. } if code == "invalid_status")
+            {
+                if let Some(status) =
+                    current_status_if(&client, &task_id, status_at_or_past_in_progress).await
+                {
+                    return Ok(Envelope::success(
+                        ctx.environment,
+                        ctx.dry_run,
+                        json!({
+                            "claim": {
+                                "success": true,
+                                "task_id": task_id.to_string(),
+                                "status": status,
+                                "message": format!("already {status}"),
+                            }
+                        }),
+                    ));
+                }
+            }
+            return Err(err.into());
+        }
     };
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
         json!({ "claim": resp }),
     ))
+}
+
+/// Task statuses at or past the `claim` target (`in_progress`) in the task
+/// state machine (wiki/Agent-State-Machines.md). gh#143: a 409
+/// `invalid_status` from claim means the server advanced first; when the
+/// task sits in one of these, the caller's goal is already met. Terminal
+/// states reached *before* `in_progress` (cancelled, expired, …) are
+/// deliberately absent — claiming those stays an error.
+fn status_at_or_past_in_progress(status: &str) -> bool {
+    matches!(
+        status,
+        "in_progress"
+            | "under_review"
+            | "disputed"
+            | "remedied"
+            | "complete"
+            | "disbursement_pending"
+            | "settled"
+    )
+}
+
+/// Re-fetch the task's current status, returning it only when `keep` says the
+/// idempotency target is met. A failed fetch or a non-matching status yields
+/// `None` so the caller surfaces the original error — the re-check must
+/// never mask the server's first answer (gh#143).
+async fn current_status_if(
+    client: &TaskFastClient,
+    task_id: &Uuid,
+    keep: fn(&str) -> bool,
+) -> Option<String> {
+    let task = client.inner().get_task(task_id).await.ok()?.into_inner();
+    let status = task.status?;
+    keep(&status).then_some(status)
 }
 
 async fn refuse(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {

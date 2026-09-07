@@ -200,9 +200,12 @@ async fn settle_403_not_poster_maps_to_auth() {
 }
 
 #[tokio::test]
-async fn settle_409_already_settled_maps_to_validation() {
+async fn settle_409_without_status_advancement_maps_to_validation() {
     // Per `map_api_error`, 409 routes to Validation across the CLI — matches
-    // the existing approve/dispute/cancel contract (tests in task.rs).
+    // the existing approve/dispute/cancel contract (tests in task.rs). The
+    // gh#143 idempotent re-check only rewrites the error when the task has
+    // actually reached (or passed) the settle target; here the re-check GET
+    // still shows `complete`, so the original Validation must propagate.
     let server = MockServer::start().await;
     let keys = fresh_keys();
 
@@ -211,7 +214,7 @@ async fn settle_409_already_settled_maps_to_validation() {
     Mock::given(method("POST"))
         .and(path(format!("/tasks/{TASK_ID}/settle")))
         .respond_with(ResponseTemplate::new(409).set_body_json(json!({
-            "error": "ineligible",
+            "error": "task_not_eligible",
             "detail": "task already settled",
         })))
         .mount(&server)
@@ -526,4 +529,109 @@ async fn settle_missing_settlement_domain_decodes_as_error() {
         ),
         other => panic!("expected Decode, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn settle_already_settled_without_escrow_returns_success_note() {
+    // gh#143: dev auto-disburse settles before the poster's explicit settle,
+    // leaving the task without escrow data. Report success with a note
+    // instead of the "no escrow_id" usage error — and never touch the
+    // keystore (bogus path below proves the early return precedes signing).
+    let server = MockServer::start().await;
+    let mut task = task_detail_json();
+    task["status"] = json!("settled");
+    task["escrow_id"] = Value::Null;
+    task["settlement_deadline"] = Value::Null;
+    mount_task_get(&server, task).await;
+
+    let args = Args {
+        task_id: TASK_ID.into(),
+        deadline_unix: None,
+        keystore: Some("/nonexistent/wallet.json".into()),
+        wallet_password_file: None,
+        wallet_address: None,
+        yes: false,
+    };
+    let envelope = run(&ctx_for(&server, Some("test-key")), args)
+        .await
+        .expect("already-settled task must report success");
+
+    let v = envelope_value(&envelope);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["task_id"], TASK_ID);
+    assert_eq!(v["data"]["status"], "settled");
+    assert_eq!(v["data"]["note"], "already settled");
+}
+
+#[tokio::test]
+async fn settle_disbursement_pending_without_escrow_returns_underway_note() {
+    // gh#143: a task in disbursement_pending has already recorded a settle —
+    // disbursement is in flight, so the explicit settle's goal is met.
+    let server = MockServer::start().await;
+    let mut task = task_detail_json();
+    task["status"] = json!("disbursement_pending");
+    task["escrow_id"] = Value::Null;
+    task["settlement_deadline"] = Value::Null;
+    mount_task_get(&server, task).await;
+
+    let args = Args {
+        task_id: TASK_ID.into(),
+        deadline_unix: None,
+        keystore: Some("/nonexistent/wallet.json".into()),
+        wallet_password_file: None,
+        wallet_address: None,
+        yes: false,
+    };
+    let envelope = run(&ctx_for(&server, Some("test-key")), args)
+        .await
+        .expect("in-flight settlement must report success");
+
+    let v = envelope_value(&envelope);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["status"], "disbursement_pending");
+    assert_eq!(v["data"]["note"], "settlement underway");
+}
+
+#[tokio::test]
+async fn settle_409_task_not_eligible_succeeds_when_recheck_shows_settled() {
+    // gh#143: auto-disburse lands between our preflight GET (which saw a
+    // settleable task) and the signed POST. The 409 then describes a task
+    // that already settled — re-check and report success with a note.
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+
+    // First GET: settleable (complete + escrow). One-shot — the re-check
+    // after the 409 must see the advanced state.
+    Mock::given(method("GET"))
+        .and(path(format!("/tasks/{TASK_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(task_detail_json()))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let mut settled = task_detail_json();
+    settled["status"] = json!("settled");
+    settled["escrow_id"] = Value::Null;
+    Mock::given(method("GET"))
+        .and(path(format!("/tasks/{TASK_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(settled))
+        .mount(&server)
+        .await;
+    mount_readiness(&server).await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/settle")))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "task_not_eligible",
+            "message": "Task is not eligible for this action",
+        })))
+        .mount(&server)
+        .await;
+
+    let envelope = run(&ctx_for(&server, Some("test-key")), base_args(&keys))
+        .await
+        .expect("settle race with auto-disburse must report success");
+
+    let v = envelope_value(&envelope);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["status"], "settled");
+    assert_eq!(v["data"]["note"], "already settled");
 }

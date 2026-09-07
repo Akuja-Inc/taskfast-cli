@@ -91,17 +91,33 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     // fat-finger settle on a huge task should die immediately.
     ctx.enforce_budget_gate(task.budget_max.as_deref(), args.yes, "settle this task")?;
 
-    let escrow_id_hex: String =
-        task.escrow_id
-            .as_ref()
-            .map(|e| e.to_string())
-            .ok_or_else(|| {
-                CmdError::Usage(
-                    "task has no escrow_id; settle requires an initialized escrow \
+    let escrow_id_hex: String = match task.escrow_id.as_ref().map(|e| e.to_string()) {
+        Some(e) => e,
+        None => {
+            // gh#143: dev auto-disburse settles without waiting for the
+            // poster's explicit `settle`, clearing the escrow data. When the
+            // task already reached (or is passing through) the settle target,
+            // report success with a note instead of the "no escrow_id" usage
+            // error — the goal the caller wanted is met. Missing escrow in
+            // any other state is a genuine not-ready error.
+            if let Some(note) = task.status.as_deref().and_then(settlement_note) {
+                return Ok(Envelope::success(
+                    ctx.environment,
+                    ctx.dry_run,
+                    json!({
+                        "task_id": task_id.to_string(),
+                        "status": task.status,
+                        "note": note,
+                    }),
+                ));
+            }
+            return Err(CmdError::Usage(
+                "task has no escrow_id; settle requires an initialized escrow \
                  (task must be in :complete or :disbursement_pending)"
-                        .into(),
-                )
-            })?;
+                    .into(),
+            ));
+        }
+    };
 
     // 3. Resolve deadline: explicit override wins; otherwise require the
     //    server-stored value. Either can be absent but not both.
@@ -235,7 +251,34 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     };
     let resp = match client.inner().settle_task(&task_id, &body).await {
         Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
+        Err(e) => {
+            let err = map_api_error(e).await;
+            // gh#143: auto-disburse can win the race between our preflight
+            // GET and this signed POST — a 409 `task_not_eligible` /
+            // `escrow_not_ready` then describes a task that already settled.
+            // Re-check the status and report success with a note. Genuine
+            // rejections (deadline_expired, signer_mismatch, …) and a
+            // re-check that finds no advancement stay errors.
+            if matches!(&err, taskfast_client::Error::Validation { code, .. }
+                if matches!(code.as_str(), "task_not_eligible" | "escrow_not_ready"))
+            {
+                if let Ok(advanced) = client.inner().get_task(&task_id).await {
+                    let advanced = advanced.into_inner();
+                    if let Some(note) = advanced.status.as_deref().and_then(settlement_note) {
+                        return Ok(Envelope::success(
+                            ctx.environment,
+                            ctx.dry_run,
+                            json!({
+                                "task_id": task_id.to_string(),
+                                "status": advanced.status,
+                                "note": note,
+                            }),
+                        ));
+                    }
+                }
+            }
+            return Err(err.into());
+        }
     };
 
     Ok(Envelope::success(
@@ -246,4 +289,16 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
             "status": resp.status,
         }),
     ))
+}
+
+/// gh#143 note for a task whose settlement already happened (or is in
+/// flight) without this poster's explicit settle — the dev auto-disburse
+/// race. Every other status returns `None`: a settle problem there is a
+/// genuine failure, not an idempotent replay.
+fn settlement_note(status: &str) -> Option<&'static str> {
+    match status {
+        "settled" => Some("already settled"),
+        "disbursement_pending" => Some("settlement underway"),
+        _ => None,
+    }
 }
