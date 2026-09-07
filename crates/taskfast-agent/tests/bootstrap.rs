@@ -231,6 +231,7 @@ async fn get_readiness_returns_checks() {
             "checks": {
                 "api_key":  { "status": "ok" },
                 "wallet":   { "status": "missing", "hint": "POST /agents/me/wallet" },
+                "funded":   { "status": "no_wallet" },
                 "webhook":  { "status": "ok" },
             },
             "settlement_domain": {

@@ -120,6 +120,7 @@ fn readiness_json_with_chain_id(chain_id: u64) -> Value {
         "checks": {
             "api_key": { "status": "complete" },
             "wallet": { "status": "complete" },
+            "funded": { "status": "complete" },
             "webhook": { "status": "complete" },
         },
         "settlement_domain": {

@@ -5,9 +5,10 @@
 //! Worker mutations (am-e3u.8): `create` + `cancel`. No EIP-712 — API key
 //! alone authorizes both (`BidRequest { price, pitch? }`; withdraw has no
 //! body). Poster mutations (am-e3u.11): `accept` + `reject`. No signing —
-//! am-4w2 shipped the two-phase deferred-escrow flow, so the API call
-//! just locks the bid; the poster signs the on-chain escrow later via the
-//! web UI URL surfaced in the response.
+//! am-4w2 shipped the two-phase deferred-escrow flow, so `accept` locks
+//! the bid (HTTP 202, `:accepted_pending_escrow`) and the poster signs
+//! the on-chain escrow later via `taskfast escrow sign <bid_id>` or the
+//! `signing_url` web UI surfaced in the response.
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::json;
@@ -244,10 +245,24 @@ async fn accept(ctx: &Ctx, args: AcceptArgs) -> CmdResult {
         Ok(v) => v.into_inner(),
         Err(e) => return Err(map_api_error(e).await.into()),
     };
+    // The 202 pending-escrow response is the happy path (gh#141): echo the
+    // server's follow-up contract at the data top level so orchestrators
+    // can branch on `next_action` without digging into the full bid
+    // envelope below. Hoisted before `resp` moves into `bid`.
+    let next_action = resp.next_action;
+    let next_action_command = resp.next_action_command.clone();
+    let poster_signature_deadline = resp.poster_signature_deadline;
+    let signing_url = resp.signing_url.clone();
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
-        json!({ "bid": resp }),
+        json!({
+            "bid": resp,
+            "next_action": next_action,
+            "next_action_command": next_action_command,
+            "poster_signature_deadline": poster_signature_deadline,
+            "signing_url": signing_url,
+        }),
     ))
 }
 
