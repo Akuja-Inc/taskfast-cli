@@ -13,6 +13,17 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Fixed
+
+- **`taskfast ping` now diagnoses the api-host rewrite 404** (gh#145). The
+  server rewrites bare CLI paths to `/api/*` only for hosts in its
+  `:api_hosts` list; against any other host every call 404s with no hint
+  why. When the authenticated probe gets a 404 from a reachable server, ping
+  now says the host was not rewritten and points at the `api.<domain>` host
+  for the environment (or `127.0.0.1` against a local dev server), instead of
+  surfacing a bare 404 / raw HTML error page. Pairs with the server-side
+  `:api_hosts` issue Akuja-Inc/taskfast#1163.
+
 ### Changed
 
 - **WebSocket TLS backend switched from native-tls to rustls**

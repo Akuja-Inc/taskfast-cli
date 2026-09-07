@@ -72,9 +72,33 @@ async fn probe_authenticated(ctx: &Ctx) -> Result<(u64, &'static str, String, bo
     let latency_ms = started.elapsed().as_millis() as u64;
 
     if let Err(e) = result {
-        return Err(map_api_error(e).await.into());
+        return Err(map_probe_error(e, &base_url).await);
     }
     Ok((latency_ms, "GET /agents/me", base_url, true))
+}
+
+/// gh#145: a 404 from a server that just answered at the HTTP layer means
+/// the host is not in the server's `:api_hosts` rewrite list, so the request
+/// never reached the API routes — a configuration trap, not a dead endpoint.
+/// Diagnose it explicitly (the server's 404 page carries no hint, and a raw
+/// HTML body must not leak into the message). Pairs with the server-side
+/// `:api_hosts` issue Akuja-Inc/taskfast#1163.
+async fn map_probe_error(e: taskfast_client::api::Error<()>, base_url: &str) -> CmdError {
+    if let taskfast_client::api::Error::UnexpectedResponse(resp) = &e {
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return CmdError::Validation {
+                code: "not_found".into(),
+                message: format!(
+                    "GET /agents/me returned 404 from {base_url}: the server is reachable \
+                     but did not rewrite this host to its /api routes (it only rewrites \
+                     hosts in its :api_hosts list). Point --api-base/TASKFAST_API at the \
+                     api.<domain> host for this environment (e.g. https://api.taskfast.app), \
+                     or use 127.0.0.1 against a local dev server."
+                ),
+            };
+        }
+    }
+    map_api_error(e).await.into()
 }
 
 async fn probe_anonymous(ctx: &Ctx) -> Result<(u64, &'static str, String, bool), CmdError> {
