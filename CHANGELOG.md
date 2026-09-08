@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.18.0] - 2026-09-08
+
 ### Added
 
 - **`taskfast post` validates all inputs in one preflight pass** (gh#144).
