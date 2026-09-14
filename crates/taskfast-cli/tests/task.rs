@@ -1000,6 +1000,178 @@ async fn claim_409_receipt_pending_stays_error_even_when_task_advanced() {
     }
 }
 
+// ─── task retry-fee (gh#156) ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn get_surfaces_fee_debt_state_for_blocked_task() {
+    // gh#1159/gh#1200: a task parked at blocked_on_submission_fee_debt must
+    // carry its recovery shape through the CLI so an agent can tell "fee tx
+    // pending" (wait) from "fee charge failed" (run `task retry-fee`).
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/tasks/{TASK_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": TASK_ID,
+            "title": "test task",
+            "status": "blocked_on_submission_fee_debt",
+            "submission_fee_status": "failed",
+            "submission_fee_tx_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "actionable": false,
+            "blocked_reason": "submission_fee_debt",
+            "next_action": "retry_submission_fee",
+            "next_action_command": "POST /api/tasks/00000000-0000-0000-0000-0000000000aa/retry-fee",
+        })))
+        .mount(&server)
+        .await;
+
+    let envelope = run(
+        &ctx_for(&server, Some("test-key")),
+        Command::Get(GetArgs { id: TASK_ID.into() }),
+    )
+    .await
+    .expect("get should succeed");
+
+    let v = envelope_value(&envelope);
+    let task = &v["data"]["task"];
+    assert_eq!(task["status"], "blocked_on_submission_fee_debt");
+    assert_eq!(task["submission_fee_status"], "failed");
+    assert_eq!(task["actionable"], false);
+    assert_eq!(task["blocked_reason"], "submission_fee_debt");
+    assert_eq!(task["next_action"], "retry_submission_fee");
+    assert!(task["next_action_command"]
+        .as_str()
+        .expect("next_action_command")
+        .contains("/retry-fee"));
+}
+
+#[tokio::test]
+async fn retry_fee_happy_path_returns_task_status_and_message() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "task_id": TASK_ID,
+            "status": "pending_evaluation",
+            "message": "Submission fee charge re-attempted",
+        })))
+        .mount(&server)
+        .await;
+
+    let envelope = run(
+        &ctx_for(&server, Some("test-key")),
+        Command::RetryFee(IdOnlyArgs { id: TASK_ID.into() }),
+    )
+    .await
+    .expect("retry-fee ok");
+
+    let v = envelope_value(&envelope);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["task_id"], TASK_ID);
+    assert_eq!(v["data"]["status"], "pending_evaluation");
+    assert_eq!(v["data"]["message"], "Submission fee charge re-attempted");
+}
+
+#[tokio::test]
+async fn retry_fee_still_blocked_returns_pending_confirmation_status() {
+    // A fresh transfer was broadcast but hasn't confirmed yet — the task
+    // stays parked and the poster keeps polling `task get`.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "task_id": TASK_ID,
+            "status": "blocked_on_submission_fee_debt",
+            "message": "Submission fee charge re-attempted",
+        })))
+        .mount(&server)
+        .await;
+
+    let envelope = run(
+        &ctx_for(&server, Some("test-key")),
+        Command::RetryFee(IdOnlyArgs { id: TASK_ID.into() }),
+    )
+    .await
+    .expect("retry-fee ok");
+
+    let v = envelope_value(&envelope);
+    assert_eq!(v["data"]["status"], "blocked_on_submission_fee_debt");
+}
+
+#[tokio::test]
+async fn retry_fee_dry_run_skips_http() {
+    let server = MockServer::start().await; // no mocks
+    let mut ctx = ctx_for(&server, Some("test-key"));
+    ctx.dry_run = true;
+    let envelope = run(&ctx, Command::RetryFee(IdOnlyArgs { id: TASK_ID.into() }))
+        .await
+        .expect("dry-run ok");
+    let v = envelope_value(&envelope);
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["data"]["action"], "would_retry_fee");
+    assert_eq!(v["data"]["task_id"], TASK_ID);
+}
+
+#[tokio::test]
+async fn retry_fee_bad_uuid_is_usage_error_without_any_http() {
+    let server = MockServer::start().await; // no mocks
+    let err = run(
+        &ctx_for(&server, Some("test-key")),
+        Command::RetryFee(IdOnlyArgs { id: "bad".into() }),
+    )
+    .await
+    .expect_err("bad UUID");
+    assert!(matches!(err, CmdError::Usage(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn retry_fee_409_retry_not_needed_surfaces_validation_code() {
+    // 409 retry_not_needed — the fee transfer is still confirming; the
+    // poster must wait, not retry. Maps to Validation so orchestrators see
+    // the server's stable code.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "retry_not_needed",
+            "message": "submission fee transfer is still awaiting confirmation",
+        })))
+        .mount(&server)
+        .await;
+
+    let err = run(
+        &ctx_for(&server, Some("test-key")),
+        Command::RetryFee(IdOnlyArgs { id: TASK_ID.into() }),
+    )
+    .await
+    .expect_err("409 must surface");
+    match err {
+        CmdError::Validation { code, .. } => assert_eq!(code, "retry_not_needed"),
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn retry_fee_403_surfaces_as_auth() {
+    // Only the poster can retry the fee.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "error": "forbidden",
+            "message": "only the task poster can retry the fee",
+        })))
+        .mount(&server)
+        .await;
+
+    let err = run(
+        &ctx_for(&server, Some("test-key")),
+        Command::RetryFee(IdOnlyArgs { id: TASK_ID.into() }),
+    )
+    .await
+    .expect_err("403 must surface");
+    assert!(matches!(err, CmdError::Auth(_)), "got {err:?}");
+}
+
 #[tokio::test]
 async fn claim_409_invalid_status_propagates_when_status_recheck_fails() {
     // gh#143: if the follow-up GET fails, surface the original 409 — a

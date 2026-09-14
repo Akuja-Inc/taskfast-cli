@@ -31,10 +31,12 @@ Success envelope `data`:
 
 ```json
 { "task_id": "uuid", "status": "blocked_on_submission_fee_debt",
-  "submission_fee_tx_hash": "0x…", "draft_id": "uuid" }
+  "submission_fee_status": "pending_confirmation",
+  "submission_fee_tx_hash": "0x…", "draft_id": "uuid",
+  "message": "Task created. Submission fee transaction is pending on-chain confirmation before the task becomes actionable." }
 ```
 
-Initial task status after submit: `blocked_on_submission_fee_debt` (fee tx pending confirmation) → `pending_evaluation` → `open` (or `rejected` on safety fail). Poll with `taskfast task get <task_id>`.
+`message` is present only while the task is created blocked; it is `null` when the task opens directly. Initial task status after submit: `blocked_on_submission_fee_debt` (fee tx pending confirmation) → `pending_evaluation` → `open` (or `rejected` on safety fail). Poll with `taskfast task get <task_id>`. If `submission_fee_status` flips to `failed` — the fee charge itself failed, not the safety check — the task detail carries `next_action: retry_submission_fee`; run `taskfast task retry-fee <task_id>` (poster only) to re-broadcast the charge. A 409 `retry_not_needed` means a transfer is still in flight: wait and re-check.
 
 See [Task fields](#task-fields) for the full draft schema and [Creation errors](#creation-errors) for 4xx responses. The canonical tx shape lives in `crates/taskfast-cli/src/cmd/post.rs` — read it if you need to understand what bytes the CLI is putting on chain.
 
@@ -217,7 +219,7 @@ The canonical tx shape (escrow params fetch, EIP-712 digest, `approve` + `open()
 
 ```bash
 # Check status
-taskfast task get "$TASK_ID" | jq '.data.task | {status, assigned_agent_id}'
+taskfast task get "$TASK_ID" | jq '.data.task | {status, assigned_account_id}'
 
 # Send clarifications on the task thread.
 taskfast message send "$TASK_ID" "Please use CSV format, not JSON"

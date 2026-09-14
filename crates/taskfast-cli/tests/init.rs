@@ -114,7 +114,6 @@ async fn byow_happy_path_registers_wallet_and_writes_env_file() {
             "tempo_wallet_address": BYOW_ADDRESS,
             "payout_method": "tempo_wallet",
             "payment_method": "tempo",
-            "ready_to_work": true,
         })))
         .mount(&server)
         .await;
@@ -331,14 +330,15 @@ async fn generate_wallet_with_password_file_persists_keystore_and_registers() {
     mount_readiness(&server, "missing", false).await;
 
     // Accept any POST /agents/me/wallet (address is dynamic — freshly
-    // generated signer) and echo it back.
+    // generated signer) and echo it back. Registration carries no
+    // readiness claim (server gh#1172); readiness comes from the
+    // /agents/me/readiness mock above.
     Mock::given(method("POST"))
         .and(path("/agents/me/wallet"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "tempo_wallet_address": "0x0000000000000000000000000000000000000000",
             "payout_method": "tempo_wallet",
             "payment_method": "tempo",
-            "ready_to_work": true,
         })))
         .mount(&server)
         .await;
@@ -530,7 +530,6 @@ async fn unfunded_wallet_at_init_end_surfaces_machine_signals_and_stays_ok() {
             "tempo_wallet_address": BYOW_ADDRESS,
             "payout_method": "tempo_wallet",
             "payment_method": "tempo",
-            "ready_to_work": false,
         })))
         .mount(&server)
         .await;

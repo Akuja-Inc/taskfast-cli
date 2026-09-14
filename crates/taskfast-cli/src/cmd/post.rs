@@ -358,6 +358,30 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         Err(e) => return Err(map_api_error(e).await.into()),
     };
 
+    // gh#156: a task created at `blocked_on_submission_fee_debt` looks like a
+    // stalled post unless the envelope says otherwise. The draft-submit
+    // response carries no server `message` (the server's message exists only
+    // on the direct `POST /tasks` create view), so when the task lands
+    // blocked we mirror the server's canonical create message — the envelope
+    // then distinguishes "waiting for the fee tx to confirm" from "post
+    // failed". `submission_fee_status` above carries the machine state.
+    let blocked = submitted.status == "blocked_on_submission_fee_debt";
+    if blocked {
+        // stderr audit line, same contract as the signing line above — a CI
+        // log must show WHY the task is not `open` yet and how to watch it.
+        eprintln!(
+            "taskfast: task {} parked at blocked_on_submission_fee_debt — \
+             submission-fee transfer confirming on-chain; it opens automatically \
+             once confirmed. Poll `taskfast task get {}`.",
+            submitted.id, submitted.id
+        );
+    }
+    let message = blocked.then(|| {
+        "Task created. Submission fee transaction is pending on-chain \
+         confirmation before the task becomes actionable."
+            .to_string()
+    });
+
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -367,6 +391,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
             "submission_fee_tx_hash": tx_hash_hex,
             "status": submitted.status,
             "submission_fee_status": submitted.submission_fee_status,
+            "message": message,
         }),
     ))
 }

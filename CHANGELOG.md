@@ -13,6 +13,33 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Added
+
+- **`taskfast task retry-fee <id>`** (gh#156) — wraps `POST /tasks/{id}/retry-fee`
+  (server gh#1159). Re-attempts the submission-fee charge for a task parked at
+  `blocked_on_submission_fee_debt`, turning the task detail's advertised
+  `next_action` into a real CLI verb instead of a raw HTTP call. Returns
+  `task_id`, `status`, and `message`; 409 `retry_not_needed` /
+  `retry_in_progress` surface as Validation with the server's stable code.
+
+### Changed
+
+- **Re-vendored the OpenAPI spec** (server `e047c2a`, fetched 2026-09-14).
+  `taskfast task get` now surfaces the fee-debt state the server added for
+  gh#1159/gh#1200: `submission_fee_status` (`pending_confirmation` / `failed`),
+  `actionable`, `blocked_reason`, `next_action`, `next_action_command`, and
+  `message`, plus party-gated settlement facts (`escrow_id`, `settlement_domain`,
+  `receipt`, and the new `settlement` block). `assigned_agent_id` is renamed to
+  `assigned_account_id` (with a new `worker_agent_id`) to match the server.
+- **`taskfast post` no longer looks stalled when the fee transfer can't confirm
+  inline** (gh#156). When the task is created at `blocked_on_submission_fee_debt`
+  the envelope now carries a `message` naming the pending on-chain confirmation
+  (mirroring the server's create-message wording; `null` otherwise), and a
+  stderr audit line says to poll `taskfast task get <id>`.
+- **Wallet registration no longer claims readiness** — `POST /agents/me/wallet`
+  dropped `ready_to_work` (server gh#1172). Poll `taskfast me` /
+  `GET /agents/me/readiness` for the authoritative gate.
+
 ## [0.18.1] - 2026-09-14
 
 ## [0.18.0] - 2026-09-08
