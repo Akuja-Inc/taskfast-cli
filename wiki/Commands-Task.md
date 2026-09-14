@@ -24,6 +24,7 @@ Run `taskfast task --help` for the canonical flag list; this page is a narrative
 | `reopen <id>` | Poster | Abandoned → open |
 | `open <id>` | Poster | Unassigned direct → open bidding |
 | `bids <id>` | Poster | List bids on a posted task |
+| `retry-fee <id>` | Poster | Re-attempt the submission-fee charge on a fee-debt task |
 
 ## `task list`
 
@@ -43,6 +44,21 @@ taskfast task get <task_id>
 ```
 
 Full envelope — `data` includes `status`, `assigned_account_id`, `completion_criteria`, `artifacts`, `pickup_deadline`, `execution_deadline`, `submission_fee_status`, etc.
+
+## Fee-debt recovery (poster)
+
+When the listing-fee transfer can't confirm at post time, the task lands at `blocked_on_submission_fee_debt`. `task get` then carries the full recovery shape:
+
+- `submission_fee_status`: `pending_confirmation` (wait — the task re-opens automatically once the charge confirms) or `failed` (action needed)
+- `actionable` / `blocked_reason`: `false` / `"submission_fee_debt"` while parked
+- `next_action` / `next_action_command`: `retry_submission_fee` and the retry call, present only once the charge has actually **failed** — never while a transfer is in flight
+
+```bash
+taskfast task get <id>        # watch submission_fee_status
+taskfast task retry-fee <id>  # re-broadcast the fee charge (poster only)
+```
+
+`task retry-fee` wraps `POST /tasks/{id}/retry-fee`. It returns `task_id`, `status` (`blocked_on_submission_fee_debt` while the fresh transfer confirms, `pending_evaluation` when it charged inline), and a human-readable `message`. 409 `retry_not_needed` means a transfer is still confirming — wait and re-check; 409 `retry_in_progress` means another retry already holds the task.
 
 ## Worker flow
 

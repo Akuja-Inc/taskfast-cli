@@ -202,6 +202,81 @@ async fn post_happy_path_end_to_end() {
     assert_eq!(v["data"]["submission_fee_tx_hash"], tx_hash_hex);
     assert_eq!(v["data"]["status"], "open");
     assert_eq!(v["data"]["submission_fee_status"], "pending_confirmation");
+    // No fee debt → no message (the key stays present for JSON stability).
+    assert_eq!(v["data"]["message"], Value::Null);
+}
+
+#[tokio::test]
+async fn post_blocked_on_submission_fee_debt_renders_message_and_fee_status() {
+    // gh#156: when the fee transfer can't confirm inline, the task is
+    // created at blocked_on_submission_fee_debt. Without a message the
+    // post looks stalled; the envelope must say the task is waiting on
+    // on-chain confirmation, not that the post failed.
+    let api_server = MockServer::start().await;
+    let rpc_server = MockServer::start().await;
+
+    let signer = PrivateKeySigner::random();
+    let wallet_addr = format!("{:#x}", signer.address());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let keystore_path = tmp.path().join("wallet.json");
+    taskfast_agent::keystore::save_signer(&signer, &keystore_path, "pw").expect("keystore");
+    let password_path = tmp.path().join("pw");
+    std::fs::write(&password_path, b"pw").unwrap();
+
+    let _ = mount_network_config_mock(&api_server).await;
+
+    let draft_id = uuid::Uuid::new_v4();
+    let task_id = uuid::Uuid::new_v4();
+    let calldata_hex = format!("0x{}", "00".repeat(4 + 64));
+    let token_addr = "0x20c0000000000000000000000000000000000000";
+    let tx_hash_hex = format!("0x{}", "bb".repeat(32));
+
+    Mock::given(method("POST"))
+        .and(path("/task_drafts"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "draft_id": draft_id,
+            "payload_to_sign": calldata_hex,
+            "token_address": token_addr,
+        })))
+        .mount(&api_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path(format!("/task_drafts/{draft_id}/submit")))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": task_id,
+            "status": "blocked_on_submission_fee_debt",
+            "submission_fee_status": "pending_confirmation",
+            "submission_fee_tx_hash": tx_hash_hex,
+        })))
+        .mount(&api_server)
+        .await;
+
+    mount_rpc_mocks(&rpc_server, &tx_hash_hex).await;
+
+    let mut args = base_args(
+        Some(wallet_addr.clone()),
+        Some(keystore_path.display().to_string()),
+    );
+    args.wallet_password_file = Some(password_path);
+    args.rpc_url = Some(rpc_server.uri());
+
+    let envelope = run(&ctx_for(&api_server, Some("test-key")), args)
+        .await
+        .expect("post should succeed");
+
+    let v = envelope_value(&envelope);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["task_id"], task_id.to_string());
+    assert_eq!(v["data"]["status"], "blocked_on_submission_fee_debt");
+    assert_eq!(v["data"]["submission_fee_status"], "pending_confirmation");
+    let message = v["data"]["message"]
+        .as_str()
+        .expect("blocked post must carry a message");
+    assert!(
+        message.contains("on-chain confirmation"),
+        "message should name the pending confirmation, got: {message}"
+    );
 }
 
 #[tokio::test]

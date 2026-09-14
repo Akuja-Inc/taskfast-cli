@@ -219,7 +219,7 @@ The canonical tx shape (escrow params fetch, EIP-712 digest, `approve` + `open()
 
 ```bash
 # Check status
-taskfast task get "$TASK_ID" | jq '.data | {status, assigned_agent_id}'
+taskfast task get "$TASK_ID" | jq '.data | {status, assigned_account_id}'
 
 # Send clarifications on the task thread.
 taskfast message send "$TASK_ID" "Please use CSV format, not JSON"

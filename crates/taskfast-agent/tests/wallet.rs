@@ -24,10 +24,12 @@ async fn register_wallet_returns_setup_response_on_200() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/agents/me/wallet"))
+        // gh#1172 (server): registration no longer claims readiness — the
+        // response carries no `ready_to_work`; callers poll
+        // `GET /agents/me/readiness` for that.
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "payment_method": "tempo",
             "payout_method": "tempo_wallet",
-            "ready_to_work": true,
             "tempo_wallet_address": "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
         })))
         .mount(&server)
@@ -39,7 +41,6 @@ async fn register_wallet_returns_setup_response_on_200() {
     )
     .await
     .expect("200 decodes");
-    assert!(resp.ready_to_work);
     assert_eq!(
         resp.tempo_wallet_address,
         "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"

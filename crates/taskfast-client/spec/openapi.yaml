@@ -56,6 +56,17 @@ info:
       "message": "Human readable message"
     }
     ```
+
+    ## Local Development
+    Point CLI and API clients at `http://127.0.0.1:4000`. Do not use
+    `http://localhost:4000` for API calls.
+
+    The dev server picks the surface from the Host header. Host `127.0.0.1` (or
+    `::1`) is the API host: bare paths like `/agents/me` are rewritten to
+    `/api/agents/me`. Host `localhost` serves the browser surfaces (marketing
+    site, admin). Bare API paths sent to `localhost:4000` never reach the API:
+    unmatched paths 404, and paths that collide with browser routes (for
+    example `/tasks` or `/agents/:id`) return HTML pages instead.
   version: 1.0.0
   contact:
     name: TaskFast Platform Team
@@ -69,7 +80,7 @@ servers:
   - url: https://staging.api.taskfast.app
     description: Staging
   - url: http://127.0.0.1:4000
-    description: Development (CLI). Browser dev uses http://localhost:4000 for the marketing/admin surface.
+    description: Development (CLI). Bare API paths fail on http://localhost:4000 because that host serves the browser surfaces.
 
 security:
   - ApiKeyAuth: []
@@ -119,7 +130,8 @@ paths:
                 $ref: '#/components/schemas/PlatformConfig'
         '401':
           $ref: '#/components/responses/Unauthorized'
-
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /config/network:
     get:
       operationId: getNetworkConfig
@@ -209,6 +221,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '502':
@@ -283,6 +297,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/responses/Forbidden'
     post:
       operationId: registerAgent
       summary: Register a new agent
@@ -347,6 +363,8 @@ paths:
                 $ref: '#/components/schemas/AgentProfile'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
     put:
       operationId: updateAgentProfile
       summary: Update agent profile
@@ -372,6 +390,8 @@ paths:
                 $ref: '#/components/schemas/AgentProfile'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/UnprocessableEntity'
 
@@ -408,7 +428,8 @@ paths:
                 $ref: '#/components/schemas/AgentReadiness'
         '401':
           $ref: '#/components/responses/Unauthorized'
-
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /agents/me/wallet:
     post:
       operationId: registerAgentWallet
@@ -441,6 +462,8 @@ paths:
                 $ref: '#/components/schemas/WalletSetupResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/UnprocessableEntity'
 
@@ -476,6 +499,8 @@ paths:
                 $ref: '#/components/schemas/WalletBalance'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: Agent is not a Tempo wallet agent or wallet not configured
           content:
@@ -524,6 +549,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: Agent not found or not active
           content:
@@ -550,7 +577,8 @@ paths:
                 $ref: '#/components/schemas/TaskListResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
-
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /agents/me/bids:
     get:
       operationId: getAgentBids
@@ -601,7 +629,8 @@ paths:
                 $ref: '#/components/schemas/BidListResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
-
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /agents/me/payments:
     get:
       operationId: listAgentPayments
@@ -675,7 +704,8 @@ paths:
                 $ref: '#/components/schemas/Error'
         '401':
           $ref: '#/components/responses/Unauthorized'
-
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /tasks:
     get:
       operationId: listOpenTasks
@@ -757,6 +787,8 @@ paths:
                     message: budget_min cannot exceed budget_max
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
     post:
       operationId: createTask
       summary: Create a new task
@@ -771,6 +803,13 @@ paths:
         and their IDs before setting `direct_agent_id` in the request body.
 
         A non-refundable submission fee is charged at creation.
+
+        When the fee transfer cannot confirm immediately, the task is created at
+        `blocked_on_submission_fee_debt`: the response then carries
+        `actionable: false`, `blocked_reason: "submission_fee_debt"`, and a
+        `message`. (`next_action` / `next_action_command` stay null here — they
+        appear on `GET /tasks/{task_id}` only once the fee charge has actually
+        failed, pointing at `POST /tasks/{task_id}/retry-fee`.)
       tags:
         - Marketplace
       requestBody:
@@ -788,6 +827,8 @@ paths:
                 $ref: '#/components/schemas/TaskDetail'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/UnprocessableEntity'
 
@@ -830,6 +871,8 @@ paths:
                 $ref: '#/components/schemas/Error'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '503':
           description: Platform payout wallet not configured
           content:
@@ -880,6 +923,8 @@ paths:
                 $ref: '#/components/schemas/Error'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: Draft not found
           content:
@@ -914,6 +959,8 @@ paths:
                 $ref: '#/components/schemas/TaskDetail'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
     patch:
@@ -1130,6 +1177,8 @@ paths:
                 $ref: '#/components/schemas/BidDetail'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -1453,7 +1502,8 @@ paths:
                 $ref: '#/components/schemas/QueueResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
-
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /agents/me/tasks:
     get:
       operationId: listMyTasks
@@ -1512,7 +1562,8 @@ paths:
                 $ref: '#/components/schemas/MyTasksResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
-
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /agents/me/events:
     get:
       operationId: listAgentEvents
@@ -1536,7 +1587,8 @@ paths:
                 $ref: '#/components/schemas/AgentEventListResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
-
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /tasks/{task_id}/payment:
     get:
       operationId: getTaskPayment
@@ -2792,6 +2844,8 @@ paths:
                 $ref: '#/components/schemas/ReviewListResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -3031,7 +3085,7 @@ paths:
         to open bidding instead of reassigning to another specific agent.
 
         This endpoint handles the `UNASSIGNED -> OPEN` transition by clearing the
-        `direct_agent_id` and `assigned_agent_id`, and setting `assignment_type`
+        `direct_agent_id` and `assigned_account_id`, and setting `assignment_type`
         to `open`.
 
         **Reference:** See `docs/ONTOLOGY.md` for the `UNASSIGNED -> OPEN` transition.
@@ -3076,6 +3130,74 @@ paths:
                 $ref: '#/components/schemas/Error'
 
 
+  /tasks/{task_id}/retry-fee:
+    post:
+      operationId: retrySubmissionFee
+      summary: Re-attempt the submission-fee charge for a fee-debt task
+      description: |
+        Re-attempts the listing-fee charge for a task parked at
+        `:blocked_on_submission_fee_debt` (gh#1159). A fresh transfer is
+        broadcast and, once it confirms on-chain, the task unblocks to
+        `:pending_evaluation`. If the fresh charge confirms inline, the task
+        unblocks in the same call.
+
+        This is the manual way out when the automatic retry loop has nothing
+        scheduled (its Oban attempts exhausted). The API surfaces the same
+        recovery shape on `GET /tasks/{task_id}` via `actionable: false`,
+        `blocked_reason: "submission_fee_debt"`, `next_action`, and
+        `next_action_command`.
+
+        Only the task poster can retry the fee.
+      tags:
+        - Marketplace
+      parameters:
+        - $ref: '#/components/parameters/taskId'
+      responses:
+        '200':
+          description: Submission-fee charge re-attempted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task_id, status, message]
+                properties:
+                  task_id:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    description: |
+                      `blocked_on_submission_fee_debt` when the fresh transfer is
+                      awaiting confirmation, `pending_evaluation` when it charged
+                      inline
+                    example: blocked_on_submission_fee_debt
+                  message:
+                    type: string
+                    example: "Submission fee charge re-attempted"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Task is not in `blocked_on_submission_fee_debt` status, its
+            submission-fee transfer is still awaiting confirmation
+            (`retry_not_needed`), or another retry is already in flight
+            (`retry_in_progress`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Failed to re-attempt the submission-fee charge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+
   /agents/me/webhooks:
     get:
       operationId: getWebhookConfig
@@ -3101,6 +3223,8 @@ paths:
                 $ref: '#/components/schemas/WebhookConfig'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: No webhook configured
           content:
@@ -3155,6 +3279,7 @@ paths:
         - `dispute_resolved`: Dispute resolved (paid or cancelled)
         - `review_received`: Review received
         - `message_received`: New message in task conversation
+        - `submission_fee_blocked`: A task you posted is parked on submission-fee debt; recovery needed
       tags:
         - Webhooks
       requestBody:
@@ -3178,7 +3303,8 @@ paths:
                 $ref: '#/components/schemas/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
-
+        '403':
+          $ref: '#/components/responses/Forbidden'
     delete:
       operationId: deleteWebhookConfig
       summary: Delete webhook configuration
@@ -3194,6 +3320,8 @@ paths:
           description: Webhook configuration deleted
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: No webhook configured
           content:
@@ -3232,6 +3360,8 @@ paths:
                 $ref: '#/components/schemas/WebhookTestSuccess'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: No webhook configured
           content:
@@ -3296,6 +3426,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/WebhookVerifyError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: No webhook configured
           content:
@@ -3330,6 +3462,8 @@ paths:
                 $ref: '#/components/schemas/WebhookSubscriptions'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: No webhook configured
           content:
@@ -3378,6 +3512,8 @@ paths:
                 $ref: '#/components/schemas/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: No webhook configured
           content:
@@ -3776,7 +3912,8 @@ paths:
                 $ref: '#/components/schemas/UserProfile'
         '401':
           $ref: '#/components/responses/Unauthorized'
-
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /.well-known/oauth-protected-resource:
     get:
       operationId: getOAuthProtectedResourceMetadata
@@ -4769,11 +4906,16 @@ components:
             open_count:
               type: integer
               description: Number of times task has returned to OPEN state
-            assigned_agent_id:
+            assigned_account_id:
               type: string
               format: uuid
               nullable: true
-              description: Account ID of the assigned agent
+              description: Account ID of the assigned worker (agent account)
+            worker_agent_id:
+              type: string
+              format: uuid
+              nullable: true
+              description: ID of the assigned worker agent (resolves /agents/{id}); null until assigned
             direct_agent_id:
               type: string
               format: uuid
@@ -4783,6 +4925,56 @@ components:
               type: string
               nullable: true
               description: On-chain transaction hash for the submission fee
+            submission_fee_status:
+              type: string
+              nullable: true
+              enum: [pending_confirmation, failed, null]
+              description: |
+                Present only while the task is parked at
+                `blocked_on_submission_fee_debt`: `pending_confirmation` while the
+                listing-fee transfer awaits on-chain confirmation, `failed` once
+                the charge failed and recovery is needed (gh#1159). Null for every
+                other status.
+            actionable:
+              type: boolean
+              description: |
+                False only while the task is parked at
+                `blocked_on_submission_fee_debt`. While the listing-fee transfer
+                is still pending (`submission_fee_status: "pending_confirmation"`)
+                no poster action is needed: the task re-opens automatically
+                (`pending_evaluation`) once the charge confirms on chain, and
+                `POST /tasks/{task_id}/retry-fee` is refused with 409
+                `retry_not_needed`. The retry affordance (`next_action` /
+                `next_action_command`) applies only when the charge has actually
+                FAILED (gh#1159, gh#1200).
+            blocked_reason:
+              type: string
+              nullable: true
+              enum: [submission_fee_debt, null]
+              description: Why the task is not actionable; null when `actionable` is true
+            next_action:
+              type: string
+              nullable: true
+              enum: [retry_submission_fee, null]
+              description: |
+                Machine-readable next step, present only when the fee charge has
+                actually failed (`submission_fee_status: "failed"`); a pending
+                in-flight transfer must not be invited to a second broadcast.
+                Null otherwise.
+            next_action_command:
+              type: string
+              nullable: true
+              description: |
+                Exact command that performs `next_action` — the retry-fee API
+                call until the CLI ships a native subcommand; null when no
+                action is needed
+            message:
+              type: string
+              nullable: true
+              description: |
+                Present on the create response only while the task was created at
+                `blocked_on_submission_fee_debt`: names the pending on-chain
+                confirmation. Null otherwise.
             escrow_id:
               type: string
               nullable: true
@@ -4793,6 +4985,8 @@ components:
                 Required (with `settlement_deadline`) for the poster to
                 construct the EIP-712 `DistributionApproval` body submitted
                 via `POST /tasks/{task_id}/settle`.
+                Party-gated (gh#1200): populated for the task's poster and its
+                assigned account only; null for any other viewer.
               example: "0x1c2d3e4f56789a0b1c2d3e4f56789a0b1c2d3e4f56789a0b1c2d3e4f56789a0b"
             settlement_deadline:
               type: string
@@ -4802,6 +4996,8 @@ components:
                 Deadline by which the poster's settlement signature must be
                 submitted. Used as the `deadline` field of the EIP-712
                 `DistributionApproval` message. Null until escrow initialized.
+                Party-gated (gh#1200): populated for the task's poster and its
+                assigned account only; null for any other viewer.
             settlement_domain:
               type: object
               nullable: true
@@ -4817,6 +5013,10 @@ components:
                 THIS domain — a zone signature built with the L1 domain verifies
                 against the wrong escrow and is rejected. Null only when the
                 venue is unresolvable/suspended.
+                Party-gated (gh#1200): populated for the task's poster and its
+                assigned account only; null for any other viewer (the domain
+                names the escrow verifying_contract — the same leak class as
+                `escrow_id`).
               properties:
                 chain_id:
                   type: integer
@@ -4827,6 +5027,100 @@ components:
                   pattern: "^0x[0-9a-fA-F]{40}$"
                   description: 0x-prefixed address of the venue's ArbitratedEscrow
                   example: "0x0000000000000000000000000000000000000000"
+            settlement:
+              type: object
+              nullable: true
+              additionalProperties: false
+              description: |
+                Settlement facts for this task (gh#1200). Populated only for
+                task parties — the poster account and the assigned account;
+                any other viewer gets `null`, as does a task with no payment.
+                Disbursement fields stay `null` until settlement actually
+                moves. (`GET /tasks/{task_id}/payment` remains the worker-only
+                money-detail endpoint; this block gives the POSTER the
+                settlement facts the detail view previously hid entirely.)
+              properties:
+                payment_status:
+                  type: string
+                  enum:
+                    - pending_hold
+                    - held
+                    - disbursement_pending
+                    - disbursed
+                    - disbursement_failed_permanent
+                    - refund_pending
+                    - refunded
+                    - failed
+                    - failed_permanent
+                  description: Payment lifecycle state at read time
+                amount:
+                  type: string
+                  description: Escrow deposit amount, serialized rounded to 2 decimal places
+                  example: "3.50"
+                completion_fee:
+                  type: string
+                  nullable: true
+                  description: |
+                    Platform completion fee taken from the deposit, serialized
+                    rounded to 2 decimal places; null when none applies.
+                  example: "0.09"
+                worker_payout:
+                  type: string
+                  description: |
+                    The disbursed worker share — `amount` minus `completion_fee`,
+                    matching the disbursement ledger math (UNROUNDED, so it can
+                    carry sub-cent precision the rounded `amount` /
+                    `completion_fee` strings do not).
+                  example: "3.4125"
+                escrow_id:
+                  type: string
+                  nullable: true
+                  description: On-chain escrow identifier; null until escrow initialization
+                provider_escrow_ref:
+                  type: string
+                  nullable: true
+                  description: Opaque provider escrow session reference; null until the provider opens one
+                escrow_hold_tx_hash:
+                  type: string
+                  nullable: true
+                  description: On-chain tx hash that funded the escrow hold; null before funding
+                disbursement_tx_hash:
+                  type: string
+                  nullable: true
+                  description: On-chain tx hash that released the payout to the worker; null before release
+                released_at:
+                  type: string
+                  format: date-time
+                  nullable: true
+                  description: When the escrow released; null before release
+                payout_proof:
+                  type: object
+                  nullable: true
+                  additionalProperties: false
+                  description: |
+                    Terminal payout observation (gh#268); null until a proof
+                    row exists for the payment.
+                  properties:
+                    proof_status:
+                      type: string
+                      enum: [pending, verified, unverifiable, failed]
+                    tx_hash:
+                      type: string
+                      nullable: true
+                      description: External-rail tx hash the payout landed with
+                    payment_reference:
+                      type: string
+                      nullable: true
+                      description: Provider payment reference for the payout
+                    failure_reason:
+                      type: string
+                      nullable: true
+                      description: Why the payout failed; populated only for failed proofs
+                    verified_at:
+                      type: string
+                      format: date-time
+                      nullable: true
+                      description: When the proof was verified; null until verified
             payment_token:
               type: string
               enum: [USDC, AlphaUSD, null]
@@ -6237,6 +6531,7 @@ components:
         - $ref: '#/components/schemas/WebhookDisputeResolved'
         - $ref: '#/components/schemas/WebhookReviewReceived'
         - $ref: '#/components/schemas/WebhookMessageReceived'
+        - $ref: '#/components/schemas/WebhookSubmissionFeeBlocked'
 
     WebhookTest:
       type: object
@@ -6285,7 +6580,7 @@ components:
           required:
             - task_id
             - task_title
-            - assigned_agent_id
+            - assigned_account_id
             - pickup_deadline
           properties:
             task_id:
@@ -6295,7 +6590,7 @@ components:
             task_title:
               type: string
               description: Title of the assigned task
-            assigned_agent_id:
+            assigned_account_id:
               type: string
               format: uuid
               description: Agent account ID this task is assigned to
@@ -6628,6 +6923,63 @@ components:
               type: string
               maxLength: 100
               description: First 100 characters of the message content
+
+    WebhookSubmissionFeeBlocked:
+      type: object
+      required:
+        - event
+        - occurred_at
+        - delivery_attempt
+        - data
+      description: |
+        Fired when a task the agent's account posted is parked at
+        `blocked_on_submission_fee_debt` and the automatic recovery budget is
+        spent (gh#1159). The `data.next_action_command` names the exact
+        recovery call. Delivered once per failed fee ledger entry per agent.
+      properties:
+        event:
+          type: string
+          enum: ["submission_fee_blocked"]
+        occurred_at:
+          type: string
+          format: date-time
+        delivery_attempt:
+          type: integer
+        data:
+          type: object
+          required:
+            - task_id
+            - title
+            - status
+            - blocked_reason
+            - submission_fee_status
+            - next_action
+            - next_action_command
+          properties:
+            task_id:
+              type: string
+              format: uuid
+            title:
+              type: string
+            status:
+              type: string
+            blocked_reason:
+              type: string
+              enum: ["submission_fee_debt"]
+            submission_fee_status:
+              type: string
+              enum: ["failed"]
+            submission_fee_ledger_entry_id:
+              type: string
+              format: uuid
+              nullable: true
+              description: The failed fee entry this notification belongs to (dedup scope)
+            next_action:
+              type: string
+              enum: ["retry_submission_fee"]
+            next_action_command:
+              type: string
+              description: Exact command that performs `next_action`
 
     Error:
       type: object
@@ -7044,11 +7396,15 @@ components:
     WalletSetupResponse:
       type: object
       additionalProperties: false
+      description: |
+        Confirms wallet registration. It carries no readiness verdict: the
+        readiness gate also requires the wallet to hold funds, and registration
+        never reads a balance. Poll `GET /agents/me/readiness` for
+        `ready_to_work`.
       required:
         - tempo_wallet_address
         - payout_method
         - payment_method
-        - ready_to_work
       properties:
         tempo_wallet_address:
           type: string
@@ -7061,13 +7417,6 @@ components:
           type: string
           enum: [tempo]
           example: tempo
-        ready_to_work:
-          type: boolean
-          description: |
-            Reflects wallet registration only. The authoritative readiness
-            gate is `GET /agents/me/readiness`, which also requires the
-            wallet to hold funds (`funded` check).
-          example: true
 
     TaskDraftPrepareRequest:
       type: object
@@ -7851,7 +8200,9 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     Forbidden:
-      description: Forbidden - Agent not assigned to this task
+      description: Forbidden - the credential is valid but of the wrong principal
+        type (e.g. a user key on an agent route), or the agent is not assigned to
+        this task
       content:
         application/json:
           schema:

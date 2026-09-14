@@ -70,6 +70,11 @@ pub enum Command {
     Reopen(IdOnlyArgs),
     /// Poster: convert a direct-assigned task into an open bid auction.
     Open(IdOnlyArgs),
+    /// Poster: re-attempt the submission-fee charge for a task parked at
+    /// `blocked_on_submission_fee_debt` (gh#1159). Only callable by the
+    /// poster; the server broadcasts a fresh fee transfer and unblocks the
+    /// task once it confirms on-chain.
+    RetryFee(IdOnlyArgs),
     /// Poster: edit task metadata (title/description/budget/windows).
     Edit(EditArgs),
 }
@@ -137,8 +142,8 @@ pub struct GetArgs {
 }
 
 /// Shared shape for subcommands that take only a task UUID and no body —
-/// claim / refuse / concede / abort. Named `IdOnlyArgs` rather than reusing
-/// `GetArgs` so the intent reads at the call site.
+/// claim / refuse / concede / abort / retry-fee. Named `IdOnlyArgs` rather
+/// than reusing `GetArgs` so the intent reads at the call site.
 #[derive(Debug, Parser)]
 pub struct IdOnlyArgs {
     /// Task UUID.
@@ -252,6 +257,7 @@ pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
         Command::Reassign(args) => reassign(ctx, args).await,
         Command::Reopen(args) => reopen(ctx, args).await,
         Command::Open(args) => open(ctx, args).await,
+        Command::RetryFee(args) => retry_fee(ctx, args).await,
         Command::Edit(args) => edit(ctx, args).await,
     }
 }
@@ -663,6 +669,39 @@ async fn open(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
         ctx.environment,
         ctx.dry_run,
         json!({ "open": resp }),
+    ))
+}
+
+/// Poster: re-attempt the submission-fee charge for a task parked at
+/// `blocked_on_submission_fee_debt` (gh#1159, CLI gh#156). Wraps
+/// `POST /tasks/{id}/retry-fee` — the same call the task detail's
+/// `next_action_command` advertises, so the recovery path is a real CLI
+/// verb instead of a raw HTTP request. 409 `retry_not_needed` (transfer
+/// still confirming) and `retry_in_progress` map to Validation so
+/// orchestrators see the server's stable code.
+async fn retry_fee(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
+    let task_id = Uuid::parse_str(&args.id)
+        .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
+    if ctx.dry_run {
+        return Ok(Envelope::success(
+            ctx.environment,
+            ctx.dry_run,
+            json!({ "action": "would_retry_fee", "task_id": task_id.to_string() }),
+        ));
+    }
+    let client = ctx.client()?;
+    let resp = match client.inner().retry_submission_fee(&task_id).await {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    Ok(Envelope::success(
+        ctx.environment,
+        ctx.dry_run,
+        json!({
+            "task_id": resp.task_id,
+            "status": resp.status,
+            "message": resp.message,
+        }),
     ))
 }
 

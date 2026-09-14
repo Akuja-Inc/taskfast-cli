@@ -210,13 +210,14 @@ async fn mount_readiness(server: &MockServer, wallet_status: &str, ready_to_work
 }
 
 async fn mount_post_wallet(server: &MockServer, address: &str) {
+    // Registration carries no readiness claim (server gh#1172); the
+    // readiness mock above owns the ready_to_work field.
     Mock::given(method("POST"))
         .and(path("/agents/me/wallet"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "tempo_wallet_address": address,
             "payout_method": "tempo_wallet",
             "payment_method": "tempo",
-            "ready_to_work": true,
         })))
         .mount(server)
         .await;
@@ -361,7 +362,6 @@ async fn interactive_generate_wallet_uses_prompted_password() {
             "tempo_wallet_address": "0x0000000000000000000000000000000000000000",
             "payout_method": "tempo_wallet",
             "payment_method": "tempo",
-            "ready_to_work": true,
         })))
         .mount(&server)
         .await;

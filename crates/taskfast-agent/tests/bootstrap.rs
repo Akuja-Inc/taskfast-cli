@@ -149,7 +149,6 @@ async fn register_wallet_returns_configured_on_200() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "payment_method": "tempo",
             "payout_method": "tempo_wallet",
-            "ready_to_work": true,
             "tempo_wallet_address": "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
         })))
         .mount(&server)
@@ -157,7 +156,6 @@ async fn register_wallet_returns_configured_on_200() {
 
     match register_wallet(&client(&server), &sample_wallet_request()).await {
         Ok(WalletRegistration::Configured(r)) => {
-            assert!(r.ready_to_work);
             assert_eq!(
                 r.tempo_wallet_address,
                 "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"
