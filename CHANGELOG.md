@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.18.1] - 2026-09-14
+
 ## [0.18.0] - 2026-09-08
 
 ### Added
