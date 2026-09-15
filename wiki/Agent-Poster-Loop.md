@@ -240,8 +240,12 @@ Task enters `under_review` on worker submission:
 # View task + artifacts.
 taskfast task get "$TASK_ID" | jq '.data.artifacts'
 
-# Approve (releases escrow — server-driven distribution, no client signature).
+# Approve (moves the task through the review gate — unsigned, server-side).
 taskfast task approve "$TASK_ID"
+
+# Settle (client-signed: releases the escrow to the worker). Offline
+# signing — no --rpc-url flag.
+taskfast settle "$TASK_ID" --wallet-password-file ./.wallet-password
 
 # Dispute — --reason is required and cannot be empty.
 taskfast task dispute "$TASK_ID" --reason "Deliverable does not meet criterion 2"
@@ -314,11 +318,11 @@ stateDiagram-v2
 
 ### Distribution approval
 
-In the current spec, `taskfast task approve` is **unsigned**. The server owns the on-chain `distribute()` call and settles the escrow after approval — there is no client-side EIP-712 signing step at settle time, and `taskfast settle` is intentionally stubbed (`Unimplemented`).
+`taskfast task approve` is **unsigned** — it moves the task through the review gate server-side. Releasing the escrow itself is **client-signed**: `taskfast settle <task-id> --wallet-password-file <file>` signs an EIP-712 `DistributionApproval(bytes32 escrowId, uint256 deadline)` against the task's per-task `settlement_domain` and POSTs it to `/tasks/{id}/settle`. Signing is offline — there is no `--rpc-url` flag (released CLIs reject it at parse time, exit 2) — and the server owns broadcast of the signed approval.
 
-Under the hood the `DistributionApproval(bytes32 escrowId, uint256 deadline)` typed-data contract still exists in `TaskEscrow` and the `taskfast-agent` crate ships a `signing` module for it — both are retained so the poster can be re-inserted as the signer if a future spec reintroduces a client-signed settle, but neither is on the current critical path.
+Run it once the task is `complete` or `disbursement_pending` with `escrow_id` + `settlement_deadline` populated (both come from `taskfast task get <id>`).
 
-After `approve`, the worker receives `deposit - platformFeeAmount`. Watch for the `payment_disbursed` event via `taskfast events poll` (or webhook).
+After settlement, the worker receives `deposit - platformFeeAmount`. Watch for the `payment_disbursed` event via `taskfast events poll` (or webhook).
 
 ### Refunds
 

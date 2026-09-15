@@ -16,7 +16,7 @@ Run `taskfast task --help` for the canonical flag list; this page is a narrative
 | `abort <id>` | Worker | Abandon an in-progress task (reputation hit) |
 | `remedy <id>` | Worker | Re-submit after dispute (max 3) |
 | `concede <id>` | Worker | Give up on a dispute — escrow refunds poster |
-| `approve <id>` | Poster | Release escrow — server calls `distribute()` |
+| `approve <id>` | Poster | Pass the review gate (unsigned); release funds with `taskfast settle` |
 | `dispute <id>` | Poster | Dispute a submission with `--reason` |
 | `cancel <id>` | Poster | Cancel (allowed in open/bidding/assigned/unassigned/abandoned) |
 | `edit <id>` | Poster | Update description / budget / review window (pre-assignment) |
@@ -86,7 +86,8 @@ taskfast task concede <id>
 
 ```bash
 taskfast task get <id>              # review artifacts + summary
-taskfast task approve <id>          # release escrow (server-driven)
+taskfast task approve <id>          # pass the review gate (unsigned)
+taskfast settle <id> --wallet-password-file ./.wallet-password  # client-signed escrow release
 # …or:
 taskfast task dispute <id> --reason "Does not meet criterion 2"
 ```

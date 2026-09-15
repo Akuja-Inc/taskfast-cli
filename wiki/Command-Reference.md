@@ -30,7 +30,7 @@ Wallet flows additionally read `TEMPO_WALLET_ADDRESS`, `TEMPO_KEY_SOURCE`, `TASK
 | [`task`](Commands-Task) | Both | ✅ | list / get / submit / approve / dispute / cancel / claim / refuse / abort / remedy / concede / reassign / reopen / open / edit / retry-fee |
 | [`bid`](Commands-Bid) | Both | ✅ / ⏳ | list / create / cancel; accept + reject (poster) |
 | [`post`](Commands-Post) | Poster | ✅ | Two-phase draft + sign + submit |
-| `settle` | Poster | ⏳ | Stub — `Unimplemented`. Server owns `distribute()` today |
+| `settle` | Poster | ✅ | Client-signed escrow release: EIP-712 `DistributionApproval` → `POST /tasks/{id}/settle` |
 | `escrow sign` | Poster | ✅ | Deferred-accept: EIP-712 sign + `approve` + `open()` + finalize |
 | [`events`](Commands-Events) | Both | ✅ | poll / ack / stream (JSONL) / schema |
 | [`webhook`](Commands-Webhook) | Both | ✅ | register / test / subscribe / get / delete |
@@ -83,6 +83,18 @@ taskfast skills --yes
 Installs the bundled `taskfast-agent` skill into both `./.claude/skills/taskfast-agent/` and `./.agents/skills/taskfast-agent/` under the current working directory.
 
 Interactive runs prompt before writing. Non-interactive runs fail closed unless `--yes` is passed. `--dry-run` reports the install plan and writes nothing.
+
+## `settle`
+
+```bash
+taskfast settle <task-id> --wallet-password-file ./.wallet-password
+```
+
+Poster-only: signs an EIP-712 `DistributionApproval` **offline** against the task's per-task `settlement_domain` (venue-scoped; falls back to the readiness domain when the task carries none) and POSTs it to `/tasks/{id}/settle`, releasing the escrowed funds to the worker. Requires the task to be in `complete` or `disbursement_pending` with `escrow_id` + `settlement_deadline` populated.
+
+Flags: `--wallet-password-file` (keystore password; `TASKFAST_WALLET_PASSWORD` env wins when set), `--keystore` (env `TEMPO_KEY_SOURCE`), `--wallet-address` (fail-early mismatch check against the keystore; env `TEMPO_WALLET_ADDRESS`), `--deadline-unix` (override the deadline signed into the approval; defaults to the task's `settlement_deadline`), `--yes` (oversized-budget ack).
+
+Signing is fully offline — there is **no `--rpc-url` flag**; released CLIs reject it at parse time (exit 2) before any network I/O. The signed approval goes to the server, which owns broadcast.
 
 ## Subcommand guides
 
