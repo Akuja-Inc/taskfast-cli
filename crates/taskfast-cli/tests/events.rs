@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! End-to-end tests for `taskfast events poll` (single-page read).
+//! End-to-end tests for `taskfast events` poll / ack / schema.
 //!
 //! Stands up a wiremock server, drives `cmd::events::run` directly, and
 //! asserts on the JSON envelope shape + error mapping.
@@ -132,110 +132,24 @@ async fn poll_missing_api_key_errors_before_any_http_call() {
     assert!(matches!(err, CmdError::MissingApiKey), "got {err:?}");
 }
 
+/// gh#169: the server has no HTTP ack route, so `events ack` must fail
+/// locally with a pointer to the stream's socket ack instead of POSTing.
 #[tokio::test]
-async fn ack_posts_and_returns_acked_at() {
+async fn ack_is_unsupported_and_points_to_ack_stdin() {
     let server = MockServer::start().await;
-    let event_id = "00000000-0000-0000-0000-0000000000e1";
-    Mock::given(method("POST"))
-        .and(path(format!("/agents/me/events/{event_id}/ack")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "event_id": event_id,
-            "acked_at": "2026-04-16T00:00:00Z",
-        })))
-        .mount(&server)
-        .await;
-
-    let envelope = run(
-        &ctx_for(&server, Some("test-key")),
-        Command::Ack(AckArgs {
-            event_id: event_id.into(),
-        }),
-    )
-    .await
-    .expect("ack should succeed");
-
-    let v = envelope_value(&envelope);
-    assert_eq!(v["ok"], true);
-    assert_eq!(v["data"]["event_id"], event_id);
-    assert_eq!(v["data"]["acked_at"], "2026-04-16T00:00:00Z");
-}
-
-#[tokio::test]
-async fn ack_404_surfaces_as_validation_not_found() {
-    let server = MockServer::start().await;
-    let event_id = "00000000-0000-0000-0000-0000000000e2";
-    Mock::given(method("POST"))
-        .and(path(format!("/agents/me/events/{event_id}/ack")))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
-            "error": "not_found",
-            "message": "Event not found for this agent",
-        })))
-        .mount(&server)
-        .await;
-
     let err = run(
         &ctx_for(&server, Some("test-key")),
         Command::Ack(AckArgs {
-            event_id: event_id.into(),
+            event_id: "00000000-0000-0000-0000-0000000000e1".into(),
         }),
     )
     .await
-    .expect_err("404 → Validation");
+    .expect_err("ack → Usage");
     match err {
-        CmdError::Validation { code, .. } => assert_eq!(code, "not_found"),
-        other => panic!("expected Validation, got {other:?}"),
+        CmdError::Usage(msg) => assert!(msg.contains("--ack-stdin"), "{msg}"),
+        other => panic!("expected Usage, got {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn ack_422_surfaces_as_validation_invalid_event_id() {
-    let server = MockServer::start().await;
-    let event_id = "not-a-uuid";
-    Mock::given(method("POST"))
-        .and(path(format!("/agents/me/events/{event_id}/ack")))
-        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
-            "error": "invalid_event_id",
-            "message": "event_id must be a UUID",
-        })))
-        .mount(&server)
-        .await;
-
-    let err = run(
-        &ctx_for(&server, Some("test-key")),
-        Command::Ack(AckArgs {
-            event_id: event_id.into(),
-        }),
-    )
-    .await
-    .expect_err("422 → Validation");
-    match err {
-        CmdError::Validation { code, .. } => assert_eq!(code, "invalid_event_id"),
-        other => panic!("expected Validation, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn ack_401_surfaces_as_auth_error() {
-    let server = MockServer::start().await;
-    let event_id = "00000000-0000-0000-0000-0000000000e3";
-    Mock::given(method("POST"))
-        .and(path(format!("/agents/me/events/{event_id}/ack")))
-        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
-            "error": "invalid_api_key",
-            "message": "bad key",
-        })))
-        .mount(&server)
-        .await;
-
-    let err = run(
-        &ctx_for(&server, Some("test-key")),
-        Command::Ack(AckArgs {
-            event_id: event_id.into(),
-        }),
-    )
-    .await
-    .expect_err("401 → Auth");
-    assert!(matches!(err, CmdError::Auth(_)), "got {err:?}");
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]

@@ -7,11 +7,10 @@
 //!   read). Envelope-wrapped like every other subcommand.
 //! * [`stream`] — long-running WebSocket to `/socket/agent` that emits
 //!   one JSONL line per event on stdout. Bypasses the envelope — stdout
-//!   is the contract. Ack via `taskfast events ack <id>` from a
-//!   separate process.
-//! * [`ack`] — `POST /api/agents/me/events/:id/ack`. Advances the
-//!   server-side cursor and releases the in-flight slot so the next
-//!   event can be pushed on the live stream.
+//!   is the contract. `--ack-stdin` acks events on the same socket,
+//!   which advances the server-side cursor and releases the next event.
+//! * [`ack`] — retired. The server has no HTTP ack route; the command
+//!   fails with a pointer to `events stream --ack-stdin`.
 //! * [`schema`] — `GET /api/asyncapi.json`. Prints the full AsyncAPI
 //!   2.6 document or filters to a single event type via `--event`.
 
@@ -38,11 +37,12 @@ pub enum Command {
     /// Bypasses the JSON envelope: every line is either an event
     /// payload or a sentinel (`{"sentinel":"connected"}`,
     /// `{"sentinel":"reconnecting"}`, `{"sentinel":"resumed"}`,
-    /// `{"sentinel":"closing"}`). Ack each event from a separate
-    /// process via `taskfast events ack <id>`.
+    /// `{"sentinel":"closing"}`, `{"sentinel":"acked",…}`). Pass
+    /// `--ack-stdin` and write each event id to stdin once handled;
+    /// the server holds later events until the current one is acked.
     Stream(StreamArgs),
-    /// POST /agents/me/events/:id/ack — advance cursor + release
-    /// in-flight slot on the live stream.
+    /// Unsupported: the server has no HTTP ack route. Use
+    /// `events stream --ack-stdin`.
     Ack(AckArgs),
     /// GET /asyncapi.json — AsyncAPI 2.6 schema for the event stream.
     Schema(SchemaArgs),
@@ -54,7 +54,7 @@ pub enum Command {
 pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
     match cmd {
         Command::Poll(a) => poll::run(ctx, a).await,
-        Command::Ack(a) => ack::run(ctx, a).await,
+        Command::Ack(a) => ack::run(a),
         Command::Schema(a) => schema::run(ctx, a).await,
         Command::Stream(_) => Err(CmdError::Usage(
             "`events stream` must be dispatched by main.rs (bypass envelope)".into(),

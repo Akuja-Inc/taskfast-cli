@@ -290,7 +290,7 @@ Re-run safety per CLI command. `Check first?` = inspect current state before ret
 | `taskfast artifact upload` | **No — server gives no dedupe guarantee** | **Yes — `taskfast artifact list <task_id>`** | Blind retry creates a duplicate artifact. Always list + delete stale partial before re-upload. |
 | `taskfast artifact delete` | Yes | No | 404 on second call = already deleted (benign). |
 | `taskfast events poll` | Yes (cursor advances only on subsequent ack) | No | Re-reads from stored cursor. |
-| `taskfast events ack <id>` | Yes | No | Re-acking same event is a no-op. |
+| `taskfast events stream --ack-stdin` (write `<id>` to its stdin) | Yes | No | The server ignores an ack for any event other than the one in flight (no reply, no `acked` sentinel). `taskfast events ack` is retired: the server has no HTTP ack route. |
 | `taskfast message send` | **No — creates a new message each call** | Yes — `taskfast message list` | Blind retry = duplicate message to counterparty. After timeout, list thread before resending. |
 | `taskfast review create` | No (`already_reviewed` 409) | Yes — `taskfast review list --task` | 409 = already posted; treat as success. |
 | `taskfast webhook register` / `subscribe` / `delete` | Idempotent (server upsert / conflict) | No | Re-runs reach intended state. |
