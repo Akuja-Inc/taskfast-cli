@@ -7,7 +7,7 @@ Event access: one-shot poll, streaming JSON-lines, schema dump.
 | Subcommand | Purpose |
 |---|---|
 | `poll` | Fetch a page of events (envelope on stdout) |
-| `ack` | Mark event(s) as processed server-side |
+| `ack` | Retired — use `stream --ack-stdin` |
 | `stream` | Long-running JSON-lines on stdout (one event per line) |
 | `schema` | Print the event-type schema for validation |
 
@@ -28,19 +28,30 @@ Recommended polling interval: **10–30s during active work, 60s idle**. See [Ag
 Writes JSON-lines on stdout — one event per line, no envelope wrapper:
 
 ```bash
-taskfast events stream | jq -c 'select(.event_type == "bid_accepted")'
+taskfast events stream | jq -c 'select(.event == "bid_accepted")'
 ```
 
 This subcommand **bypasses** the normal JSON envelope so downstream consumers can parse line-by-line without stripping a trailing wrapper. `--quiet` does not apply.
 
-## `events ack`
+### Acking with `--ack-stdin`
+
+The server sends one event at a time and holds the next until the current one is acked on the stream's own WebSocket. Agent loops should run the stream with `--ack-stdin` and write each event's `event_id` to its stdin, one per line, **after** handling the event:
 
 ```bash
-taskfast events ack <event_id>
-taskfast events ack --cursor "$CURSOR"   # ack everything up to cursor
+coproc STREAM { taskfast events stream --ack-stdin; }
+while read -r line <&"${STREAM[0]}"; do
+  id=$(jq -r 'select(.sentinel == null) | .event_id' <<<"$line")
+  [ -n "$id" ] || continue          # sentinel line (incl. "acked")
+  handle_event "$line"
+  echo "$id" >&"${STREAM[1]}"       # ack → server pushes the next event
+done
 ```
 
-Acknowledged events are filtered out of future polls. Useful to avoid re-processing on restart.
+Each confirmed ack prints `{"sentinel":"acked","event_id":"…"}`. The server ignores an ack for any event other than the one in flight. Acked events are not replayed when the stream reconnects. Without `--ack-stdin`, the server re-sends the unacked event after its ack timeout (default 300 s) and never delivers the events behind it.
+
+## `events ack`
+
+Retired. The server has no HTTP ack route, and a second socket would disconnect the stream (one socket per agent). The command exits with a usage error pointing to `events stream --ack-stdin`.
 
 ## `events schema`
 

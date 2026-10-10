@@ -304,7 +304,7 @@ Override the generic table when the command sits in a known risk class. CLI defa
 | `taskfast message send` | 429, 500-503 | 1 (then verify) | 500ms | **No server dedupe** — re-list thread before retry. |
 | `taskfast post` (draft submit) | 429, 500-503 | 2 | 1s | Draft id stable within GC window; 404 `draft_not_found` after long retry → re-post from scratch. |
 | `taskfast events poll` | 429, 500-503, network | 5 | 1s | Pure pagination — cursor only advances on subsequent success. |
-| `taskfast events ack` | 429, 500-503 | 3 | 500ms | Ack is idempotent; re-ack is no-op. |
+| `taskfast events stream --ack-stdin` | WebSocket drop | Reconnects until stopped | 1s, 30s cap | Ids written while the socket is down are sent after rejoin. An ack lost with a dropped socket is harmless: the server redelivers the in-flight event after rejoin, so ack it again. `taskfast events ack` is retired (no HTTP ack route). |
 | Rate-limit-sensitive bulk poll | 429 | ∞ with jitter | per group table above | When 429s stack, increase interval (10s → 30s → 60s) rather than hammering. |
 
 Non-retryable error codes by bucket: 400/403/404/422 → fix the request. 401 → check agent status (may be paused — see [Status gate](BOOT.md#status-gate)). 409 → read-after-write, usually prior call landed.

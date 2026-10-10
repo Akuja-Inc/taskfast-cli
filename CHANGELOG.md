@@ -13,6 +13,23 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.19.0] - 2026-10-10
+
+### Fixed
+
+- **`taskfast events stream` no longer stalls on its first event** (gh#169).
+  The server holds every later event until the in-flight one is acked on the
+  stream's own WebSocket. New `--ack-stdin` flag reads event ids from stdin
+  (one per line) and sends each as an `ack` message on the socket. Confirmed
+  acks print `{"sentinel":"acked","event_id":…}`.
+
+### Removed
+
+- **`taskfast events ack` no longer sends a request.** It POSTed
+  `/agents/me/events/:id/ack`, a route the server never had (404). It now
+  exits with a usage error pointing to `events stream --ack-stdin`. The
+  bundled skill (`BOOT.md`, `TROUBLESHOOTING.md`) and the wiki are updated.
+
 ## [0.18.3] - 2026-09-21
 
 ## [0.18.2] - 2026-09-15

@@ -56,5 +56,5 @@ rust_decimal = { workspace = true }
 
 [dev-dependencies]
 wiremock = "0.6"
-tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util", "net", "process", "io-util"] }
 tempfile = "3"

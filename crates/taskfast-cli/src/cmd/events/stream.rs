@@ -11,6 +11,8 @@
 //! * `{"sentinel":"resumed"}`      — reconnect succeeded; backlog drains.
 //! * `{"sentinel":"closing"}`      — SIGINT/SIGTERM received; exiting 0.
 //! * `{"sentinel":"auth_failed"}`  — server rejected the API key; exits 2.
+//! * `{"sentinel":"acked","event_id":"…"}` — server confirmed an ack sent
+//!   via `--ack-stdin`.
 //!
 //! # Auth
 //!
@@ -20,14 +22,19 @@
 //!
 //! # Ack mechanic
 //!
-//! This subcommand **does not** ack. Acks travel via a separate process:
-//! ```text
-//!   taskfast events ack <event_id>
-//! ```
-//! which POSTs `/api/agents/me/events/:id/ack`. The server's channel
-//! subscribes to a per-agent ack PubSub topic, so the HTTP ack pumps the
-//! next event on the live stream without IPC between the two CLI
-//! processes.
+//! The server keeps one event in flight and pushes the next only after the
+//! current one is acked as an `ack` message on this channel — there is no
+//! HTTP ack route, and a second socket would kick this one (one socket per
+//! agent). With `--ack-stdin` the stream reads event ids from stdin, one
+//! per line, and sends each as `[join_ref, ref, "agent:me", "ack",
+//! {"event_id": id}]`. Write the id after handling the event to keep
+//! at-least-once delivery.
+//!
+//! The server only replies to an ack for the in-flight event; a stale id
+//! gets no reply and no `acked` sentinel. Ids written while the socket is
+//! down wait in the pipe until rejoin. An ack lost with a dying socket is
+//! harmless: the server replays from its ack cursor on rejoin, so the
+//! event is redelivered and can be acked again.
 //!
 //! # Protocol
 //!
@@ -37,7 +44,7 @@
 //! (1s → 2s → 4s → … → 30s cap); same backlog replays from cursor on
 //! resume (server-side state).
 
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,6 +52,7 @@ use std::time::Duration;
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use tokio::time::{sleep, Instant};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::Uri;
@@ -66,10 +74,18 @@ pub struct StreamArgs {
     /// themselves (e.g. systemd unit with `Restart=on-failure`).
     #[arg(long)]
     pub no_reconnect: bool,
+
+    /// Read event ids from stdin, one per line, and ack each on this
+    /// stream's socket. The server holds every later event until the
+    /// in-flight one is acked, so write the id after handling the event.
+    #[arg(long)]
+    pub ack_stdin: bool,
 }
 
 /// Topic the CLI joins on the socket.
 const TOPIC: &str = "agent:me";
+/// Ref of the `phx_join` push; its reply carries the same ref.
+const JOIN_REF: &str = "1";
 /// Phoenix heartbeat cadence. Matches the server default.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// Reconnect backoff ceiling.
@@ -98,6 +114,7 @@ pub async fn run(ctx: &Ctx, args: StreamArgs) -> ExitCode {
     let mut first_connect = true;
 
     let shutdown = install_shutdown_signal();
+    let mut ack_lines = args.ack_stdin.then(spawn_stdin_reader);
 
     loop {
         if shutdown.is_cancelled() {
@@ -105,7 +122,16 @@ pub async fn run(ctx: &Ctx, args: StreamArgs) -> ExitCode {
             return ExitCode::SUCCESS;
         }
 
-        match run_once(&ws_url, &api_key, first_connect, args.once, &shutdown).await {
+        match run_once(
+            &ws_url,
+            &api_key,
+            first_connect,
+            args.once,
+            &shutdown,
+            ack_lines.as_mut(),
+        )
+        .await
+        {
             ConnectOutcome::AuthFailed => {
                 emit_sentinel("auth_failed");
                 return ExitCode::from(2);
@@ -155,6 +181,7 @@ async fn run_once(
     first_connect: bool,
     once: bool,
     shutdown: &ShutdownToken,
+    mut ack_lines: Option<&mut UnboundedReceiver<String>>,
 ) -> ConnectOutcome {
     let req = match build_request(ws_url, api_key) {
         Ok(r) => r,
@@ -180,7 +207,7 @@ async fn run_once(
     let (mut sink, mut source) = ws.split();
 
     // Phoenix join
-    let join_msg = phx_frame("1", "1", TOPIC, "phx_join", json!({}));
+    let join_msg = phx_frame(JOIN_REF, JOIN_REF, TOPIC, "phx_join", json!({}));
     if sink.send(Message::Text(join_msg.into())).await.is_err() {
         return ConnectOutcome::Disconnected;
     }
@@ -204,6 +231,22 @@ async fn run_once(
                 }
                 heartbeat_next = Instant::now() + HEARTBEAT_INTERVAL;
             }
+            // Acks only make sense on a joined channel.
+            line = next_ack(&mut ack_lines), if join_acked => match line {
+                Some(id) => {
+                    let id = id.trim();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    msg_ref += 1;
+                    let ack = phx_frame(JOIN_REF, &msg_ref.to_string(), TOPIC, "ack", json!({ "event_id": id }));
+                    if sink.send(Message::Text(ack.into())).await.is_err() {
+                        return ConnectOutcome::Disconnected;
+                    }
+                }
+                // EOF or unreadable stdin: stop reading, keep streaming.
+                None => ack_lines = None,
+            },
             frame = source.next() => {
                 match frame {
                     Some(Ok(Message::Text(text))) => {
@@ -237,6 +280,9 @@ async fn run_once(
                                     return ConnectOutcome::OnceDone;
                                 }
                             }
+                            FrameKind::Acked(id) => {
+                                emit_event(&json!({ "sentinel": "acked", "event_id": id }));
+                            }
                             FrameKind::Ignored => {}
                         }
                     }
@@ -256,6 +302,29 @@ async fn run_once(
     }
 }
 
+/// Read stdin on a plain thread. tokio's stdin read can't be cancelled, so
+/// a pending read would hold the runtime open at exit for as long as the
+/// host keeps the pipe open; a detached thread doesn't.
+fn spawn_stdin_reader() -> UnboundedReceiver<String> {
+    let (tx, rx) = unbounded_channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// Next ack id from stdin; never resolves once stdin is closed (`None`).
+async fn next_ack(rx: &mut Option<&mut UnboundedReceiver<String>>) -> Option<String> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn sleep_until(deadline: Instant) {
     let now = Instant::now();
     if deadline <= now {
@@ -267,6 +336,7 @@ async fn sleep_until(deadline: Instant) {
 enum FrameKind {
     JoinOk,
     JoinError,
+    Acked(String),
     Event(Value),
     Ignored,
 }
@@ -281,6 +351,14 @@ fn classify_frame(frame: &Value) -> FrameKind {
     let payload = &arr[4];
 
     if event == "phx_reply" && topic == TOPIC {
+        // Any ref other than the join's answers an ack we sent. Its error
+        // replies must not reach the JoinError → auth_failed path.
+        if arr[1].as_str() != Some(JOIN_REF) {
+            return payload
+                .pointer("/response/event_id")
+                .and_then(Value::as_str)
+                .map_or(FrameKind::Ignored, |id| FrameKind::Acked(id.to_string()));
+        }
         let status = payload.get("status").and_then(|v| v.as_str()).unwrap_or("");
         return match status {
             "ok" => FrameKind::JoinOk,
@@ -503,6 +581,21 @@ mod tests {
             FrameKind::Event(p) => assert_eq!(p["event"], "task_assigned"),
             _ => panic!("expected Event"),
         }
+    }
+
+    #[test]
+    fn classify_recognizes_ack_reply() {
+        let f = json!(["1", "2", "agent:me", "phx_reply", { "status": "ok", "response": { "event_id": "x" } }]);
+        match classify_frame(&f) {
+            FrameKind::Acked(id) => assert_eq!(id, "x"),
+            _ => panic!("expected Acked"),
+        }
+    }
+
+    #[test]
+    fn classify_ignores_non_join_error_reply() {
+        let f = json!(["1", "2", "agent:me", "phx_reply", { "status": "error", "response": { "reason": "event_id required" } }]);
+        assert!(matches!(classify_frame(&f), FrameKind::Ignored));
     }
 
     #[test]
