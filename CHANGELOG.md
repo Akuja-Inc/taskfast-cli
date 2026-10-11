@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.19.4] - 2026-10-11
+
 ### Fixed
 
 - **A response field the CLI doesn't read can go missing without breaking
