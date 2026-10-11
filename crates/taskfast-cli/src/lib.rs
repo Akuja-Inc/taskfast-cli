@@ -110,12 +110,12 @@ pub fn is_well_known_api_base(url: &str) -> bool {
     well_known_api_bases().any(|w| w.trim_end_matches('/') == trimmed)
 }
 
-/// Derive the human-facing account-tokens URL from an API base URL.
+/// Derive the human-facing Personal API Key URL from an API base URL.
 ///
-/// Strips a leading `api.` from the host (so `api.taskfast.app` →
-/// `taskfast.app`) and appends `/account/tokens`. Hosts without the
-/// `api.` prefix (localhost, bare domains, IPs) are passed through.
-/// Scheme and port are preserved.
+/// Strips the `api` label from the host (so `api.taskfast.app` →
+/// `taskfast.app`) and links to `/accounts#personal-api-key`. Hosts without
+/// an `api` label (localhost, bare domains, IPs) are passed through.
+/// Scheme and port are preserved; existing path, query, and fragment are replaced.
 pub fn accounts_url(api_base: &str) -> String {
     match url::Url::parse(api_base) {
         Ok(mut u) => {
@@ -123,13 +123,16 @@ pub fn accounts_url(api_base: &str) -> String {
             if let Some(h) = rewritten {
                 let _ = u.set_host(Some(&h));
             }
-            u.set_path("/account/tokens");
+            u.set_path("/accounts");
             u.set_query(None);
-            u.set_fragment(None);
+            u.set_fragment(Some("personal-api-key"));
             u.to_string()
         }
         // Fallback for a malformed base: best-effort string concat.
-        Err(_) => format!("{}/account/tokens", api_base.trim_end_matches('/')),
+        Err(_) => format!(
+            "{}/accounts#personal-api-key",
+            api_base.trim_end_matches('/')
+        ),
     }
 }
 
@@ -237,7 +240,7 @@ mod tests {
     fn accounts_url_strips_api_prefix_prod() {
         assert_eq!(
             accounts_url("https://api.taskfast.app"),
-            "https://taskfast.app/account/tokens"
+            "https://taskfast.app/accounts#personal-api-key"
         );
     }
 
@@ -245,7 +248,7 @@ mod tests {
     fn accounts_url_strips_api_prefix_staging() {
         assert_eq!(
             accounts_url("https://staging.api.taskfast.app"),
-            "https://staging.taskfast.app/account/tokens"
+            "https://staging.taskfast.app/accounts#personal-api-key"
         );
     }
 
@@ -253,7 +256,7 @@ mod tests {
     fn accounts_url_passthrough_localhost_with_port() {
         assert_eq!(
             accounts_url("http://127.0.0.1:4000"),
-            "http://127.0.0.1:4000/account/tokens"
+            "http://127.0.0.1:4000/accounts#personal-api-key"
         );
     }
 
@@ -261,20 +264,23 @@ mod tests {
     fn accounts_url_passthrough_bare_domain() {
         assert_eq!(
             accounts_url("https://taskfast.app"),
-            "https://taskfast.app/account/tokens"
+            "https://taskfast.app/accounts#personal-api-key"
         );
     }
 
     #[test]
-    fn accounts_url_drops_existing_path_and_query() {
+    fn accounts_url_replaces_existing_path_query_and_fragment() {
         assert_eq!(
-            accounts_url("https://api.taskfast.app/v1?x=1"),
-            "https://taskfast.app/account/tokens"
+            accounts_url("https://api.taskfast.app/v1?x=1#old-section"),
+            "https://taskfast.app/accounts#personal-api-key"
         );
     }
 
     #[test]
     fn accounts_url_malformed_falls_back_to_concat() {
-        assert_eq!(accounts_url("not a url"), "not a url/account/tokens");
+        assert_eq!(
+            accounts_url("not a url"),
+            "not a url/accounts#personal-api-key"
+        );
     }
 }

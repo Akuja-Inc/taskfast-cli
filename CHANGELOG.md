@@ -13,6 +13,12 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Fixed
+
+- **Interactive `taskfast init` links to the correct Personal API key page**
+  (gh#180). The PAT prompt now points to `/accounts#personal-api-key` instead
+  of the nonexistent `/account/tokens` route, for production and staging.
+
 ## [0.19.4] - 2026-10-11
 
 ### Fixed
