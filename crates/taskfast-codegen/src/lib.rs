@@ -121,7 +121,7 @@ const NULL_VARIANT_SCHEMA_KEYS: &[&str] = &["oneOf", "anyOf"];
 /// The schema key names where the property is declared, not the generated Rust
 /// type: a component name (`AgentProfile`), a nested inline object under it
 /// (`AgentReadiness.settlement_domain`), or an `allOf` member
-/// (`TaskDetail.allOf.1`). See [`schema_key`].
+/// (`TaskDetail.allOf.1`). The private `schema_key` builds these keys.
 pub const KEEP_REQUIRED: &[(&str, &str)] = &[
     // taskfast-agent events stream: paging needs the cursor envelope.
     ("AgentEventListResponse", "meta"),
