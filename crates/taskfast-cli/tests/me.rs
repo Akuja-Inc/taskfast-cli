@@ -85,6 +85,45 @@ async fn me_happy_path_returns_profile_readiness_envelope() {
 }
 
 #[tokio::test]
+async fn me_preserves_unknown_agent_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/agents/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "alice",
+            "status": "suspended_pending_review",
+            "capabilities": [],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/agents/me/readiness"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ready_to_work": false,
+            "checks": {
+                "api_key": {"status": "complete"},
+                "wallet": {"status": "missing"},
+                "funded": {"status": "no_wallet"},
+                "webhook": {"status": "not_configured", "required": false},
+            },
+            "settlement_domain": {
+                "chain_id": 42431,
+                "verifying_contract": "0x0000000000000000000000000000000000000000",
+            },
+        })))
+        .mount(&server)
+        .await;
+
+    let envelope = run(&ctx_for(&server), Args { resume: false })
+        .await
+        .expect("unknown agent status must decode");
+    assert_eq!(
+        envelope_value(&envelope)["data"]["profile"]["status"],
+        "suspended_pending_review"
+    );
+}
+
+#[tokio::test]
 async fn me_surfaces_not_ready_verbatim() {
     let server = MockServer::start().await;
 

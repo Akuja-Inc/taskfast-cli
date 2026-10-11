@@ -249,7 +249,7 @@ async fn accept(ctx: &Ctx, args: AcceptArgs) -> CmdResult {
     // server's follow-up contract at the data top level so orchestrators
     // can branch on `next_action` without digging into the full bid
     // envelope below. Hoisted before `resp` moves into `bid`.
-    let next_action = resp.next_action;
+    let next_action = &resp.next_action;
     let next_action_command = resp.next_action_command.clone();
     let poster_signature_deadline = resp.poster_signature_deadline;
     let signing_url = resp.signing_url.clone();

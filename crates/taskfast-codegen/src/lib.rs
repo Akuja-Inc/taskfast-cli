@@ -76,6 +76,14 @@
 //! Every `additionalProperties: false` is removed so generated types ignore
 //! unknown keys — an additive server change must not break installed CLIs
 //! (gh#172).
+//!
+//! ## Response-enum strip
+//!
+//! String enums reachable from success or `default` response bodies are opened
+//! so additive server enum values decode in released CLIs (gh#176). Request-only
+//! enums stay typed; shared schemas prioritize response tolerance.
+
+use std::collections::BTreeSet;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_yaml::{Mapping, Value};
@@ -140,6 +148,8 @@ pub struct Report {
     /// collapsed to a single preferred type (progenitor 0.x can't pick among
     /// `>1` request media types — "more media types than expected").
     pub request_media_collapsed: usize,
+    /// Count of string `enum` keywords removed from response-reachable schemas.
+    pub response_enums_stripped: usize,
 }
 
 fn normalize_in_place(doc: &mut Value, aliases: &[&str]) -> Result<Report> {
@@ -217,7 +227,165 @@ fn normalize_in_place(doc: &mut Value, aliases: &[&str]) -> Result<Report> {
     // Pass 7: open closed objects (gh#172). See [`strip_closed_objects`].
     strip_closed_objects(doc);
 
+    // Pass 8: open response string enums (gh#176). See [`strip_response_enums`].
+    report.response_enums_stripped = strip_response_enums(doc);
+
     Ok(report)
+}
+
+/// Remove string `enum` keywords from schemas reachable from 2xx or `default`
+/// response bodies, following local `$ref`s transitively. Returns the count.
+///
+/// typify emits closed Rust enums that reject server-added values (gh#176).
+/// Opening response enums makes them `String`; request-body and parameter
+/// enums stay typed unless shared with a response (e.g. CompletionCriterionInput),
+/// in which case response tolerance wins. Non-string enums are left alone.
+/// Runs after the non-2xx and null-type-variant strips: error-only schemas are
+/// out of scope, and removed null branches must not make schemas reachable.
+/// `nullable: true` is preserved even when the enum contains `null`, so typify
+/// still emits `Option<String>` for nullable response values.
+fn strip_response_enums(doc: &mut Value) -> usize {
+    let mut visited = BTreeSet::new();
+    let mut enums = BTreeSet::new();
+    if let Some(paths) = doc.get("paths").and_then(Value::as_mapping) {
+        for (path, item) in paths {
+            let Some(path) = path.as_str() else { continue };
+            for verb in [
+                "get", "put", "post", "delete", "patch", "options", "head", "trace",
+            ] {
+                let Some(responses) = item
+                    .get(verb)
+                    .and_then(|op| op.get("responses"))
+                    .and_then(Value::as_mapping)
+                else {
+                    continue;
+                };
+                for code in responses
+                    .keys()
+                    .filter_map(Value::as_str)
+                    .filter(|code| is_success_or_default(code))
+                {
+                    let root = ["paths", path, verb, "responses", code]
+                        .map(str::to_owned)
+                        .to_vec();
+                    collect_response_enums(doc, &root, &mut visited, &mut enums);
+                }
+            }
+        }
+    }
+    let mut stripped = 0;
+    for path in enums {
+        let mut node = &mut *doc;
+        for key in &path {
+            node = if let Value::Sequence(seq) = node {
+                &mut seq[key.parse::<usize>().expect("collected sequence index")]
+            } else {
+                node.get_mut(key.as_str()).expect("collected schema path")
+            };
+        }
+        if node
+            .as_mapping_mut()
+            .and_then(|map| map.remove("enum"))
+            .is_some()
+        {
+            stripped += 1;
+        }
+    }
+    stripped
+}
+
+fn value_at_path<'a>(doc: &'a Value, path: &[String]) -> Option<&'a Value> {
+    path.iter().try_fold(doc, |node, key| match node {
+        Value::Sequence(seq) => seq.get(key.parse::<usize>().ok()?),
+        _ => node.get(key.as_str()),
+    })
+}
+
+fn local_ref_path(node: &Value) -> Option<Vec<String>> {
+    Some(
+        node.get("$ref")?
+            .as_str()?
+            .strip_prefix("#/")?
+            .split('/')
+            .map(|key| key.replace("~1", "/").replace("~0", "~"))
+            .collect(),
+    )
+}
+
+fn collect_response_enums(
+    doc: &Value,
+    path: &[String],
+    visited: &mut BTreeSet<Vec<String>>,
+    enums: &mut BTreeSet<Vec<String>>,
+) {
+    if !visited.insert(path.to_vec()) {
+        return;
+    }
+    let Some(response) = value_at_path(doc, path) else {
+        return;
+    };
+    if let Some(target) = local_ref_path(response) {
+        collect_response_enums(doc, &target, visited, enums);
+    }
+    if let Some(content) = response.get("content").and_then(Value::as_mapping) {
+        for media in content.keys().filter_map(Value::as_str) {
+            let mut schema_path = path.to_vec();
+            schema_path.extend(["content".to_owned(), media.to_owned(), "schema".to_owned()]);
+            collect_schema_enums(doc, &schema_path, visited, enums);
+        }
+    }
+}
+
+fn collect_schema_enums(
+    doc: &Value,
+    path: &[String],
+    visited: &mut BTreeSet<Vec<String>>,
+    enums: &mut BTreeSet<Vec<String>>,
+) {
+    if !visited.insert(path.to_vec()) {
+        return;
+    }
+    let Some(schema) = value_at_path(doc, path) else {
+        return;
+    };
+    if schema.get("type").and_then(Value::as_str) == Some("string") && schema.get("enum").is_some()
+    {
+        enums.insert(path.to_vec());
+    }
+    if let Some(target) = local_ref_path(schema) {
+        collect_schema_enums(doc, &target, visited, enums);
+    }
+    for key in [
+        "allOf",
+        "oneOf",
+        "anyOf",
+        "properties",
+        "additionalProperties",
+        "items",
+    ] {
+        let Some(child) = schema.get(key) else {
+            continue;
+        };
+        let mut child_path = path.to_vec();
+        child_path.push(key.to_owned());
+        match child {
+            Value::Sequence(seq) => {
+                for index in 0..seq.len() {
+                    let mut item_path = child_path.clone();
+                    item_path.push(index.to_string());
+                    collect_schema_enums(doc, &item_path, visited, enums);
+                }
+            }
+            Value::Mapping(map) if key == "properties" => {
+                for property in map.keys().filter_map(Value::as_str) {
+                    let mut property_path = child_path.clone();
+                    property_path.push(property.to_owned());
+                    collect_schema_enums(doc, &property_path, visited, enums);
+                }
+            }
+            _ => collect_schema_enums(doc, &child_path, visited, enums),
+        }
+    }
 }
 
 /// Recursively remove every `additionalProperties: false`.
@@ -880,6 +1048,269 @@ components:
         let (out2, report2) = normalize_spec_with_report(&out1).unwrap();
         assert_eq!(out1, out2);
         assert_eq!(report2.null_variants_stripped, 0);
+    }
+
+    #[test]
+    fn response_enums_are_opened_but_request_enums_stay_typed() {
+        const SPEC: &str = r#"
+openapi: 3.0.0
+info: { title: test, version: 0.0.0 }
+paths:
+  /thing:
+    post:
+      parameters:
+        - { name: filter, in: query, schema: { type: string, enum: [known] } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Request' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Response' }
+        default:
+          description: fallback
+          content:
+            application/json:
+              schema: { type: string, enum: [fallback] }
+        '400':
+          description: bad request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+components:
+  schemas:
+    Error: { type: string, enum: [bad] }
+    Request:
+      type: object
+      properties:
+        kind: { type: string, enum: [known] }
+        shared: { $ref: '#/components/schemas/Shared' }
+    Shared: { type: string, enum: [known] }
+    Response:
+      allOf:
+        - type: object
+          properties:
+            status: { type: string, enum: [active] }
+            nullable_status: { type: string, nullable: true, enum: [active, null] }
+            shared: { $ref: '#/components/schemas/Shared' }
+            recursive: { $ref: '#/components/schemas/Response' }
+            choices:
+              oneOf:
+                - { $ref: '#/components/schemas/Choice' }
+                - { type: "null" }
+            alternatives:
+              anyOf:
+                - { type: string, enum: [known] }
+            list:
+              type: array
+              items: { $ref: '#/components/schemas/Choice' }
+            map:
+              type: object
+              additionalProperties: { $ref: '#/components/schemas/Choice' }
+            number: { type: integer, enum: [1, 2] }
+    Choice: { type: string, enum: [known] }
+"#;
+        let (out, _) = normalize_spec_with_report(SPEC).unwrap();
+        let doc: Value = serde_yaml::from_str(&out).unwrap();
+        let schemas = &doc["components"]["schemas"];
+        let properties = &schemas["Response"]["allOf"][0]["properties"];
+        assert!(properties["status"].get("enum").is_none());
+        assert!(properties["nullable_status"].get("enum").is_none());
+        assert_eq!(properties["nullable_status"]["nullable"], Value::Bool(true));
+        assert!(schemas["Request"]["properties"]["kind"]
+            .get("enum")
+            .is_some());
+        assert!(doc["paths"]["/thing"]["post"]["parameters"][0]["schema"]
+            .get("enum")
+            .is_some());
+        assert!(schemas["Shared"].get("enum").is_none());
+        assert!(schemas["Choice"].get("enum").is_none());
+        assert!(properties["alternatives"]["anyOf"][0].get("enum").is_none());
+        assert!(properties["number"].get("enum").is_some());
+        assert!(schemas["Error"].get("enum").is_some());
+        assert!(
+            doc["paths"]["/thing"]["post"]["responses"]["default"]["content"]["application/json"]
+                ["schema"]
+                .get("enum")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn reusable_responses_follow_refs_without_opening_example_enums() {
+        const SPEC: &str = r#"
+openapi: 3.0.0
+info: { title: test, version: 0.0.0 }
+paths:
+  /thing:
+    get:
+      responses:
+        '2XX': { $ref: '#/components/responses/Thing' }
+components:
+  responses:
+    Thing:
+      description: ok
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Thing~1Status~0' }
+          example: { type: string, enum: [literal_payload] }
+  schemas:
+    Error: { type: object }
+    Thing/Status~: { type: string, enum: [active] }
+"#;
+        let (out, report) = normalize_spec_with_report(SPEC).unwrap();
+        let doc: Value = serde_yaml::from_str(&out).unwrap();
+        assert!(doc["components"]["schemas"]["Thing/Status~"]
+            .get("enum")
+            .is_none());
+        assert!(
+            doc["components"]["responses"]["Thing"]["content"]["application/json"]["example"]
+                .get("enum")
+                .is_some()
+        );
+        assert_eq!(report.response_enums_stripped, 1);
+    }
+
+    #[test]
+    fn live_spec_response_enum_inventory_is_normalized() {
+        // Independent inventory of the vendored spec, including transitive refs.
+        // Counts are measured here, not used as limits by the production pass.
+        fn enum_count(node: &Value) -> usize {
+            match node {
+                Value::Mapping(map) => {
+                    usize::from(
+                        map.get("type").and_then(Value::as_str) == Some("string")
+                            && map.contains_key("enum"),
+                    ) + map.values().map(enum_count).sum::<usize>()
+                }
+                Value::Sequence(seq) => seq.iter().map(enum_count).sum(),
+                _ => 0,
+            }
+        }
+        fn refs(node: &Value, schemas: &Mapping, found: &mut BTreeSet<String>) {
+            match node {
+                Value::Mapping(map) => {
+                    if let Some(name) = map
+                        .get("$ref")
+                        .and_then(Value::as_str)
+                        .and_then(|target| target.strip_prefix("#/components/schemas/"))
+                    {
+                        if found.insert(name.to_owned()) {
+                            refs(&schemas[name], schemas, found);
+                        }
+                    }
+                    for child in map.values() {
+                        refs(child, schemas, found);
+                    }
+                }
+                Value::Sequence(seq) => {
+                    for child in seq {
+                        refs(child, schemas, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let src = include_str!("../../../spec/openapi.yaml");
+        let doc: Value = serde_yaml::from_str(src).unwrap();
+        let schemas = doc["components"]["schemas"].as_mapping().unwrap();
+        let mut response_refs = BTreeSet::new();
+        let mut request_refs = BTreeSet::new();
+        let mut inline_response_ops = 0;
+        let mut inline_request_ops = 0;
+        let mut inline_response_enums = 0;
+        for item in doc["paths"].as_mapping().unwrap().values() {
+            refs(&item["parameters"], schemas, &mut request_refs);
+            for verb in [
+                "get", "put", "post", "delete", "patch", "options", "head", "trace",
+            ] {
+                let Some(op) = item.get(verb) else { continue };
+                refs(&op["requestBody"], schemas, &mut request_refs);
+                refs(&op["parameters"], schemas, &mut request_refs);
+                inline_request_ops +=
+                    usize::from(enum_count(&op["requestBody"]) + enum_count(&op["parameters"]) > 0);
+                let mut op_enums = 0;
+                for (code, response) in op["responses"].as_mapping().unwrap() {
+                    let code = code.as_str().unwrap();
+                    if code == "default" || code.starts_with('2') {
+                        refs(&response["content"], schemas, &mut response_refs);
+                        op_enums += enum_count(&response["content"]);
+                    }
+                }
+                inline_response_ops += usize::from(op_enums > 0);
+                inline_response_enums += op_enums;
+            }
+        }
+        let enum_components: BTreeSet<String> = schemas
+            .iter()
+            .filter(|(_, schema)| enum_count(schema) > 0)
+            .map(|(name, _)| name.as_str().unwrap().to_owned())
+            .collect();
+        let response_components: BTreeSet<_> = enum_components
+            .intersection(&response_refs)
+            .cloned()
+            .collect();
+        let request_components: BTreeSet<_> = enum_components
+            .intersection(&request_refs)
+            .cloned()
+            .collect();
+        assert_eq!(
+            response_components.difference(&request_components).count(),
+            50
+        );
+        assert_eq!(
+            request_components.difference(&response_components).count(),
+            8
+        );
+        assert_eq!(
+            response_components
+                .intersection(&request_components)
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["CompletionCriterionInput"]
+        );
+        assert_eq!(
+            enum_components
+                .difference(
+                    &response_components
+                        .union(&request_components)
+                        .cloned()
+                        .collect()
+                )
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["RateLimitError"]
+        );
+        assert_eq!(inline_response_ops, 3);
+        assert_eq!(inline_request_ops, 10);
+        let expected = inline_response_enums
+            + response_components
+                .iter()
+                .map(|name| enum_count(&schemas[name.as_str()]))
+                .sum::<usize>();
+        let (out, report) = normalize_spec_with_report(src).unwrap();
+        assert_eq!(report.response_enums_stripped, expected);
+        let normalized: Value = serde_yaml::from_str(&out).unwrap();
+        for name in &response_components {
+            assert_eq!(
+                enum_count(&normalized["components"]["schemas"][name.as_str()]),
+                0,
+                "response component {name}"
+            );
+        }
+        for name in request_components.difference(&response_components) {
+            assert_eq!(
+                enum_count(&normalized["components"]["schemas"][name.as_str()]),
+                enum_count(&schemas[name.as_str()]),
+                "request-only component {name}"
+            );
+        }
+        let (again, report) = normalize_spec_with_report(&out).unwrap();
+        assert_eq!(again, out);
+        assert_eq!(report.response_enums_stripped, 0);
     }
 
     const CLOSED_OBJECT_SPEC: &str = r#"

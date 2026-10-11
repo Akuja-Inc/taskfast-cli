@@ -13,6 +13,20 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Fixed
+
+- **Unknown response enum values no longer break commands** (gh#176). The
+  codegen normalizer now opens string enums reachable from success responses,
+  including nullable and shared schemas, so server-added values decode without
+  a CLI release. Request-only enums stay typed. `taskfast init` still rejects
+  non-active agents with `agent_not_active` and names the returned status.
+
+### Changed
+
+- **`taskfast-client` is bumped to 0.14.0** for the breaking generated response
+  enum-to-string API change. **`taskfast-codegen` is bumped to 0.2.0** because
+  `Report` gains a public count field; registry builds now use the new pass.
+
 ## [0.19.2] - 2026-10-11
 
 ### Added

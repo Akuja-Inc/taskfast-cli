@@ -246,6 +246,43 @@ async fn inactive_agent_status_surfaces_validation_error() {
 }
 
 #[tokio::test]
+async fn init_rejects_unknown_agent_status_as_not_active() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/agents/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "alice",
+            "status": "suspended_pending_review",
+            "capabilities": [],
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let cfg_path = config_path_in(tmp.path());
+    let err = run(
+        &ctx_for(&server, Some("test-key"), cfg_path.clone(), false),
+        base_args(),
+    )
+    .await
+    .expect_err("unknown status must fail closed before provisioning");
+
+    match err {
+        CmdError::Validation { code, message } => {
+            assert_eq!(code, "agent_not_active");
+            assert!(
+                message.contains("suspended_pending_review"),
+                "message must retain server status: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+    assert!(!cfg_path.exists(), "inactive agent must not write config");
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 1, "must stop after profile validation");
+}
+
+#[tokio::test]
 async fn api_key_falls_back_to_config_when_ctx_is_empty() {
     let server = MockServer::start().await;
     mount_profile_active(&server).await;
