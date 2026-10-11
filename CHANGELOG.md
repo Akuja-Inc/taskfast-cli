@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.19.3] - 2026-10-11
+
 ### Fixed
 
 - **Unknown response enum values no longer break commands** (gh#176). The
