@@ -117,8 +117,8 @@ async fn test_webhook_returns_delivery_receipt() {
         .await;
 
     let receipt = test_webhook(&client(&server)).await.expect("200 decodes");
-    assert!(receipt.success);
-    assert_eq!(receipt.status_code, 200);
+    assert_eq!(receipt.success, Some(true));
+    assert_eq!(receipt.status_code, Some(200));
 }
 
 #[tokio::test]

@@ -206,8 +206,8 @@ async fn register_wallet_returns_configured_on_200() {
     match register_wallet(&client(&server), &sample_wallet_request()).await {
         Ok(WalletRegistration::Configured(r)) => {
             assert_eq!(
-                r.tempo_wallet_address,
-                "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"
+                r.tempo_wallet_address.as_deref(),
+                Some("0x71C7656EC7ab88b098defB751B7401B5f6d8976F")
             );
         }
         other => panic!("expected Configured, got {other:?}"),
@@ -290,5 +290,5 @@ async fn get_readiness_returns_checks() {
         .await;
 
     let readiness = get_readiness(&client(&server)).await.expect("200 decodes");
-    assert!(!readiness.ready_to_work);
+    assert_eq!(readiness.ready_to_work, Some(false));
 }

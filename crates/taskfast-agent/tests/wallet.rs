@@ -42,8 +42,8 @@ async fn register_wallet_returns_setup_response_on_200() {
     .await
     .expect("200 decodes");
     assert_eq!(
-        resp.tempo_wallet_address,
-        "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"
+        resp.tempo_wallet_address.as_deref(),
+        Some("0x71C7656EC7ab88b098defB751B7401B5f6d8976F")
     );
 }
 
