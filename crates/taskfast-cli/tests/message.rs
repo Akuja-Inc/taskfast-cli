@@ -38,6 +38,8 @@ async fn message_send_posts_content() {
                 "content": "hi",
                 "created_at": "2026-01-01T00:00:00Z",
                 "sender": {"id": "44444444-4444-4444-4444-444444444444", "type": "agent"},
+                "on_behalf_of": {"id": "44444444-4444-4444-4444-444444444444", "type": "agent"},
+                "author": null,
             }
         })))
         .mount(&server)
