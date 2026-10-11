@@ -42,17 +42,63 @@ jobs:
       - run: cargo +nightly build --workspace --locked
 
   spec-upstream-drift:
-    # Fetches the live server OpenAPI spec and fails if the vendored copy has
-    # gone stale against it. Scheduled/dispatch only — never gates PRs, so a
-    # server-side deploy can't turn unrelated CLI PRs red, and the job doesn't
-    # depend on staging being reachable during PR review. Drift here means the
-    # server moved ahead: re-vendor with scripts/vendor-spec.sh. This is the
-    # proactive half of the gh#51 stale-spec guard.
+    # Fetches the live server OpenAPI spec; when the vendored copy is stale,
+    # re-vendors it and opens (or updates) a `bot/spec-refresh` PR. A failing
+    # job alone sat red for six weeks unacted on, so the refresh PR is the
+    # signal now. Scheduled/dispatch only — never gates PRs, so a server-side
+    # deploy can't turn unrelated CLI PRs red, and the job doesn't depend on
+    # staging being reachable during PR review. Staging unreachable (drift
+    # check exit 2) still fails the job. This is the proactive half of the
+    # gh#51 stale-spec guard.
+    #
+    # PRs opened with GITHUB_TOKEN don't trigger `pull_request` workflows, so
+    # the job dispatches ci.yml on the branch; its checks land on the PR head.
     name: spec-upstream-drift
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - run: scripts/check-spec-drift.sh --upstream
+      - name: Check upstream drift
+        id: drift
+        run: |
+          rc=0
+          scripts/check-spec-drift.sh --upstream || rc=$?
+          case "$rc" in
+            0) echo "stale=false" >> "$GITHUB_OUTPUT" ;;
+            1) echo "stale=true" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$rc" ;;
+          esac
+      # vendor-spec.sh records server_commit = "unknown" here: GITHUB_TOKEN
+      # can't read the private server repo. sha256 and fetched_at still pin it.
+      - name: Re-vendor spec
+        if: steps.drift.outputs.stale == 'true'
+        run: scripts/vendor-spec.sh
+      - name: Open refresh PR
+        if: steps.drift.outputs.stale == 'true'
+        id: pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          branch: bot/spec-refresh
+          delete-branch: true
+          commit-message: "chore(spec): re-vendor OpenAPI spec from staging"
+          title: "chore(spec): re-vendor OpenAPI spec from staging"
+          body: |
+            Automated by the `spec-upstream-drift` job in `ci-scheduled.yml`: staging's
+            `/api/docs/spec` no longer matches `spec/openapi.provenance.toml`.
+
+            CI was dispatched on this branch; a red build means the server spec changed
+            in a way the generated client can't absorb.
+
+            Before merging, add a `## Unreleased` CHANGELOG line naming the new or
+            changed operations (`git diff origin/main -- spec/openapi.yaml`).
+      - name: Run CI on the refresh branch
+        if: steps.pr.outputs.pull-request-operation == 'created' || steps.pr.outputs.pull-request-operation == 'updated'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci.yml --ref bot/spec-refresh
 
   notify-discord:
     # Mirrors the notify pattern in ci.yml / docker.yml, but only aggregates
