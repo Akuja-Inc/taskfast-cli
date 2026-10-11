@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.19.5] - 2026-10-11
+
 ### Fixed
 
 - **Interactive `taskfast init` links to the correct Personal API key page**
