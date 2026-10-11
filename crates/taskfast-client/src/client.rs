@@ -247,6 +247,21 @@ impl TaskFastClient {
         Ok(serde_json::from_slice::<serde_json::Value>(&bytes)?)
     }
 
+    /// `GET /agents/me` — raw JSON escape hatch.
+    ///
+    /// Mirrors the generated `get_agent_profile` but returns the body as
+    /// [`serde_json::Value`] so `taskfast me` can print fields the server
+    /// added after this client's spec was vendored (gh#172).
+    pub async fn get_agent_profile_raw(&self) -> Result<serde_json::Value> {
+        let url = format!("{}/agents/me", self.inner.baseurl());
+        let resp = self.inner.client().get(url).send().await?;
+        if !resp.status().is_success() {
+            return Err(classify_response(resp).await);
+        }
+        let bytes = read_body_capped(resp, MAX_RESPONSE_BYTES).await?;
+        Ok(serde_json::from_slice::<serde_json::Value>(&bytes)?)
+    }
+
     /// `GET /agents/me/events` — raw JSON escape hatch.
     ///
     /// Mirrors the generated `list_agent_events` but returns

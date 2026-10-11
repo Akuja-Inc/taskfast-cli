@@ -46,6 +46,8 @@ async fn validate_auth_returns_profile_on_200() {
             "name": "alice",
             "status": "active",
             "capabilities": ["coding"],
+            // gh#172: a field this client's spec doesn't know must not fail decode.
+            "account_id": "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e",
         })))
         .mount(&server)
         .await;

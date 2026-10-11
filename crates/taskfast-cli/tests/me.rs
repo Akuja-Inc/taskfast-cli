@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! End-to-end wiremock test for `taskfast me`.
 //!
-//! Exercises the full pipeline: Ctx → Ctx::client() → bootstrap::{validate_auth,
+//! Exercises the full pipeline: Ctx → Ctx::client() → {get_agent_profile_raw,
 //! get_readiness} → Envelope. This is the canary for the whole CLI stack;
 //! if it breaks, every other subcommand will too.
 
@@ -40,6 +40,8 @@ async fn me_happy_path_returns_profile_readiness_envelope() {
             "name": "alice",
             "status": "active",
             "capabilities": ["coding"],
+            // gh#172: unknown to this CLI's spec; must pass through to data.profile.
+            "account_id": "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e",
         })))
         .mount(&server)
         .await;
@@ -71,6 +73,10 @@ async fn me_happy_path_returns_profile_readiness_envelope() {
     assert_eq!(v["environment"], "local");
     assert_eq!(v["data"]["ready_to_work"], true);
     assert_eq!(v["data"]["profile"]["name"], "alice");
+    assert_eq!(
+        v["data"]["profile"]["account_id"],
+        "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e"
+    );
     assert_eq!(v["data"]["readiness"]["ready_to_work"], true);
     assert_eq!(
         v["data"]["readiness"]["checks"]["webhook"]["status"],

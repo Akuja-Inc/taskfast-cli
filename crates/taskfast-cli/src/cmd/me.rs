@@ -7,6 +7,9 @@
 //! have no side effects to short-circuit).
 //!
 //! Envelope `data` shape:
+//! `profile` is the `GET /agents/me` body as the server sent it — fields
+//! added after this CLI's spec was vendored pass through (gh#172).
+//!
 //! ```json
 //! {
 //!   "profile": { ...AgentProfile... },
@@ -23,7 +26,8 @@ use serde_json::json;
 use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
-use taskfast_agent::bootstrap::{get_readiness, validate_auth};
+use taskfast_agent::bootstrap::get_readiness;
+use taskfast_client::api::types::AgentProfile;
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -40,7 +44,13 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     }
 
     let client = ctx.client()?;
-    let profile = validate_auth(&client).await.map_err(CmdError::from)?;
+    let profile = client
+        .get_agent_profile_raw()
+        .await
+        .map_err(CmdError::from)?;
+    // Still hold the server to the vendored contract for the fields it covers.
+    serde_json::from_value::<AgentProfile>(profile.clone())
+        .map_err(|e| CmdError::from(taskfast_client::Error::from(e)))?;
     let readiness = get_readiness(&client).await.map_err(CmdError::from)?;
 
     let data = json!({
