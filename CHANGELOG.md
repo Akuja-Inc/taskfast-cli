@@ -13,6 +13,18 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Fixed
+
+- **Unknown response fields no longer break commands** (gh#172). The vendored
+  spec marks most response schemas `additionalProperties: false`, so a field
+  the server added made every installed CLI fail with a `decode` error. The
+  codegen normalizer now drops that keyword, and generated types ignore keys
+  they don't know.
+- **`taskfast me` prints the profile as the server sent it** (gh#172).
+  `data.profile` is the raw `GET /agents/me` body (still checked against
+  `AgentProfile`), so new server fields such as `account_id` show up without a
+  CLI release.
+
 ## [0.19.0] - 2026-10-10
 
 ### Fixed

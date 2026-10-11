@@ -70,6 +70,12 @@
 //! This means the generated client sees every unhappy status as
 //! `progenitor_client::Error::UnexpectedResponse(reqwest::Response)` — we
 //! re-classify into our typed `taskfast_client::errors::Error` in the calling layer.
+//!
+//! ## Closed-object strip
+//!
+//! Every `additionalProperties: false` is removed so generated types ignore
+//! unknown keys — an additive server change must not break installed CLIs
+//! (gh#172).
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_yaml::{Mapping, Value};
@@ -208,7 +214,33 @@ fn normalize_in_place(doc: &mut Value, aliases: &[&str]) -> Result<Report> {
     // need a generated type for the null branch.
     report.null_variants_stripped = strip_null_type_variants(doc);
 
+    // Pass 7: open closed objects (gh#172). See [`strip_closed_objects`].
+    strip_closed_objects(doc);
+
     Ok(report)
+}
+
+/// Recursively remove every `additionalProperties: false`.
+///
+/// typify turns that keyword into `#[serde(deny_unknown_fields)]`, so a single
+/// field the server adds to a response would fail decode in every released
+/// CLI. Stripping it everywhere (not just responses) is safe: the attribute
+/// only affects deserialization, and the CLI only ever serializes request
+/// bodies. Non-`false` values (`true`, a schema) are left alone — they change
+/// the generated type shape, not just strictness.
+fn strip_closed_objects(v: &mut Value) {
+    match v {
+        Value::Mapping(map) => {
+            if map.get("additionalProperties") == Some(&Value::Bool(false)) {
+                map.remove("additionalProperties");
+            }
+            for (_, child) in map.iter_mut() {
+                strip_closed_objects(child);
+            }
+        }
+        Value::Sequence(seq) => seq.iter_mut().for_each(strip_closed_objects),
+        _ => {}
+    }
 }
 
 /// Recursively walk `doc` and drop any `{type: "null"}` entries from `oneOf`
@@ -848,5 +880,50 @@ components:
         let (out2, report2) = normalize_spec_with_report(&out1).unwrap();
         assert_eq!(out1, out2);
         assert_eq!(report2.null_variants_stripped, 0);
+    }
+
+    const CLOSED_OBJECT_SPEC: &str = r#"
+openapi: 3.0.0
+info:
+  title: test
+  version: 0.0.0
+paths:
+  /thing:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  id:
+                    type: string
+components:
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+    Open:
+      type: object
+      additionalProperties: true
+"#;
+
+    #[test]
+    fn closed_objects_are_opened_everywhere() {
+        let (out, _) = normalize_spec_with_report(CLOSED_OBJECT_SPEC).unwrap();
+        assert!(
+            !out.contains("additionalProperties: false"),
+            "closed object survived:\n{out}"
+        );
+        assert!(
+            out.contains("additionalProperties: true"),
+            "non-false value must be left alone:\n{out}"
+        );
     }
 }
