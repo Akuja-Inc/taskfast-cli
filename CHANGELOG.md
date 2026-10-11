@@ -13,6 +13,12 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Added
+
+- **Re-vendored the OpenAPI spec from the staging refresh**, adding four new
+  client operations: `getAgentInbox`, `overrideInboxResponse`,
+  `createHelpRequest`, and `closeHelpRequest`.
+
 ## [0.19.1] - 2026-10-11
 
 ### Fixed
