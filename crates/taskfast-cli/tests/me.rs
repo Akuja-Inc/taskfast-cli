@@ -123,6 +123,79 @@ async fn me_preserves_unknown_agent_status() {
     );
 }
 
+/// Mounts `/agents/me` and a readiness body, for the gh#178 tests below.
+async fn mount_me_with_readiness(server: &MockServer, readiness: serde_json::Value) {
+    Mock::given(method("GET"))
+        .and(path("/agents/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "alice",
+            "status": "active",
+            "capabilities": [],
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/agents/me/readiness"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(readiness))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn me_tolerates_a_missing_required_field_the_cli_does_not_read() {
+    // `ready_to_work` is required in the spec but not in KEEP_REQUIRED (gh#178).
+    let server = MockServer::start().await;
+    mount_me_with_readiness(
+        &server,
+        json!({
+            "checks": {
+                "api_key": {"status": "complete"},
+                "wallet": {"status": "missing"},
+                "funded": {"status": "no_wallet"},
+                "webhook": {"status": "not_configured", "required": false},
+            },
+            "settlement_domain": {
+                "chain_id": 42431,
+                "verifying_contract": "0x0000000000000000000000000000000000000000",
+            },
+        }),
+    )
+    .await;
+
+    let envelope = run(&ctx_for(&server), Args { resume: false })
+        .await
+        .expect("a missing field the CLI does not read must decode");
+    assert_eq!(envelope_value(&envelope)["ok"], true);
+}
+
+#[tokio::test]
+async fn me_still_fails_on_a_missing_field_the_cli_reads() {
+    // `settlement_domain` is in KEEP_REQUIRED: settle signs against it.
+    let server = MockServer::start().await;
+    mount_me_with_readiness(
+        &server,
+        json!({
+            "ready_to_work": false,
+            "checks": {
+                "api_key": {"status": "complete"},
+                "wallet": {"status": "missing"},
+                "funded": {"status": "no_wallet"},
+                "webhook": {"status": "not_configured", "required": false},
+            },
+        }),
+    )
+    .await;
+
+    let err = run(&ctx_for(&server), Args { resume: false })
+        .await
+        .expect_err("a missing kept field must fail decode");
+    assert_eq!(err.code(), "decode", "got {err:?}");
+    assert!(
+        format!("{err:?}").contains("settlement_domain"),
+        "got {err:?}"
+    );
+}
+
 #[tokio::test]
 async fn me_surfaces_not_ready_verbatim() {
     let server = MockServer::start().await;

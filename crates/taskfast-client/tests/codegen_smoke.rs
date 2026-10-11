@@ -63,16 +63,16 @@ async fn platform_config_happy_path_roundtrips() {
     let find = |id: &str| {
         tiers
             .iter()
-            .find(|t| t.tier == id)
+            .find(|t| t.tier.as_deref() == Some(id))
             .unwrap_or_else(|| panic!("tier {id} present"))
     };
     let open = find("open");
-    assert_eq!(open.percent, "2.5");
-    assert_eq!(open.rate, "0.025");
-    assert!(open.default);
-    assert!(open.selectable);
+    assert_eq!(open.percent.as_deref(), Some("2.5"));
+    assert_eq!(open.rate.as_deref(), Some("0.025"));
+    assert_eq!(open.default, Some(true));
+    assert_eq!(open.selectable, Some(true));
     let high = find("high_assurance");
-    assert!(!high.default);
+    assert_eq!(high.default, Some(false));
 }
 
 #[tokio::test]

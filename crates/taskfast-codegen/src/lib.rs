@@ -82,6 +82,13 @@
 //! String enums reachable from success or `default` response bodies are opened
 //! so additive server enum values decode in released CLIs (gh#176). Request-only
 //! enums stay typed; shared schemas prioritize response tolerance.
+//!
+//! ## Response-required relax
+//!
+//! `required` lists in response-reachable schemas are cut down to
+//! [`KEEP_REQUIRED`], the fields CLI code reads as plain values. Every other
+//! response property becomes `Option`, so a server that drops a required field
+//! the CLI never reads no longer breaks released CLIs (gh#178).
 
 use std::collections::BTreeSet;
 
@@ -100,6 +107,69 @@ use serde_yaml::{Mapping, Value};
 pub const ERROR_ALIASES: &[&str] = &[];
 
 const NULL_VARIANT_SCHEMA_KEYS: &[&str] = &["oneOf", "anyOf"];
+
+/// Response properties that stay required: `(schema key, property)`.
+///
+/// The compiler maintains most of this list. Every other response property
+/// becomes `Option`, and a CLI read of it as a plain value fails to compile;
+/// add the pair here when the CLI needs the value, so decode keeps failing fast
+/// at the HTTP boundary if the server stops sending it. Handling it as `Option`
+/// at the read site instead is a behavior decision: a missing money field must
+/// not default to zero. A few entries are semantic, not compiler-found; their
+/// comments say why.
+///
+/// The schema key names where the property is declared, not the generated Rust
+/// type: a component name (`AgentProfile`), a nested inline object under it
+/// (`AgentReadiness.settlement_domain`), or an `allOf` member
+/// (`TaskDetail.allOf.1`). See [`schema_key`].
+pub const KEEP_REQUIRED: &[(&str, &str)] = &[
+    // taskfast-agent events stream: paging needs the cursor envelope.
+    ("AgentEventListResponse", "meta"),
+    ("PaginatedMeta", "has_more"),
+    // Semantic: the events stream already tolerates bad events one by one
+    // (events::decode_raw_page puts them in `unparseable` with the raw JSON).
+    // An event without its id or type can't be acked or dispatched, so it must
+    // keep landing there instead of decoding with `None`s.
+    ("AgentEvent", "data"),
+    ("AgentEvent", "event"),
+    ("AgentEvent", "event_id"),
+    ("AgentEvent", "occurred_at"),
+    // cmd/escrow.rs: ArbitratedEscrow deposit and poster-approval parameters.
+    ("BidEscrowParamsResponse", "amount"),
+    ("BidEscrowParamsResponse", "arbitrator_address"),
+    ("BidEscrowParamsResponse", "chain_id"),
+    ("BidEscrowParamsResponse", "decimals"),
+    ("BidEscrowParamsResponse", "platform_fee_amount"),
+    ("BidEscrowParamsResponse", "platform_wallet"),
+    ("BidEscrowParamsResponse", "poster_approval_deadline"),
+    ("BidEscrowParamsResponse", "poster_approval_min_lifetime"),
+    ("BidEscrowParamsResponse", "task_escrow_contract"),
+    ("BidEscrowParamsResponse", "task_id"),
+    ("BidEscrowParamsResponse", "token_address"),
+    ("BidEscrowParamsResponse", "worker_address"),
+    // cmd/bond.rs: stake amount.
+    ("getStakeQuote.200", "required_amount"),
+    // cmd/post.rs: submission-fee signing and draft submit.
+    ("TaskDraftPrepareResponse", "draft_id"),
+    ("TaskDraftPrepareResponse", "payload_to_sign"),
+    ("TaskDraftPrepareResponse", "token_address"),
+    ("TaskDraftSubmitResponse", "id"),
+    ("TaskDraftSubmitResponse", "status"),
+    // cmd/settle.rs: EIP-712 settlement domain.
+    ("AgentReadiness", "settlement_domain"),
+    ("AgentReadiness.settlement_domain", "chain_id"),
+    ("AgentReadiness.settlement_domain", "verifying_contract"),
+    ("TaskDetail.allOf.1.settlement_domain", "chain_id"),
+    ("TaskDetail.allOf.1.settlement_domain", "verifying_contract"),
+    // cmd/init.rs: readiness checks and webhook config.
+    ("AgentReadiness", "checks"),
+    ("AgentReadiness.checks", "funded"),
+    ("AgentReadiness.checks", "wallet"),
+    ("AgentReadinessCheck", "status"),
+    ("WebhookConfig", "url"),
+    // cmd/task.rs: uploaded artifact ids.
+    ("Artifact", "id"),
+];
 
 /// Normalize an OpenAPI YAML document: collapse [`ERROR_ALIASES`] into `Error`.
 ///
@@ -150,6 +220,9 @@ pub struct Report {
     pub request_media_collapsed: usize,
     /// Count of string `enum` keywords removed from response-reachable schemas.
     pub response_enums_stripped: usize,
+    /// Count of response properties dropped from `required` lists (not in
+    /// [`KEEP_REQUIRED`]).
+    pub response_required_relaxed: usize,
 }
 
 fn normalize_in_place(doc: &mut Value, aliases: &[&str]) -> Result<Report> {
@@ -230,6 +303,9 @@ fn normalize_in_place(doc: &mut Value, aliases: &[&str]) -> Result<Report> {
     // Pass 8: open response string enums (gh#176). See [`strip_response_enums`].
     report.response_enums_stripped = strip_response_enums(doc);
 
+    // Pass 9: relax response `required` lists (gh#178). See [`relax_response_required`].
+    report.response_required_relaxed = relax_response_required(doc);
+
     Ok(report)
 }
 
@@ -245,8 +321,98 @@ fn normalize_in_place(doc: &mut Value, aliases: &[&str]) -> Result<Report> {
 /// `nullable: true` is preserved even when the enum contains `null`, so typify
 /// still emits `Option<String>` for nullable response values.
 fn strip_response_enums(doc: &mut Value) -> usize {
+    let enums: Vec<_> = response_schema_paths(doc)
+        .into_iter()
+        .filter(|path| {
+            value_at_path(doc, path).is_some_and(|schema| {
+                schema.get("type").and_then(Value::as_str) == Some("string")
+                    && schema.get("enum").is_some()
+            })
+        })
+        .collect();
+    let mut stripped = 0;
+    for path in enums {
+        if value_at_path_mut(doc, &path)
+            .and_then(Value::as_mapping_mut)
+            .and_then(|map| map.remove("enum"))
+            .is_some()
+        {
+            stripped += 1;
+        }
+    }
+    stripped
+}
+
+/// Cut every `required` list in a response-reachable schema down to the
+/// properties named in [`KEEP_REQUIRED`]. Returns how many entries were dropped.
+///
+/// typify emits a required property as a plain field and an optional one as
+/// `Option`, so a required property the server stops sending fails decode in
+/// every released CLI even when no CLI code reads it (gh#178). Kept properties
+/// still fail fast at the HTTP boundary, which is what the CLI wants for values
+/// it uses. Request-only schemas are untouched; a schema shared with a request
+/// is relaxed too (the CLI only serializes request bodies, and an optional
+/// field it always sets serializes the same). Optional arrays become
+/// `#[serde(default)] Vec<T>`, not `Option`.
+fn relax_response_required(doc: &mut Value) -> usize {
+    let mut relaxed = 0;
+    for path in response_schema_paths(doc) {
+        let key = schema_key(doc, &path);
+        let Some(map) = value_at_path_mut(doc, &path).and_then(Value::as_mapping_mut) else {
+            continue;
+        };
+        let Some(Value::Sequence(required)) = map.get_mut("required") else {
+            continue;
+        };
+        let before = required.len();
+        required.retain(|property| {
+            property
+                .as_str()
+                .is_some_and(|property| KEEP_REQUIRED.contains(&(key.as_str(), property)))
+        });
+        relaxed += before - required.len();
+        if required.is_empty() {
+            map.remove("required");
+        }
+    }
+    relaxed
+}
+
+/// The [`KEEP_REQUIRED`] key for a schema path: where the schema is declared,
+/// with `properties` segments dropped. `components.schemas.X.properties.p` →
+/// `X.p`; an `allOf` member → `X.allOf.1`; an inline response schema →
+/// `<operationId>.<status>`; a reusable response → `responses.<name>`.
+fn schema_key(doc: &Value, path: &[String]) -> String {
+    let (head, rest) = match path {
+        [c, s, name, rest @ ..] if c == "components" && s == "schemas" => (name.clone(), rest),
+        [c, r, name, _content, _media, _schema, rest @ ..]
+            if c == "components" && r == "responses" =>
+        {
+            (format!("responses.{name}"), rest)
+        }
+        [p, route, verb, _responses, code, _content, _media, _schema, rest @ ..]
+            if p == "paths" =>
+        {
+            let op = value_at_path(doc, &path[..3])
+                .and_then(|op| op.get("operationId"))
+                .and_then(Value::as_str)
+                .map_or_else(|| format!("{verb} {route}"), str::to_owned);
+            (format!("{op}.{code}"), rest)
+        }
+        _ => (path.join("."), &[][..]),
+    };
+    std::iter::once(head)
+        .chain(rest.iter().filter(|seg| *seg != "properties").cloned())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// Every schema path reachable from a 2xx or `default` response body,
+/// following local `$ref`s transitively through composition, properties,
+/// arrays and map values.
+fn response_schema_paths(doc: &Value) -> BTreeSet<Vec<String>> {
     let mut visited = BTreeSet::new();
-    let mut enums = BTreeSet::new();
+    let mut schemas = BTreeSet::new();
     if let Some(paths) = doc.get("paths").and_then(Value::as_mapping) {
         for (path, item) in paths {
             let Some(path) = path.as_str() else { continue };
@@ -268,36 +434,25 @@ fn strip_response_enums(doc: &mut Value) -> usize {
                     let root = ["paths", path, verb, "responses", code]
                         .map(str::to_owned)
                         .to_vec();
-                    collect_response_enums(doc, &root, &mut visited, &mut enums);
+                    collect_response_schemas(doc, &root, &mut visited, &mut schemas);
                 }
             }
         }
     }
-    let mut stripped = 0;
-    for path in enums {
-        let mut node = &mut *doc;
-        for key in &path {
-            node = if let Value::Sequence(seq) = node {
-                &mut seq[key.parse::<usize>().expect("collected sequence index")]
-            } else {
-                node.get_mut(key.as_str()).expect("collected schema path")
-            };
-        }
-        if node
-            .as_mapping_mut()
-            .and_then(|map| map.remove("enum"))
-            .is_some()
-        {
-            stripped += 1;
-        }
-    }
-    stripped
+    schemas
 }
 
 fn value_at_path<'a>(doc: &'a Value, path: &[String]) -> Option<&'a Value> {
     path.iter().try_fold(doc, |node, key| match node {
         Value::Sequence(seq) => seq.get(key.parse::<usize>().ok()?),
         _ => node.get(key.as_str()),
+    })
+}
+
+fn value_at_path_mut<'a>(doc: &'a mut Value, path: &[String]) -> Option<&'a mut Value> {
+    path.iter().try_fold(doc, |node, key| match node {
+        Value::Sequence(seq) => seq.get_mut(key.parse::<usize>().ok()?),
+        _ => node.get_mut(key.as_str()),
     })
 }
 
@@ -312,11 +467,11 @@ fn local_ref_path(node: &Value) -> Option<Vec<String>> {
     )
 }
 
-fn collect_response_enums(
+fn collect_response_schemas(
     doc: &Value,
     path: &[String],
     visited: &mut BTreeSet<Vec<String>>,
-    enums: &mut BTreeSet<Vec<String>>,
+    schemas: &mut BTreeSet<Vec<String>>,
 ) {
     if !visited.insert(path.to_vec()) {
         return;
@@ -325,22 +480,22 @@ fn collect_response_enums(
         return;
     };
     if let Some(target) = local_ref_path(response) {
-        collect_response_enums(doc, &target, visited, enums);
+        collect_response_schemas(doc, &target, visited, schemas);
     }
     if let Some(content) = response.get("content").and_then(Value::as_mapping) {
         for media in content.keys().filter_map(Value::as_str) {
             let mut schema_path = path.to_vec();
             schema_path.extend(["content".to_owned(), media.to_owned(), "schema".to_owned()]);
-            collect_schema_enums(doc, &schema_path, visited, enums);
+            collect_schemas(doc, &schema_path, visited, schemas);
         }
     }
 }
 
-fn collect_schema_enums(
+fn collect_schemas(
     doc: &Value,
     path: &[String],
     visited: &mut BTreeSet<Vec<String>>,
-    enums: &mut BTreeSet<Vec<String>>,
+    schemas: &mut BTreeSet<Vec<String>>,
 ) {
     if !visited.insert(path.to_vec()) {
         return;
@@ -348,12 +503,9 @@ fn collect_schema_enums(
     let Some(schema) = value_at_path(doc, path) else {
         return;
     };
-    if schema.get("type").and_then(Value::as_str) == Some("string") && schema.get("enum").is_some()
-    {
-        enums.insert(path.to_vec());
-    }
+    schemas.insert(path.to_vec());
     if let Some(target) = local_ref_path(schema) {
-        collect_schema_enums(doc, &target, visited, enums);
+        collect_schemas(doc, &target, visited, schemas);
     }
     for key in [
         "allOf",
@@ -373,17 +525,17 @@ fn collect_schema_enums(
                 for index in 0..seq.len() {
                     let mut item_path = child_path.clone();
                     item_path.push(index.to_string());
-                    collect_schema_enums(doc, &item_path, visited, enums);
+                    collect_schemas(doc, &item_path, visited, schemas);
                 }
             }
             Value::Mapping(map) if key == "properties" => {
                 for property in map.keys().filter_map(Value::as_str) {
                     let mut property_path = child_path.clone();
                     property_path.push(property.to_owned());
-                    collect_schema_enums(doc, &property_path, visited, enums);
+                    collect_schemas(doc, &property_path, visited, schemas);
                 }
             }
-            _ => collect_schema_enums(doc, &child_path, visited, enums),
+            _ => collect_schemas(doc, &child_path, visited, schemas),
         }
     }
 }
@@ -1311,6 +1463,119 @@ components:
         let (again, report) = normalize_spec_with_report(&out).unwrap();
         assert_eq!(again, out);
         assert_eq!(report.response_enums_stripped, 0);
+    }
+
+    #[test]
+    fn response_required_is_relaxed_except_kept_and_request_fields() {
+        // `WebhookConfig.url` and `getStakeQuote.200.required_amount` are real
+        // KEEP_REQUIRED entries (a component and an inline response schema).
+        const SPEC: &str = r#"
+openapi: 3.0.0
+info: { title: test, version: 0.0.0 }
+paths:
+  /hooks:
+    put:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Request' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookConfig' }
+  /stake/quote:
+    get:
+      operationId: getStakeQuote
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [required_amount, currency]
+                properties:
+                  required_amount: { type: integer }
+                  currency: { type: string }
+components:
+  schemas:
+    Error: { type: object }
+    Request:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string }
+    WebhookConfig:
+      type: object
+      required: [url, secret, nested]
+      properties:
+        url: { type: string }
+        secret: { type: string }
+        nested:
+          type: object
+          required: [inner]
+          properties:
+            inner: { type: string }
+"#;
+        let (out, report) = normalize_spec_with_report(SPEC).unwrap();
+        let doc: Value = serde_yaml::from_str(&out).unwrap();
+        let schemas = &doc["components"]["schemas"];
+        let required = |node: &Value| -> Vec<String> {
+            node.get("required")
+                .and_then(Value::as_sequence)
+                .map(|seq| {
+                    seq.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(required(&schemas["WebhookConfig"]), ["url"]);
+        assert!(schemas["WebhookConfig"]["properties"]["nested"]
+            .get("required")
+            .is_none());
+        assert_eq!(required(&schemas["Request"]), ["url"]);
+        let quote = &doc["paths"]["/stake/quote"]["get"]["responses"]["200"]["content"]
+            ["application/json"]["schema"];
+        assert_eq!(required(quote), ["required_amount"]);
+        // secret, nested, nested.inner, currency.
+        assert_eq!(report.response_required_relaxed, 4);
+        let (again, report) = normalize_spec_with_report(&out).unwrap();
+        assert_eq!(again, out);
+        assert_eq!(report.response_required_relaxed, 0);
+    }
+
+    #[test]
+    fn every_kept_required_entry_exists_in_the_vendored_spec() {
+        // A renamed or removed server field must not leave a dead entry that
+        // silently keeps nothing.
+        let src = include_str!("../../../spec/openapi.yaml");
+        let doc: Value = serde_yaml::from_str(src).unwrap();
+        let mut present = BTreeSet::new();
+        for path in response_schema_paths(&doc) {
+            let key = schema_key(&doc, &path);
+            if let Some(required) = value_at_path(&doc, &path)
+                .and_then(|schema| schema.get("required"))
+                .and_then(Value::as_sequence)
+            {
+                for property in required.iter().filter_map(Value::as_str) {
+                    present.insert((key.clone(), property.to_owned()));
+                }
+            }
+        }
+        let missing: Vec<_> = KEEP_REQUIRED
+            .iter()
+            .filter(|(key, property)| {
+                !present.contains(&((*key).to_owned(), (*property).to_owned()))
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "stale KEEP_REQUIRED entries: {missing:?}"
+        );
     }
 
     const CLOSED_OBJECT_SPEC: &str = r#"

@@ -13,6 +13,25 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Fixed
+
+- **A response field the CLI doesn't read can go missing without breaking
+  commands** (gh#178). The codegen normalizer now drops `required` from
+  response properties except a `KEEP_REQUIRED` list of the fields the CLI
+  reads as plain values (escrow, stake, draft-signing, settlement-domain,
+  readiness, webhook and artifact fields, the event-page envelope and event
+  identity). Every other response field is now `Option`, so a server that
+  removes it, or stops always sending it, no longer fails decode in released
+  CLIs. A missing kept field still fails decode, as before. Request schemas are
+  untouched.
+
+### Changed
+
+- **`taskfast-client` is bumped to 0.15.0** because generated response fields
+  outside `KEEP_REQUIRED` change from `T` to `Option<T>` (cargo-semver-checks
+  doesn't inspect field types, so this bump is manual). **`taskfast-codegen` is
+  bumped to 0.3.0** because `Report` gains `response_required_relaxed`.
+
 ## [0.19.3] - 2026-10-11
 
 ### Fixed
