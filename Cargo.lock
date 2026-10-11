@@ -4066,7 +4066,7 @@ dependencies = [
 
 [[package]]
 name = "taskfast-client"
-version = "0.13.2"
+version = "0.14.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4095,7 +4095,7 @@ dependencies = [
 
 [[package]]
 name = "taskfast-codegen"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "serde_yaml",

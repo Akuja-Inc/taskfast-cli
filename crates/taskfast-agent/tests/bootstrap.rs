@@ -57,6 +57,53 @@ async fn validate_auth_returns_profile_on_200() {
 }
 
 #[tokio::test]
+async fn validate_auth_preserves_unknown_agent_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/agents/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "alice",
+            "status": "suspended_pending_review",
+            "capabilities": [],
+        })))
+        .mount(&server)
+        .await;
+
+    let profile = validate_auth(&client(&server))
+        .await
+        .expect("unknown agent status must decode");
+    assert_eq!(
+        serde_json::to_value(&profile).expect("profile serializes")["status"],
+        "suspended_pending_review"
+    );
+}
+
+#[tokio::test]
+async fn validate_auth_decodes_nullable_and_unknown_payment_methods() {
+    for payment_method in [serde_json::Value::Null, serde_json::json!("future_method")] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/agents/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "alice",
+                "status": "active",
+                "payment_method": payment_method,
+            })))
+            .mount(&server)
+            .await;
+
+        let profile = validate_auth(&client(&server))
+            .await
+            .expect("nullable and unknown payment methods must decode");
+        assert_eq!(
+            serde_json::to_value(&profile).expect("profile serializes")["payment_method"],
+            payment_method,
+        );
+        assert_eq!(profile.payment_method.is_none(), payment_method.is_null());
+    }
+}
+
+#[tokio::test]
 async fn validate_auth_401_surfaces_auth_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

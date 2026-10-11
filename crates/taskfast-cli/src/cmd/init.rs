@@ -594,12 +594,11 @@ fn stale_key_hint(msg: &str, cfg_path: &Path, cfg: &Config, ctx: &Ctx, args: &Ar
 }
 
 fn assert_active(profile: &taskfast_client::api::types::AgentProfile) -> Result<(), CmdError> {
-    use taskfast_client::api::types::AgentProfileStatus;
-    match profile.status {
-        Some(AgentProfileStatus::Active) => Ok(()),
+    match profile.status.as_deref() {
+        Some("active") => Ok(()),
         Some(other) => Err(CmdError::Validation {
             code: "agent_not_active".into(),
-            message: format!("agent status is {other:?}; owner must reactivate"),
+            message: format!("agent status is {other}; owner must reactivate"),
         }),
         None => Err(CmdError::Server(
             "GET /agents/me returned no status field".into(),
