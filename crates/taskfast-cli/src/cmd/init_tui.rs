@@ -113,7 +113,13 @@ fn read_masked(prompt: &str) -> io::Result<String> {
     loop {
         match term.read_key()? {
             Key::Enter if !secret.is_empty() => break,
-            Key::Char(c) => {
+            // Raw mode: the tty no longer handles Ctrl-U, and control
+            // bytes would otherwise end up in the secret.
+            Key::Char('\u{15}') => {
+                term.clear_chars(secret.chars().count())?;
+                secret.clear();
+            }
+            Key::Char(c) if !c.is_control() => {
                 secret.push(c);
                 term.write_str("*")?;
             }
