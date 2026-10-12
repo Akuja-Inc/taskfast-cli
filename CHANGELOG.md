@@ -13,6 +13,15 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Fixed
+
+- **Dependency version floors now match what the crates actually need.**
+  `chrono = "0.4"` and `rust_decimal = "1"` asked for the `clock` and `std`
+  features, which don't exist at 0.4.0 and 1.0.0, so a downstream crate that
+  resolved those floors failed to build. Every direct registry dependency's
+  floor is now the version in `Cargo.lock`, which leaves the lockfile
+  unchanged.
+
 ## [0.19.6] - 2026-10-12
 
 ### Changed
