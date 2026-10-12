@@ -216,10 +216,13 @@ jobs:
     # Escape hatches, both in the job-level `if`:
     #   - `no-changelog` label — pure refactors, CI plumbing, doc-only churn.
     #   - dependabot[bot] PRs — `chore(deps)` bumps don't warrant entries.
+    #     Keyed on the PR author, not `github.actor`: the actor is whoever
+    #     pushed last, so a human fixup push to a dependabot branch dropped
+    #     the exemption and failed the gate.
     name: changelog-entry
     if: >-
       github.event_name == 'pull_request'
-      && github.actor != 'dependabot[bot]'
+      && github.event.pull_request.user.login != 'dependabot[bot]'
       && !contains(github.event.pull_request.labels.*.name, 'no-changelog')
     runs-on: ubuntu-22.04
     steps:

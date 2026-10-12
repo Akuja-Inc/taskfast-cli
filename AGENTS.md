@@ -15,6 +15,7 @@ These look like violations of the above but are intentional — don't "fix" them
 ## Guidance
 
 - Apply Red Green Refactor TDD
+- A PR touching `crates/**` or `spec/**` needs a `CHANGELOG.md` entry under `## Unreleased` (Keep a Changelog) or CI's `changelog-entry` job fails. Add it in the same PR before pushing; pure refactors/CI plumbing get the `no-changelog` label instead.
 
 ## Releasing
 
