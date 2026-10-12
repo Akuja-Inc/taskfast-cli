@@ -12,7 +12,8 @@
 
 use std::io::{self, IsTerminal};
 
-use dialoguer::theme::ColorfulTheme;
+use dialoguer::console::{Key, Term};
+use dialoguer::theme::{ColorfulTheme, Theme};
 use dialoguer::{Input, Password, Select};
 use taskfast_client::UserProfile;
 
@@ -54,10 +55,7 @@ impl Prompter for DialoguerPrompter {
         // Printed to stderr so the envelope on stdout stays machine-parseable
         // in pipelines that happen to be TTY-attached.
         eprintln!("Get a PAT at: {accounts_url}");
-        Password::with_theme(&ColorfulTheme::default())
-            .with_prompt("Paste your PAT")
-            .interact()
-            .map_err(dialoguer_err)
+        read_masked("Paste your PAT")
     }
 
     fn wallet_mode(&self) -> io::Result<WalletMode> {
@@ -94,6 +92,45 @@ impl Prompter for DialoguerPrompter {
             .interact()
             .map_err(dialoguer_err)
     }
+}
+
+/// Like `Password::interact`, but echoes `*` per character so a paste is
+/// visibly received — `Password` turns echo off entirely and dialoguer
+/// 0.11 has no mask option. Empty input re-prompts, matching `Password`.
+fn read_masked(prompt: &str) -> io::Result<String> {
+    let term = Term::stderr();
+    if !term.is_term() {
+        // `read_key` returns `Key::Unknown` forever off-TTY.
+        return Err(io::Error::other("stderr is not a terminal"));
+    }
+    let theme = ColorfulTheme::default();
+    let mut line = String::new();
+    theme
+        .format_password_prompt(&mut line, prompt)
+        .map_err(io::Error::other)?;
+    term.write_str(&line)?;
+    let mut secret = String::new();
+    loop {
+        match term.read_key()? {
+            Key::Enter if !secret.is_empty() => break,
+            // Raw mode: the tty no longer handles Ctrl-U, and control
+            // bytes would otherwise end up in the secret.
+            Key::Char('\u{15}') => {
+                term.clear_chars(secret.chars().count())?;
+                secret.clear();
+            }
+            Key::Char(c) if !c.is_control() => {
+                secret.push(c);
+                term.write_str("*")?;
+            }
+            Key::Backspace if secret.pop().is_some() => term.clear_chars(1)?,
+            _ => {}
+        }
+    }
+    // ponytail: newline, not dialoguer's clear-and-report — a long mask can
+    // wrap, and `clear_line` would only erase the last row.
+    term.write_line("")?;
+    Ok(secret)
 }
 
 fn dialoguer_err(e: dialoguer::Error) -> io::Error {
