@@ -34,7 +34,7 @@ jobs:
         run: cargo install cargo-fuzz --locked
       - name: Run ${{ matrix.target }}
         # Seed from the checked-in corpus; cap each run so the job stays bounded.
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=300 -timeout=10
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300 -timeout=10
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
