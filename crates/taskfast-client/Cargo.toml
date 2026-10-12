@@ -23,28 +23,28 @@ serde_json.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
-progenitor-client = "0.15"
-bytes = "1"
-chrono = { version = "0.4", default-features = false, features = ["serde"] }
+progenitor-client = "0.15.0"
+bytes = "1.12.1"
+chrono = { version = "0.4.45", default-features = false, features = ["serde"] }
 uuid.workspace = true
-rand = "0.8"
-regress = "0.12"
-base64 = "0.23"
+rand = "0.8.8"
+regress = "0.12.0"
+base64 = "0.23.1"
 futures = { workspace = true }
 
 [build-dependencies]
-progenitor = "0.15"
-openapiv3 = { version = "2", default-features = false }
-prettyplease = "0.3"
-syn = { version = "3", features = ["full"] }
-quote = "1"
+progenitor = "0.15.0"
+openapiv3 = { version = "2.2.0", default-features = false }
+prettyplease = "0.3.0"
+syn = { version = "3.0.6", features = ["full"] }
+quote = "1.0.47"
 serde_yaml.workspace = true
 taskfast-codegen.workspace = true
 
 [dev-dependencies]
-wiremock = "0.6"
+wiremock = "0.6.5"
 tokio = { workspace = true, features = ["macros", "rt"] }
-http = "1"
+http = "1.5.0"
 
 # Deps below appear only in build.rs-generated code ($OUT_DIR/codegen.rs,
 # produced by progenitor from spec/openapi.yaml). cargo-machete scans the

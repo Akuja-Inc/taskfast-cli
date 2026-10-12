@@ -21,37 +21,37 @@ readme = "README.md"
 rust-version = "1.95"
 
 [workspace.dependencies]
-anyhow = "1.0.95"
-thiserror = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "multipart"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-clap = { version = "4.5", features = ["derive", "env"] }
-dialoguer = { version = "0.11", default-features = false, features = ["password"] }
-futures = "0.3"
-uuid = { version = "1", features = ["serde", "v4"] }
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_yaml = "0.9.34"
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "multipart"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+dialoguer = { version = "0.11.0", default-features = false, features = ["password"] }
+futures = "0.3.34"
+uuid = { version = "1.26.1", features = ["serde", "v4"] }
 
-alloy-primitives = "1"
-alloy-dyn-abi = "1"
-alloy-json-abi = "1"
-alloy-signer = "2"
-alloy-signer-local = { version = "2", features = ["keystore"] }
-alloy-sol-types = "1"
-alloy-consensus = "2"
-alloy-eips = "2"
-rand = "0.8"
+alloy-primitives = "1.7.3"
+alloy-dyn-abi = "1.7.3"
+alloy-json-abi = "1.7.3"
+alloy-signer = "2.5.0"
+alloy-signer-local = { version = "2.5.0", features = ["keystore"] }
+alloy-sol-types = "1.7.3"
+alloy-consensus = "2.5.0"
+alloy-eips = "2.5.0"
+rand = "0.8.8"
 
-hmac = "0.13"
-sha2 = "0.11"
-hex = "0.4"
-zeroize = "1"
-chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
-toml_edit = "0.25"
-rust_decimal = { version = "1", default-features = false, features = ["std"] }
+hmac = "0.13.0"
+sha2 = "0.11.0"
+hex = "0.4.3"
+zeroize = "1.9.0"
+chrono = { version = "0.4.45", default-features = false, features = ["serde", "clock"] }
+toml_edit = "0.25.15"
+rust_decimal = { version = "1.43.0", default-features = false, features = ["std"] }
 
 taskfast-codegen = { path = "crates/taskfast-codegen", version = "0.3.0" }
 taskfast-client = { path = "crates/taskfast-client", version = "0.15.3" }
