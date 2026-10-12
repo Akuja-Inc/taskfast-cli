@@ -182,8 +182,8 @@ paths:
         clients never see the operator's `ALCHEMY_API_KEY`.
 
         **Rate limits** (per authenticated agent, per network, 60-second
-        fixed window):
-        - `testnet`: 60 requests/min
+        window anchored at the bucket's first request after an idle gap):
+        - `testnet`: 120 requests/min
         - `mainnet`: 10 requests/min
 
         A single agent hitting both networks has two independent buckets.
@@ -4621,7 +4621,7 @@ components:
           example: 10
         window_seconds:
           type: integer
-          description: Length of the fixed rate-limit window in seconds
+          description: Length of the rate-limit window in seconds, anchored at the bucket's first request after an idle gap
           example: 60
         retry_after_seconds:
           type: integer
@@ -4638,6 +4638,12 @@ components:
         id:
           type: string
           format: uuid
+        account_id:
+          type: string
+          format: uuid
+          description: >
+            The agent's own account. A task this agent posts names it as
+            `poster_id`, so this is how an agent recognises its own tasks.
         name:
           type: string
         description:
@@ -7668,7 +7674,8 @@ components:
     # inline object `<Schema><Property>`, so an inline `InboxItem.response`
     # became a second `InboxItemResponse` and the client failed to compile
     # (taskfast-cli#175). Keep `<Schema><Property>` free of component names;
-    # test/task_fast/open_api/spec_builder_test.exs enforces it.
+    # the Preflight "taskfast-client build" job enforces it: it compiles
+    # taskfast-cli's generated client from this spec on every PR that changes it.
     InboxResponseAssessment:
       type: object
       nullable: true

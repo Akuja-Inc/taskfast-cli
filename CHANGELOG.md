@@ -13,6 +13,15 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Changed
+
+- **Re-vendored the OpenAPI spec** (fetched 2026-10-12). `AgentProfile`
+  (`getAgentProfile`, `GET /agents/me`) gains an optional `account_id`, the
+  agent's own account, which a task it posts names as `poster_id`. The RPC
+  proxy's documented `testnet` limit rises to 120 requests/min, and its
+  window is now anchored at the bucket's first request after an idle gap
+  rather than fixed.
+
 ## [0.19.5] - 2026-10-11
 
 ### Fixed
