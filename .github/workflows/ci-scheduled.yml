@@ -77,6 +77,10 @@ jobs:
       - name: Re-vendor spec
         if: steps.drift.outputs.stale == 'true'
         run: scripts/vendor-spec.sh
+      # Drafted so the PR passes the changelog-entry gate; the reviewer rewords it.
+      - name: Draft CHANGELOG entry
+        if: steps.drift.outputs.stale == 'true'
+        run: scripts/draft-spec-changelog.sh
       - name: Open refresh PR
         if: steps.drift.outputs.stale == 'true'
         id: pr
@@ -93,8 +97,9 @@ jobs:
             CI was dispatched on this branch; a red build means the server spec changed
             in a way the generated client can't absorb.
 
-            Before merging, add a `## Unreleased` CHANGELOG line naming the new or
-            changed operations (`git diff origin/main -- spec/openapi.yaml`).
+            A `## Unreleased` CHANGELOG entry was drafted from added/removed operationIds.
+            Before merging, reword it to name changed schemas or behavior
+            (`git diff origin/main -- spec/openapi.yaml`).
       - name: Run CI on the refresh branch
         if: steps.pr.outputs.pull-request-operation == 'created' || steps.pr.outputs.pull-request-operation == 'updated'
         env:
