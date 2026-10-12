@@ -22,6 +22,14 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   window is now anchored at the bucket's first request after an idle gap
   rather than fixed.
 
+### Fixed
+
+- **Interactive `taskfast init` now echoes `*` while you type or paste your
+  PAT** (#183). The `Paste your PAT ›` prompt previously showed nothing, which
+  made it look stuck. Backspace and Ctrl-U edit the input, and a non-TTY
+  stderr errors out instead of looping. The keystore password prompt stays
+  fully hidden.
+
 ## [0.19.5] - 2026-10-11
 
 ### Fixed
