@@ -13,6 +13,8 @@ ignore = [
     "RUSTSEC-2026-0173",
     # rkyv 0.7 — OOB read; optional dep of rust_decimal, rkyv feature never enabled (not compiled)
     "RUSTSEC-2026-0235",
+    # unsafe-libyaml — unmaintained; via serde_yaml in progenitor/taskfast-codegen (build script + xtask only, not in the shipped binary). No safe upgrade upstream.
+    "RUSTSEC-2024-0449",
 ]
 
 [licenses]
