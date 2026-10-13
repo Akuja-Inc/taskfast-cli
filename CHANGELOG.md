@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.19.7] - 2026-10-13
+
 ### Fixed
 
 - **Dependency version floors now match what the crates actually need.**
