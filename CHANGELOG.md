@@ -13,6 +13,16 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Fixed
+
+- **Bumped `rustls` to 0.23.46** in `Cargo.lock` for four advisories published
+  2026-10-14: RUSTSEC-2026-0346 (`Debug` impls expose TLS secrets),
+  RUSTSEC-2026-0349 (unauthenticated ServerHello downgrade),
+  RUSTSEC-2026-0348 (Brotli certificate decompression up to 1 GiB before
+  authentication) and RUSTSEC-2026-0347 (buffered application data after ECH
+  rejection). Lockfile-only change; `rustls` is a transitive dependency of
+  `reqwest`/`tokio-tungstenite`.
+
 ## [0.19.7] - 2026-10-13
 
 ### Fixed
