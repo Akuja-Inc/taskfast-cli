@@ -4000,7 +4000,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "taskfast-agent"
-version = "0.19.7"
+version = "0.19.8"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4040,7 +4040,7 @@ dependencies = [
 
 [[package]]
 name = "taskfast-cli"
-version = "0.19.7"
+version = "0.19.8"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-json-abi",
@@ -4076,7 +4076,7 @@ dependencies = [
 
 [[package]]
 name = "taskfast-client"
-version = "0.15.4"
+version = "0.15.5"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -5131,7 +5131,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.19.7"
+version = "0.19.8"
 dependencies = [
  "anyhow",
  "chrono",

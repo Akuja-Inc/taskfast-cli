@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.19.8] - 2026-10-16
+
 ### Fixed
 
 - **Bumped `rustls` to 0.23.46** in `Cargo.lock` for four advisories published
