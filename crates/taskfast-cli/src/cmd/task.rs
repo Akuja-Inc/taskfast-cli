@@ -840,6 +840,12 @@ pub(super) fn content_type_for_ext(ext: &str) -> &'static str {
         "gif" => "image/gif",
         "webp" => "image/webp",
         "svg" => "image/svg+xml",
+        // gh#190: the server allow-list accepts these video types
+        // (taskfast#1679); without them, video artifacts fall through to
+        // application/octet-stream and the upload 415s.
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
         "zip" => "application/zip",
         "tar" => "application/x-tar",
         "gz" => "application/gzip",
@@ -991,5 +997,16 @@ mod tests {
             content_type_for_ext("unknownext"),
             "application/octet-stream"
         );
+    }
+
+    #[test]
+    fn content_type_maps_video_extensions() {
+        // gh#190 regression guard: the server allow-list accepts video/mp4,
+        // video/webm and video/quicktime (taskfast#1679), so these extensions
+        // must not fall through to application/octet-stream or the upload
+        // 415s. Dropping any arm reintroduces the bug.
+        assert_eq!(content_type_for_ext("mp4"), "video/mp4");
+        assert_eq!(content_type_for_ext("webm"), "video/webm");
+        assert_eq!(content_type_for_ext("mov"), "video/quicktime");
     }
 }

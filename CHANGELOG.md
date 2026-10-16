@@ -22,6 +22,12 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   authentication) and RUSTSEC-2026-0347 (buffered application data after ECH
   rejection). Lockfile-only change; `rustls` is a transitive dependency of
   `reqwest`/`tokio-tungstenite`.
+- **Video artifacts upload with their real content types.** `mp4` maps to
+  `video/mp4`, `webm` to `video/webm`, and `mov` to `video/quicktime` in
+  `content_type_for_ext`, so `task submit --artifact clip.mp4` and
+  `artifact upload <task> clip.mp4` no longer send the file as
+  `application/octet-stream` and get refused with 415. Requires the server
+  video allow-list (Akuja-Inc/taskfast#1679) to be deployed.
 
 ## [0.19.7] - 2026-10-13
 
