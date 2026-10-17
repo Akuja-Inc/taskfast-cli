@@ -15,7 +15,7 @@
 //! TaskFast never transits the bytes. `cid-status` is the buyer-side verdict
 //! (`witnessed` / `unverifiable`); only the task's poster may write it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
@@ -23,11 +23,13 @@ use uuid::Uuid;
 
 use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
+use crate::Environment;
 
 use taskfast_client::api::types::{
-    SubmitArtifactCidBody, UpdateArtifactCidStatusBody, UpdateArtifactCidStatusBodyCidStatus,
+    Artifact, SubmitArtifactCidBody, UpdateArtifactCidStatusBody,
+    UpdateArtifactCidStatusBodyCidStatus,
 };
-use taskfast_client::map_api_error;
+use taskfast_client::{map_api_error, put_presigned_upload, ArtifactUpload, TaskFastClient};
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -199,12 +201,8 @@ async fn upload(ctx: &Ctx, args: UploadArgs) -> CmdResult {
     }
 
     let client = ctx.client()?;
-    let bytes = std::fs::read(&args.file)
-        .map_err(|e| CmdError::Usage(format!("read {}: {e}", args.file.display())))?;
-    let artifact = client
-        .upload_artifact(&task_id, filename, content_type, bytes)
-        .await
-        .map_err(CmdError::from)?;
+    let artifact =
+        upload_file(ctx, &client, &task_id, &args.file, &filename, &content_type).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -217,6 +215,69 @@ async fn upload(ctx: &Ctx, args: UploadArgs) -> CmdResult {
                 "size_bytes": artifact.size_bytes,
             },
         }),
+    ))
+}
+
+/// Upload one file as a task artifact (gh#193): ask the server for a
+/// presigned PUT, send the bytes straight to storage, then complete.
+///
+/// Multipart through the app is a development-only fallback (`--env local`,
+/// whose Local storage adapter answers `multipart`, or an older dev server
+/// that 404s). On staging and production that path would take the service
+/// down, so it is refused there rather than retried.
+pub(super) async fn upload_file(
+    ctx: &Ctx,
+    client: &TaskFastClient,
+    task_id: &Uuid,
+    path: &Path,
+    filename: &str,
+    content_type: &str,
+) -> Result<Artifact, CmdError> {
+    let read_err = |e: std::io::Error| CmdError::Usage(format!("read {}: {e}", path.display()));
+    let file = std::fs::File::open(path).map_err(read_err)?;
+    let size_bytes = file.metadata().map_err(read_err)?.len();
+    match client
+        .initiate_artifact_upload(task_id, filename, content_type, size_bytes)
+        .await?
+    {
+        Some(ArtifactUpload::Put {
+            upload_id,
+            url,
+            headers,
+            expires_at,
+        }) => {
+            check_upload_url(&url, ctx.allow_custom_endpoints)?;
+            put_presigned_upload(&url, &headers, file, size_bytes).await?;
+            Ok(client
+                .complete_artifact_upload(task_id, &upload_id, expires_at)
+                .await?)
+        }
+        _ if ctx.environment == Environment::Local => {
+            let bytes = std::fs::read(path).map_err(read_err)?;
+            Ok(client
+                .upload_artifact(task_id, filename.into(), content_type.into(), bytes)
+                .await?)
+        }
+        _ => Err(CmdError::Server(
+            "this server does not offer direct uploads".into(),
+        )),
+    }
+}
+
+/// Pin presigned upload URLs to R2, so a server bug or tampered response
+/// cannot aim artifact bytes at another host. Bypassed only by
+/// `--allow-custom-endpoints`, like the API endpoint guard.
+fn check_upload_url(url: &str, allow_custom: bool) -> Result<(), CmdError> {
+    let is_r2 = reqwest::Url::parse(url).is_ok_and(|u| {
+        u.scheme() == "https"
+            && u.host_str()
+                .is_some_and(|h| h.ends_with(".r2.cloudflarestorage.com"))
+    });
+    if is_r2 || allow_custom {
+        return Ok(());
+    }
+    Err(CmdError::Usage(
+        "refusing presigned upload URL: must be https on *.r2.cloudflarestorage.com".into(),
     ))
 }
 
@@ -326,4 +387,27 @@ async fn update_cid_status(ctx: &Ctx, args: CidStatusArgs) -> CmdResult {
 
 fn parse_uuid(raw: &str, label: &str) -> Result<Uuid, CmdError> {
     Uuid::parse_str(raw).map_err(|e| CmdError::Usage(format!("{label} must be a UUID: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_upload_url;
+
+    #[test]
+    fn upload_url_must_be_https_r2() {
+        assert!(
+            check_upload_url("https://acct.r2.cloudflarestorage.com/pending/x?s=1", false).is_ok()
+        );
+        for bad in [
+            "http://acct.r2.cloudflarestorage.com/pending/x",
+            "https://acct.r2.cloudflarestorage.com.evil.com/x",
+            "https://acct.r2.cloudflarestorage.com@evil.com/x",
+            "https://r2.cloudflarestorage.com/x",
+            "https://evil.com/acct.r2.cloudflarestorage.com",
+            "not a url",
+        ] {
+            assert!(check_upload_url(bad, false).is_err(), "{bad}");
+        }
+        assert!(check_upload_url("http://127.0.0.1:9/x", true).is_ok());
+    }
 }

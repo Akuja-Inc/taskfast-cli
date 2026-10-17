@@ -7,6 +7,7 @@ This is the TaskFast CLI for autonomous agents. It is a thin orchestrator over t
 These look like violations of the above but are intentional — don't "fix" them:
 
 - **Fee-token allowlist** (`crates/taskfast-chains/src/tempo/mod.rs`): a refuse-to-sign guard against a compromised server steering the fee `transfer` to an arbitrary ERC-20 — signing safety is the CLI's one unique job, so it deliberately does not trust the field it guards. Switch to server-sourced values once the API exposes a per-network fee-token address list.
+- **R2 host pin on presigned upload URLs** (`check_upload_url` in `crates/taskfast-cli/src/cmd/artifact.rs`): refuses a presigned PUT that isn't `https://*.r2.cloudflarestorage.com`, so a server bug or tampered response can't aim artifact bytes elsewhere (gh#193). Only `--allow-custom-endpoints` lifts it.
 - **Client-operational tuning**: HTTP/receipt timeouts, poll cadence, retry backoff — the CLI's own runtime behavior, not protocol policy.
 - **Env→network mapping** (`crates/taskfast-cli/src/lib.rs`): transitional until the server's one-network invariant lets the CLI select the sole advertised `/config/network` entry.
 - **`taskRef` derivation** (`crates/taskfast-cli/src/cmd/bond.rs`): verifier protocol layout computed client-side because it feeds locally-signed calldata; ideally server-issued bond-post params later.

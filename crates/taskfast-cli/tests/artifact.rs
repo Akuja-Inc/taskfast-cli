@@ -247,3 +247,169 @@ async fn artifact_cid_status_dry_run_skips_network() {
     assert_eq!(v["data"]["action"], "would_update_cid_status");
     assert_eq!(v["data"]["cid_status"], "witnessed");
 }
+
+// --- direct upload to R2 (gh#193) ---------------------------------------
+
+const UPLOAD: &str = "33333333-3333-3333-3333-333333333333";
+
+fn artifact_body() -> serde_json::Value {
+    json!({
+        "id": ART,
+        "filename": "a.txt",
+        "content_type": "text/plain",
+        "size_bytes": 6,
+        "created_at": "2026-01-01T00:00:00Z",
+        "url": "artifacts/a.txt",
+    })
+}
+
+fn put_ticket(url: String) -> serde_json::Value {
+    json!({
+        "upload_id": UPLOAD,
+        "method": "put",
+        "url": url,
+        "headers": {"content-type": "text/plain"},
+        "expires_at": (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339(),
+    })
+}
+
+async fn mount_initiate(server: &MockServer, resp: ResponseTemplate) {
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK}/artifacts/uploads")))
+        .respond_with(resp)
+        .mount(server)
+        .await;
+}
+
+async fn upload_with(ctx: &Ctx) -> Result<Envelope, CmdError> {
+    let tmp = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+    writeln!(tmp.as_file(), "hello").unwrap();
+    run(
+        ctx,
+        Command::Upload(UploadArgs {
+            task_id: TASK.into(),
+            file: tmp.path().to_path_buf(),
+        }),
+    )
+    .await
+}
+
+fn staging(server: &MockServer) -> Ctx {
+    Ctx {
+        environment: Environment::Staging,
+        ..ctx_for(server)
+    }
+}
+
+#[tokio::test]
+async fn artifact_upload_puts_to_storage_then_completes() {
+    let server = MockServer::start().await;
+    mount_initiate(
+        &server,
+        ResponseTemplate::new(201).set_body_json(put_ticket(format!("{}/pending/x", server.uri()))),
+    )
+    .await;
+    Mock::given(method("PUT"))
+        .and(path("/pending/x"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/tasks/{TASK}/artifacts/uploads/{UPLOAD}/complete"
+        )))
+        .respond_with(ResponseTemplate::new(201).set_body_json(artifact_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // The mock is not an R2 host, so only --allow-custom-endpoints lets it through.
+    let ctx = Ctx {
+        allow_custom_endpoints: true,
+        ..staging(&server)
+    };
+    let v = env_value(&upload_with(&ctx).await.expect("direct upload ok"));
+    assert_eq!(v["data"]["artifact"]["id"], ART);
+}
+
+#[tokio::test]
+async fn artifact_upload_refuses_non_r2_url_without_putting() {
+    let server = MockServer::start().await;
+    mount_initiate(
+        &server,
+        ResponseTemplate::new(201).set_body_json(put_ticket(format!("{}/pending/x", server.uri()))),
+    )
+    .await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let err = upload_with(&staging(&server))
+        .await
+        .expect_err("non-R2 host");
+    assert!(matches!(err, CmdError::Usage(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn artifact_upload_on_staging_never_falls_back_to_multipart() {
+    for initiate in [
+        ResponseTemplate::new(404),
+        ResponseTemplate::new(200).set_body_json(json!({"method": "multipart"})),
+    ] {
+        let server = MockServer::start().await;
+        mount_initiate(&server, initiate).await;
+        Mock::given(method("POST"))
+            .and(path(format!("/tasks/{TASK}/artifacts")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(artifact_body()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let err = upload_with(&staging(&server))
+            .await
+            .expect_err("no fallback");
+        assert_eq!(
+            err.to_string(),
+            "server: this server does not offer direct uploads"
+        );
+    }
+}
+
+#[tokio::test]
+async fn artifact_upload_on_local_falls_back_to_multipart() {
+    for initiate in [
+        ResponseTemplate::new(404),
+        ResponseTemplate::new(200).set_body_json(json!({"method": "multipart"})),
+    ] {
+        let server = MockServer::start().await;
+        mount_initiate(&server, initiate).await;
+        Mock::given(method("POST"))
+            .and(path(format!("/tasks/{TASK}/artifacts")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(artifact_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let v = env_value(&upload_with(&ctx_for(&server)).await.expect("multipart ok"));
+        assert_eq!(v["data"]["artifact"]["id"], ART);
+    }
+}
+
+#[tokio::test]
+async fn artifact_upload_413_passes_on_server_limit() {
+    let server = MockServer::start().await;
+    mount_initiate(
+        &server,
+        ResponseTemplate::new(413).set_body_json(json!({
+            "error": "file_too_large",
+            "message": "file size 6 bytes exceeds maximum of 50 MB",
+            "max_bytes": 52_428_800,
+        })),
+    )
+    .await;
+    let err = upload_with(&staging(&server)).await.expect_err("413");
+    assert_eq!(
+        err.to_string(),
+        "validation [file_too_large]: file size 6 bytes exceeds maximum of 50 MB (max_bytes: 52428800)"
+    );
+}

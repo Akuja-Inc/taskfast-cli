@@ -21,11 +21,11 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
 tracing.workspace = true
 progenitor-client = "0.15.0"
 bytes = "1.12.1"
-chrono = { version = "0.4.45", default-features = false, features = ["serde"] }
+chrono = { version = "0.4.45", default-features = false, features = ["serde", "clock"] }
 uuid.workspace = true
 rand = "0.8.8"
 regress = "0.12.0"
@@ -43,7 +43,7 @@ taskfast-codegen.workspace = true
 
 [dev-dependencies]
 wiremock = "0.6.5"
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util"] }
 http = "1.5.0"
 
 # Deps below appear only in build.rs-generated code ($OUT_DIR/codegen.rs,

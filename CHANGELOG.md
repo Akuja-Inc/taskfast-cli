@@ -13,6 +13,31 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Fixed
+
+- Retry artifact completion when the connection drops or times out while reading
+  a successful response body, without uploading the file again.
+- Strip presigned storage URLs from PUT transport errors so upload credentials
+  do not appear in CLI output or agent logs.
+
+### Changed
+
+- **Artifacts upload straight to R2, never through the app on staging or
+  production (gh#193).** `task submit --artifact`, `task remedy --artifact`
+  and `artifact upload` now ask the server for a presigned PUT
+  (`POST /tasks/{id}/artifacts/uploads`), stream the file to it with an
+  explicit `Content-Length`, then record it with
+  `POST /tasks/{id}/artifacts/uploads/{upload_id}/complete`. The PUT uses a
+  separate HTTP client without the API key and with redirects off, and only
+  goes to `https://*.r2.cloudflarestorage.com` (`--allow-custom-endpoints`
+  lifts that pin). Complete retries 503 and timeouts until the upload
+  expires, and never re-sends the bytes. Multipart through the app is now a
+  `--env local` fallback only; on staging and production a server without
+  direct uploads fails with `server: this server does not offer direct
+  uploads`. The server still owns the size limit: an oversize file fails at
+  initiate with `validation [file_too_large]` and the server's `max_bytes`.
+  Needs taskfast#1690 on the server.
+
 ## [0.19.8] - 2026-10-16
 
 ### Fixed

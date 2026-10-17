@@ -44,6 +44,11 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// while preventing a compromised (or buggy) server from memory-
 /// exhausting the CLI with a gigabyte body.
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// Per-request timeout for upload complete: the server waits on its ingest
+/// Worker hashing the whole object, which can outlast the default 30s.
+const COMPLETE_REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
+/// Backoff ceiling between upload complete retries.
+const MAX_COMPLETE_BACKOFF: Duration = Duration::from_secs(10);
 
 /// Authenticated TaskFast API client.
 pub struct TaskFastClient {
@@ -198,6 +203,100 @@ impl TaskFastClient {
         }
     }
 
+    /// `POST /tasks/{task_id}/artifacts/uploads` — ask for a direct-upload
+    /// ticket (gh#193). The server checks `size_bytes` against its own
+    /// per-type cap here, before any bytes move, so oversize files fail as
+    /// 413 `file_too_large` carrying `max_bytes`. The CLI holds no cap.
+    ///
+    /// Hand-rolled until the endpoint lands in `spec/openapi.yaml`
+    /// (taskfast#1690). 404 is promoted to `Ok(None)`: an older server with
+    /// no direct-upload endpoint.
+    pub async fn initiate_artifact_upload(
+        &self,
+        task_id: &uuid::Uuid,
+        filename: &str,
+        content_type: &str,
+        size_bytes: u64,
+    ) -> Result<Option<ArtifactUpload>> {
+        let url = format!(
+            "{}/tasks/{}/artifacts/uploads",
+            self.inner.baseurl(),
+            task_id
+        );
+        let body = serde_json::json!({
+            "filename": filename,
+            "content_type": content_type,
+            "size_bytes": size_bytes,
+        });
+        let resp = self.inner.client().post(url).json(&body).send().await?;
+        let status = resp.status();
+        if status.is_success() {
+            let bytes = read_body_capped(resp, MAX_RESPONSE_BYTES).await?;
+            return Ok(Some(serde_json::from_slice::<ArtifactUpload>(&bytes)?));
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Err(classify_response(resp).await)
+    }
+
+    /// `POST /tasks/{task_id}/artifacts/uploads/{upload_id}/complete` — have
+    /// the server fingerprint the PUT object and record the artifact.
+    ///
+    /// Complete is idempotent server-side, so 503 (ingest Worker unreachable)
+    /// and transport failures (including our own timeout while the Worker
+    /// hashes a large file) retry with doubling backoff until `expires_at`.
+    /// Only complete retries; the caller must never PUT again.
+    pub async fn complete_artifact_upload(
+        &self,
+        task_id: &uuid::Uuid,
+        upload_id: &uuid::Uuid,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<api::types::Artifact> {
+        let url = format!(
+            "{}/tasks/{}/artifacts/uploads/{}/complete",
+            self.inner.baseurl(),
+            task_id,
+            upload_id
+        );
+        let mut delay = self.policy.base_delay;
+        loop {
+            let err = match self
+                .inner
+                .client()
+                .post(&url)
+                .timeout(COMPLETE_REQUEST_TIMEOUT)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    match read_body_capped(resp, MAX_RESPONSE_BYTES).await {
+                        Ok(bytes) => return Ok(serde_json::from_slice(&bytes)?),
+                        // Headers can arrive before a disconnect or body timeout.
+                        // Recover via idempotent complete, just as for send failures.
+                        Err(err @ Error::Network(_)) => err,
+                        Err(err) => return Err(err),
+                    }
+                }
+                Ok(resp) if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                    classify_response(resp).await
+                }
+                Ok(resp) => return Err(classify_response(resp).await),
+                Err(e) => Error::Network(e),
+            };
+            if chrono::Utc::now() + delay >= expires_at {
+                return Err(err);
+            }
+            tracing::warn!(
+                ?delay,
+                error = err.kind(),
+                "retrying artifact upload complete"
+            );
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(MAX_COMPLETE_BACKOFF);
+        }
+    }
+
     /// `GET /config/network` — per-network chain metadata.
     ///
     /// Public endpoint, no auth required; the `X-API-Key` header attached by
@@ -293,6 +392,72 @@ impl TaskFastClient {
         let bytes = read_body_capped(resp, MAX_RESPONSE_BYTES).await?;
         Ok(serde_json::from_slice::<serde_json::Value>(&bytes)?)
     }
+}
+
+/// PUT `file` to a presigned storage `url` with exactly `headers` (gh#193).
+///
+/// Deliberately a fresh reqwest::Client, not [`TaskFastClient::http_client`]:
+/// that one carries `X-API-Key` as a default header, which must never reach a
+/// storage host. Redirects are off for the same reason as in
+/// [`TaskFastClient::from_api_key`]. No total timeout, since a 200 MB video
+/// on a slow link legitimately runs long. The body streams from disk with an
+/// explicit `Content-Length`, because S3-style presigned PUTs refuse
+/// `Transfer-Encoding: chunked`.
+pub async fn put_presigned_upload<S: std::hash::BuildHasher>(
+    url: &str,
+    headers: &HashMap<String, String, S>,
+    file: std::fs::File,
+    size_bytes: u64,
+) -> Result<()> {
+    let http = reqwest::ClientBuilder::new()
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let mut req = http
+        .put(url)
+        .header(reqwest::header::CONTENT_LENGTH, size_bytes)
+        .body(reqwest::Body::from(tokio::fs::File::from_std(file)));
+    for (name, value) in headers {
+        req = req.header(name, value);
+    }
+    // The URL is a write credential; errors reach CLI output and agent logs.
+    let resp = req.send().await.map_err(reqwest::Error::without_url)?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    // Storage errors are S3 XML, not TaskFast's envelope; keep the raw text
+    // (e.g. `SignatureDoesNotMatch`) for the operator.
+    let body = read_body_capped(resp, 64 * 1024).await.unwrap_or_default();
+    Err(Error::Server(format!(
+        "artifact storage PUT failed: HTTP {}: {}",
+        status.as_u16(),
+        String::from_utf8_lossy(&body).trim()
+    )))
+}
+
+/// Answer to `POST /tasks/{task_id}/artifacts/uploads`. Lives alongside the
+/// hand-rolled call until the endpoint is added to `spec/openapi.yaml` and
+/// the type can be regenerated under [`crate::api::types`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "method", rename_all = "lowercase")]
+pub enum ArtifactUpload {
+    /// Upload straight to storage with [`put_presigned_upload`], then call
+    /// [`TaskFastClient::complete_artifact_upload`].
+    Put {
+        /// Server id for this upload. A UUID, so it is safe to put in a path.
+        upload_id: uuid::Uuid,
+        /// Presigned storage URL.
+        url: String,
+        /// Headers the PUT must carry exactly (the signed `content-type`).
+        #[serde(default)]
+        headers: HashMap<String, String>,
+        /// When the presigned URL and the pending upload expire.
+        expires_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// The server stores uploads itself (development's Local adapter): use
+    /// [`TaskFastClient::upload_artifact`].
+    Multipart {},
 }
 
 /// Stream `resp` body chunks into memory, refusing to allocate past `cap`.
@@ -429,6 +594,11 @@ struct ErrorBody {
     /// Human-readable detail.
     #[serde(default)]
     message: String,
+    /// Upload size cap for this content type, sent with 413
+    /// `file_too_large` (taskfast#1690). Appended to `message` as-is so the
+    /// server's real limit reaches the operator; the CLI holds no copy.
+    #[serde(default)]
+    max_bytes: Option<u64>,
 }
 
 /// Classify a non-2xx response by status code, reading the body to extract
@@ -453,7 +623,7 @@ async fn classify_response(resp: reqwest::Response) -> Error {
             String::new()
         }
     };
-    let parsed: ErrorBody = match serde_json::from_str(&body) {
+    let mut parsed: ErrorBody = match serde_json::from_str(&body) {
         Ok(p) => p,
         Err(e) => {
             if !body.is_empty() {
@@ -462,9 +632,13 @@ async fn classify_response(resp: reqwest::Response) -> Error {
             ErrorBody {
                 error: String::new(),
                 message: body,
+                max_bytes: None,
             }
         }
     };
+    if let Some(max) = parsed.max_bytes {
+        parsed.message = format!("{} (max_bytes: {max})", parsed.message);
+    }
 
     match code {
         401 | 403 => Error::Auth(format_status(

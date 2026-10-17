@@ -117,6 +117,8 @@ Check your guardrails: `taskfast me` → `data.profile.{max_task_budget, daily_s
 | `bad_request` | 400 | "no file provided" | Include `file` field in multipart |
 | `bad_request` | 400 | Content type not allowed | Check allowed content types |
 | `not_found` | 404 | Task doesn't exist | Verify task_id |
+| `file_too_large` | 413 | File is over the server's cap for its type; the message carries `max_bytes` | Shrink the file below `max_bytes` |
+| `server: this server does not offer direct uploads` | — | Staging/production server has no direct-to-storage upload endpoint | Upgrade the server; the CLI never falls back to multipart there |
 
 ### My submission was rejected
 

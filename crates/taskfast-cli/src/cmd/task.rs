@@ -404,12 +404,15 @@ async fn submit(ctx: &Ctx, args: SubmitArgs, kind: SubmitKind) -> CmdResult {
     let mut artifact_ids: Vec<uuid::Uuid> = Vec::with_capacity(resolved.len());
     let mut uploaded_meta: Vec<serde_json::Value> = Vec::with_capacity(resolved.len());
     for r in resolved {
-        let bytes = std::fs::read(&r.path)
-            .map_err(|e| CmdError::Usage(format!("read {}: {e}", r.path.display())))?;
-        let artifact = client
-            .upload_artifact(&task_id, r.filename.clone(), r.content_type.clone(), bytes)
-            .await
-            .map_err(CmdError::from)?;
+        let artifact = super::artifact::upload_file(
+            ctx,
+            &client,
+            &task_id,
+            &r.path,
+            &r.filename,
+            &r.content_type,
+        )
+        .await?;
         artifact_ids.push(artifact.id);
         uploaded_meta.push(json!({
             "id": artifact.id,
