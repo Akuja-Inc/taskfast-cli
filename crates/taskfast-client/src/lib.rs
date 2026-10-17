@@ -15,7 +15,8 @@ pub mod errors;
 pub mod retry;
 
 pub use client::{
-    map_api_error, NetworkConfigEntry, NetworkConfigResponse, TaskFastClient, UserProfile,
+    map_api_error, put_presigned_upload, ArtifactUpload, NetworkConfigEntry, NetworkConfigResponse,
+    TaskFastClient, UserProfile,
 };
 // `record_corr` is referenced by the generated client as `crate::record_corr`
 // (wired as progenitor's post-hook in build.rs), so it must live at the root.
