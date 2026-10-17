@@ -270,8 +270,13 @@ impl TaskFastClient {
                 .await
             {
                 Ok(resp) if resp.status().is_success() => {
-                    let bytes = read_body_capped(resp, MAX_RESPONSE_BYTES).await?;
-                    return Ok(serde_json::from_slice::<api::types::Artifact>(&bytes)?);
+                    match read_body_capped(resp, MAX_RESPONSE_BYTES).await {
+                        Ok(bytes) => return Ok(serde_json::from_slice(&bytes)?),
+                        // Headers can arrive before a disconnect or body timeout.
+                        // Recover via idempotent complete, just as for send failures.
+                        Err(err @ Error::Network(_)) => err,
+                        Err(err) => return Err(err),
+                    }
                 }
                 Ok(resp) if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
                     classify_response(resp).await
@@ -415,7 +420,8 @@ pub async fn put_presigned_upload<S: std::hash::BuildHasher>(
     for (name, value) in headers {
         req = req.header(name, value);
     }
-    let resp = req.send().await?;
+    // The URL is a write credential; errors reach CLI output and agent logs.
+    let resp = req.send().await.map_err(reqwest::Error::without_url)?;
     let status = resp.status();
     if status.is_success() {
         return Ok(());

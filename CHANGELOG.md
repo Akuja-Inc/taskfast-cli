@@ -13,6 +13,13 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Fixed
+
+- Retry artifact completion when the connection drops or times out while reading
+  a successful response body, without uploading the file again.
+- Strip presigned storage URLs from PUT transport errors so upload credentials
+  do not appear in CLI output or agent logs.
+
 ### Changed
 
 - **Artifacts upload straight to R2, never through the app on staging or

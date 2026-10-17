@@ -43,7 +43,7 @@ taskfast-codegen.workspace = true
 
 [dev-dependencies]
 wiremock = "0.6.5"
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util"] }
 http = "1.5.0"
 
 # Deps below appear only in build.rs-generated code ($OUT_DIR/codegen.rs,
