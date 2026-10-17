@@ -29,6 +29,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 use uuid::Uuid;
 
+use super::artifact::{upload_file, ResolvedArtifact};
 use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
@@ -404,15 +405,7 @@ async fn submit(ctx: &Ctx, args: SubmitArgs, kind: SubmitKind) -> CmdResult {
     let mut artifact_ids: Vec<uuid::Uuid> = Vec::with_capacity(resolved.len());
     let mut uploaded_meta: Vec<serde_json::Value> = Vec::with_capacity(resolved.len());
     for r in resolved {
-        let artifact = super::artifact::upload_file(
-            ctx,
-            &client,
-            &task_id,
-            &r.path,
-            &r.filename,
-            &r.content_type,
-        )
-        .await?;
+        let artifact = upload_file(ctx, &client, &task_id, &r).await?;
         artifact_ids.push(artifact.id);
         uploaded_meta.push(json!({
             "id": artifact.id,
@@ -778,47 +771,6 @@ async fn bids(ctx: &Ctx, args: BidsArgs) -> CmdResult {
             "meta": resp.meta,
         }),
     ))
-}
-
-/// Path + derived metadata (filename, content_type) needed for multipart
-/// upload. Parsed upfront so a missing file fails before any network I/O.
-struct ResolvedArtifact {
-    path: PathBuf,
-    filename: String,
-    content_type: String,
-}
-
-impl ResolvedArtifact {
-    fn from_path(p: &std::path::Path) -> Result<Self, CmdError> {
-        if !p.exists() {
-            return Err(CmdError::Usage(format!(
-                "artifact file not found: {}",
-                p.display()
-            )));
-        }
-        let filename = p
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| {
-                CmdError::Usage(format!("artifact path has no filename: {}", p.display()))
-            })?
-            .to_string();
-        let ext = p
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_default();
-        let content_type = content_type_for_ext(&ext).to_string();
-        Ok(Self {
-            path: p.to_path_buf(),
-            filename,
-            content_type,
-        })
-    }
-
-    fn display_path(&self) -> String {
-        self.path.display().to_string()
-    }
 }
 
 /// Map file extension to the MIME types the server accepts. Anything
