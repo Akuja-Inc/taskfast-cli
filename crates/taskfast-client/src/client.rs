@@ -457,7 +457,7 @@ pub enum ArtifactUpload {
     },
     /// The server stores uploads itself (development's Local adapter): use
     /// [`TaskFastClient::upload_artifact`].
-    Multipart {},
+    Multipart,
 }
 
 /// Stream `resp` body chunks into memory, refusing to allocate past `cap`.

@@ -20,12 +20,34 @@ fn task_id() -> uuid::Uuid {
 }
 
 fn client(server: &MockServer) -> TaskFastClient {
-    TaskFastClient::from_api_key(&server.uri(), "test-key-123")
+    client_at(&server.uri())
+}
+
+fn client_at(base_url: &str) -> TaskFastClient {
+    TaskFastClient::from_api_key(base_url, "test-key-123")
         .unwrap()
         .with_retry_policy(RetryPolicy {
             max_attempts: 3,
             base_delay: Duration::from_millis(1),
         })
+}
+
+/// Write `bytes` to a fresh temp file; returns its path (for cleanup) and an
+/// open handle for `put_presigned_upload`.
+fn temp_file(bytes: &[u8]) -> (std::path::PathBuf, std::fs::File) {
+    let path = std::env::temp_dir().join(format!("tf-put-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&path, bytes).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    (path, file)
+}
+
+/// Read a raw HTTP request's head (through the blank line) off `stream`.
+async fn read_request_head(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(stream.read_u8().await.unwrap());
+    }
+    head
 }
 
 fn artifact_json() -> serde_json::Value {
@@ -99,7 +121,7 @@ async fn initiate_parses_multipart_answer_and_404_as_none() {
         .await
         .unwrap();
     assert!(
-        matches!(ticket, Some(ArtifactUpload::Multipart {})),
+        matches!(ticket, Some(ArtifactUpload::Multipart)),
         "{ticket:?}"
     );
 
@@ -170,14 +192,12 @@ async fn put_streams_file_with_exact_headers_and_no_api_key() {
         .mount(&server)
         .await;
 
-    let file = std::env::temp_dir().join(format!("tf-put-{}.mp4", std::process::id()));
-    std::fs::write(&file, b"hello").unwrap();
+    let (path, file) = temp_file(b"hello");
     let headers = HashMap::from([("content-type".to_string(), "video/mp4".to_string())]);
-    let f = std::fs::File::open(&file).unwrap();
-    put_presigned_upload(&format!("{}/pending/x", server.uri()), &headers, f, 5)
+    put_presigned_upload(&format!("{}/pending/x", server.uri()), &headers, file, 5)
         .await
         .unwrap();
-    std::fs::remove_file(&file).ok();
+    std::fs::remove_file(&path).ok();
 
     let reqs = server.received_requests().await.unwrap();
     let put = &reqs[0];
@@ -201,13 +221,11 @@ async fn put_failure_is_server_error() {
         )
         .mount(&server)
         .await;
-    let file = std::env::temp_dir().join(format!("tf-put-403-{}.txt", std::process::id()));
-    std::fs::write(&file, b"hi").unwrap();
-    let f = std::fs::File::open(&file).unwrap();
-    let err = put_presigned_upload(&format!("{}/p", server.uri()), &HashMap::new(), f, 2)
+    let (path, file) = temp_file(b"hi");
+    let err = put_presigned_upload(&format!("{}/p", server.uri()), &HashMap::new(), file, 2)
         .await
         .expect_err("403");
-    std::fs::remove_file(&file).ok();
+    std::fs::remove_file(&path).ok();
     match err {
         Error::Server(m) => assert!(
             m.contains("403") && m.contains("SignatureDoesNotMatch"),
@@ -226,10 +244,7 @@ async fn put_transport_error_does_not_expose_presigned_credentials() {
     );
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut request = Vec::new();
-        while !request.ends_with(b"\r\n\r\n") {
-            request.push(stream.read_u8().await.unwrap());
-        }
+        read_request_head(&mut stream).await;
         let mut body = [0; 5];
         stream.read_exact(&mut body).await.unwrap();
         assert_eq!(&body, b"hello");
@@ -237,9 +252,7 @@ async fn put_transport_error_does_not_expose_presigned_credentials() {
         stream.write_all(b"not-http\r\n\r\n").await.unwrap();
         stream.shutdown().await.unwrap();
     });
-    let path = std::env::temp_dir().join(format!("tf-put-redaction-{}.txt", uuid::Uuid::new_v4()));
-    std::fs::write(&path, b"hello").unwrap();
-    let file = std::fs::File::open(&path).unwrap();
+    let (path, file) = temp_file(b"hello");
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         put_presigned_upload(&url, &HashMap::new(), file, 5),
@@ -308,10 +321,7 @@ async fn complete_retries_truncated_success_body_then_returns_artifact() {
         ];
         for response in responses {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                request.push(stream.read_u8().await.unwrap());
-            }
+            let request = read_request_head(&mut stream).await;
             assert!(String::from_utf8(request).unwrap().starts_with(&format!(
                 "POST /tasks/{TASK}/artifacts/uploads/{UPLOAD}/complete HTTP/1.1\r\n"
             )));
@@ -319,12 +329,7 @@ async fn complete_retries_truncated_success_body_then_returns_artifact() {
             stream.shutdown().await.unwrap();
         }
     });
-    let client = TaskFastClient::from_api_key(&url, "test-key-123")
-        .unwrap()
-        .with_retry_policy(RetryPolicy {
-            max_attempts: 3,
-            base_delay: Duration::from_millis(1),
-        });
+    let client = client_at(&url);
     let artifact = tokio::time::timeout(
         Duration::from_secs(5),
         client.complete_artifact_upload(&task_id(), &UPLOAD.parse().unwrap(), far_future()),

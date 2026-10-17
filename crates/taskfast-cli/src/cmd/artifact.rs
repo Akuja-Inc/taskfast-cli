@@ -166,25 +166,7 @@ async fn get(ctx: &Ctx, args: GetArgs) -> CmdResult {
 
 async fn upload(ctx: &Ctx, args: UploadArgs) -> CmdResult {
     let task_id = parse_uuid(&args.task_id, "task id")?;
-    if !args.file.exists() {
-        return Err(CmdError::Usage(format!(
-            "artifact file not found: {}",
-            args.file.display()
-        )));
-    }
-    let filename = args
-        .file
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| CmdError::Usage(format!("no filename in {}", args.file.display())))?
-        .to_string();
-    let ext = args
-        .file
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
-    let content_type = super::task::content_type_for_ext(&ext).to_string();
+    let file = ResolvedArtifact::from_path(&args.file)?;
 
     if ctx.dry_run {
         return Ok(Envelope::success(
@@ -193,16 +175,15 @@ async fn upload(ctx: &Ctx, args: UploadArgs) -> CmdResult {
             json!({
                 "action": "would_upload_artifact",
                 "task_id": task_id.to_string(),
-                "filename": filename,
-                "content_type": content_type,
-                "path": args.file.display().to_string(),
+                "filename": file.filename,
+                "content_type": file.content_type,
+                "path": file.display_path(),
             }),
         ));
     }
 
     let client = ctx.client()?;
-    let artifact =
-        upload_file(ctx, &client, &task_id, &args.file, &filename, &content_type).await?;
+    let artifact = upload_file(ctx, &client, &task_id, &file).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -229,10 +210,13 @@ pub(super) async fn upload_file(
     ctx: &Ctx,
     client: &TaskFastClient,
     task_id: &Uuid,
-    path: &Path,
-    filename: &str,
-    content_type: &str,
+    artifact: &ResolvedArtifact,
 ) -> Result<Artifact, CmdError> {
+    let ResolvedArtifact {
+        path,
+        filename,
+        content_type,
+    } = artifact;
     let read_err = |e: std::io::Error| CmdError::Usage(format!("read {}: {e}", path.display()));
     let file = std::fs::File::open(path).map_err(read_err)?;
     let size_bytes = file.metadata().map_err(read_err)?.len();
@@ -261,6 +245,47 @@ pub(super) async fn upload_file(
         _ => Err(CmdError::Server(
             "this server does not offer direct uploads".into(),
         )),
+    }
+}
+
+/// Path + derived metadata (filename, content_type) needed for upload.
+/// Parsed upfront so a missing file fails before any network I/O.
+pub(super) struct ResolvedArtifact {
+    path: PathBuf,
+    filename: String,
+    content_type: String,
+}
+
+impl ResolvedArtifact {
+    pub(super) fn from_path(p: &Path) -> Result<Self, CmdError> {
+        if !p.exists() {
+            return Err(CmdError::Usage(format!(
+                "artifact file not found: {}",
+                p.display()
+            )));
+        }
+        let filename = p
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| {
+                CmdError::Usage(format!("artifact path has no filename: {}", p.display()))
+            })?
+            .to_string();
+        let ext = p
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        let content_type = super::task::content_type_for_ext(&ext).to_string();
+        Ok(Self {
+            path: p.to_path_buf(),
+            filename,
+            content_type,
+        })
+    }
+
+    pub(super) fn display_path(&self) -> String {
+        self.path.display().to_string()
     }
 }
 
