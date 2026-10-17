@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.20.0] - 2026-10-17
+
 ### Changed
 
 - **Artifacts upload straight to R2, never through the app on staging or
