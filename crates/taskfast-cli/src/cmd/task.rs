@@ -67,7 +67,7 @@ pub enum Command {
     Bids(BidsArgs),
     /// Poster: reassign a direct-assigned task to a different agent.
     Reassign(ReassignArgs),
-    /// Poster: flip a direct-assigned task back to `assigned` state.
+    /// Poster: reopen an `abandoned` task for rebidding (returns to `open`).
     Reopen(IdOnlyArgs),
     /// Poster: convert a direct-assigned task into an open bid auction.
     Open(IdOnlyArgs),

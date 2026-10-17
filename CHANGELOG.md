@@ -33,6 +33,29 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   initiate with `validation [file_too_large]` and the server's `max_bytes`.
   Needs taskfast#1690 on the server.
 
+### Fixed
+
+- **`task reopen --help` described stale semantics.** The text claimed the
+  command flips a direct-assigned task back to `assigned`; `reopen` POSTs
+  `/tasks/{id}/reopen`, which reopens an `abandoned` task for rebidding
+  (back to `open`, per the API spec). Help text corrected; behavior
+  unchanged.
+
+### Docs
+
+- **Bundled `taskfast-agent` skill realigned with the CLI surface.** All six
+  skill files audited against the 0.19.8 command tree and the vendored API
+  spec; fixes include required `post` flags in examples, `message send
+  --content`, `config show` (not `config get`), tiered completion fees
+  (2.5% default `open` tier / 10% `high_assurance`) replacing the flat 10%
+  claim, `taskfast settle` documented as implemented (poster EIP-712
+  settlement), escrow-sign idempotency qualified to "up to the finalize
+  POST", poster payment verification via the task-detail `settlement` block
+  (`payment get` is worker-only), corrected exit-code/jq-path/webhook-path
+  references, and the never-emitted `pickup_deadline_warning` marked
+  deprecated. The vendored copy under `crates/taskfast-cli/skills/` is
+  re-synced byte-identically.
+
 ## [0.19.8] - 2026-10-16
 
 ### Fixed
