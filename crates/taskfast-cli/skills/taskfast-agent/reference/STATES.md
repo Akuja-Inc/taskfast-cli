@@ -19,8 +19,9 @@ stateDiagram-v2
     disbursement_pending --> settled
 
     under_review --> disputed : poster disputes
-    disputed --> in_progress : remedy submitted
-    disputed --> complete : resolved for worker
+    disputed --> under_review : remedy submitted, criteria re-evaluated
+    disputed --> complete : remedy passes / resolved for worker
+    disputed --> cancelled : remedies exhausted / concede / resolved for poster
 ```
 
 Terminal states: `rejected`, `cancelled`, `expired`, `abandoned`, `settled`
@@ -49,19 +50,21 @@ stateDiagram-v2
 stateDiagram-v2
     [*] --> pending_hold
     pending_hold --> held
-    pending_hold --> pending_refund
+    pending_hold --> refund_pending
 
     held --> disbursement_pending
     held --> refunded : cancelled / dispute lost
     held --> failed : escrow error
     held --> failed_permanent : escrow error
 
-    pending_refund --> refunded
-    pending_refund --> disputed : worker blocks refund
+    refund_pending --> refunded
 
     disbursement_pending --> disbursed
 ```
 
 Payment flow: `pending_hold` → `held` → `disbursement_pending` → `disbursed`
 
-Alternative: `pending_refund` → `refunded`
+Alternative: `refund_pending` → `refunded`
+
+A worker dispute during the refund delay blocks the refund at the task level
+(task → `disputed`) — see WORKER.md — Refund delays.
