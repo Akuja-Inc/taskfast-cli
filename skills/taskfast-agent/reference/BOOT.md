@@ -294,7 +294,7 @@ Re-run safety per CLI command. `Check first?` = inspect current state before ret
 | `taskfast bid create` | No — server gates via `bid_already_exists` (409) | Yes — `taskfast bid list` | Second call on same task returns 409; **treat as idempotent success** (your bid is on record). |
 | `taskfast bid accept` | No — state-gated (`invalid_status` 409 if already accepted) | Yes — `taskfast task bids <id>` | 409 on second call means acceptance already landed — proceed to `escrow sign`. |
 | `taskfast bid cancel` / `taskfast bid reject` | State-gated | Yes | 409 on second call = already terminal; no further action. |
-| `taskfast escrow sign` | **Yes — idempotent up to finalize POST** | No | Re-reads escrow params, skips `approve()` if allowance already set, broadcasts `open()` with a fresh salt every run, re-POSTs finalize voucher. Safe to re-run while the bid is `:accepted_pending_escrow`; after finalize lands a re-run exits 409 = already done. |
+| `taskfast escrow sign` | **No — each run can fund a new escrow** | **Yes — inspect the original on-chain transaction and bid/task state** | A fresh salt means a fresh `open()`, even while the bid is `:accepted_pending_escrow`. After an ambiguous broadcast/receipt result or failed finalize, recover the original voucher or stop and escalate; do not restart blindly. Retry the full command only after confirming no successful or pending `open()` remains. A 409 requires verifying the bid/task state, not assuming success. See [escrow recovery](TROUBLESHOOTING.md#escrow-re-entrancy). |
 | `taskfast task claim` / `refuse` | State-gated | Yes — `taskfast task get <id>` | 409 `invalid_status` on second call = already claimed/refused. |
 | `taskfast task submit` / `remedy` | **No — may double-upload artifacts** | **Yes — `taskfast task get <id>` + `taskfast artifact list <id>`** | If status is already `under_review`, previous submit landed — do not resubmit. |
 | `taskfast task approve` / `dispute` / `cancel` / `concede` | State-gated | Yes | 409 on second call = already applied. |
@@ -307,7 +307,7 @@ Re-run safety per CLI command. `Check first?` = inspect current state before ret
 | `taskfast webhook register` / `subscribe` / `delete` | Idempotent (server upsert / conflict) | No | Re-runs reach intended state. |
 | `taskfast config set` / `config show` | Local-only, idempotent | No | `set` rewrites `./.taskfast/config.json`; `show` prints it (`api_key` redacted unless `--reveal`). |
 
-**Rule of thumb:** commands that mutate monotonic, state-gated entities (tasks, bids, escrows) are safe to retry — server 409 means your prior call landed. Commands that *create* (artifact upload, message send) are **not** safe to blind-retry; always list-before-retry.
+**Rule of thumb:** re-read state after an ambiguous mutation; a 409 alone does not prove the intended action landed. Commands that *create* (artifact upload, message send) need list-before-retry. `escrow sign` also creates a new on-chain escrow on each run: server bid/task state alone cannot establish retry safety. Follow the escrow recovery procedure above.
 
 ---
 

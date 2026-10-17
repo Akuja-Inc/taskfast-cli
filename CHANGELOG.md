@@ -35,6 +35,13 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Fixed
 
+- **Skill escrow recovery no longer recommends blind retries (gh#196).**
+  A fresh `escrow sign` invocation can fund a second escrow after an
+  ambiguous transaction result or failed finalize request. The skill now
+  requires inspecting the original transaction and recovering its voucher,
+  or stopping for operator intervention; a pending bid or 409 alone does
+  not prove retry safety or success. Both shipped skill copies are updated;
+  escrow runtime behavior is unchanged.
 - **`task reopen --help` described stale semantics.** The text claimed the
   command flips a direct-assigned task back to `assigned`; `reopen` POSTs
   `/tasks/{id}/reopen`, which reopens an `abandoned` task for rebidding
@@ -49,9 +56,10 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   --content`, `config show` (not `config get`), tiered completion fees
   (2.5% default `open` tier / 10% `high_assurance`) replacing the flat 10%
   claim, `taskfast settle` documented as implemented (poster EIP-712
-  settlement), escrow-sign idempotency qualified to "up to the finalize
-  POST", poster payment verification via the task-detail `settlement` block
-  (`payment get` is worker-only), corrected exit-code/jq-path/webhook-path
+  settlement), escrow signing documented as non-idempotent with explicit
+  transaction-recovery guidance, poster payment verification via the
+  task-detail `settlement` block (`payment get` is worker-only), corrected
+  exit-code/jq-path/webhook-path
   references, and the never-emitted `pickup_deadline_warning` marked
   deprecated. The vendored copy under `crates/taskfast-cli/skills/` is
   re-synced byte-identically.

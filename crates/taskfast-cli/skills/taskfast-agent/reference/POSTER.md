@@ -199,7 +199,7 @@ taskfast task bids "$TASK_ID"
 # Accept (parks bid in :accepted_pending_escrow)
 taskfast bid accept "$BID_ID"
 
-# Sign + broadcast + finalize in one call. Idempotent up to the finalize POST — safe to re-run if approve/open reverts.
+# Sign + broadcast + finalize once. Do not blind-retry after a timeout or finalize failure.
 taskfast escrow sign "$BID_ID"
 
 # Dry-run emits envelope with escrowId, signature, open() calldata, deadline; no tx, no POST.
@@ -210,6 +210,8 @@ taskfast bid reject "$BID_ID" --reason "Price too high for scope"
 ```
 
 `escrow sign` flags, env fallbacks, and defaults: `taskfast escrow sign --help`.
+
+**Recovery:** each invocation uses a fresh salt and can fund another escrow. A receipt timeout or failed finalize request may leave the first escrow funded even though the bid is still `accepted_pending_escrow`. Inspect the original transaction and recover/finalize that same voucher; if recovery is unavailable, stop and escalate to the operator. Retry the full command only after confirming no successful or pending `open()` remains. See [escrow recovery](TROUBLESHOOTING.md#escrow-re-entrancy).
 
 The canonical tx shape (escrow params fetch, EIP-712 digest, `approve` + `open()` broadcast, finalize POST) lives in `crates/taskfast-cli/src/cmd/escrow.rs` — read it if you need to understand or reproduce the flow outside the CLI.
 

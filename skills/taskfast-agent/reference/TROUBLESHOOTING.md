@@ -158,7 +158,7 @@ Escrow processing is in progress. Possible causes:
 - On-chain transaction pending confirmation (approve or open receipt)
 - Poster's wallet has insufficient token balance (CLI fails Usage early) or ran out of gas mid-broadcast
 
-Poll `taskfast task get <id>` for status changes. If stuck for >5 minutes, the poster's escrow may have failed — re-run `taskfast escrow sign` (idempotent up to the finalize POST).
+Poll `taskfast task get <id>` for status changes. If stuck for >5 minutes after an `escrow sign` attempt, do not restart it blindly: the on-chain escrow may already be funded even though finalize has not landed. Inspect the original transaction and follow [escrow recovery](#escrow-re-entrancy); stop and escalate if the outcome cannot be established.
 
 ### `taskfast escrow sign` errors
 
@@ -167,7 +167,7 @@ Poll `taskfast task get <id>` for status changes. If stuck for >5 minutes, the p
 | `decode: escrow params chain_id=… is negative` | 6 | Escrow params carried an unusable chain ID — stale params or server misconfiguration | Retry once; if it persists, stop and surface to the operator |
 | `usage: keystore address … does not match --wallet-address` | 2 | `--wallet-address` disagrees with keystore decryption | Drop the flag or supply the right keystore |
 | `usage: poster balance … < required …` | 2 | `balanceOf(signer) < deposit + platform fee` | Fund the wallet at [wallet.tempo.xyz](https://wallet.tempo.xyz) |
-| `server: approve receipt: …` / `open receipt: …` | 6 | RPC did not return a receipt within the receipt-timeout ceiling (default 1min testnet / 3min mainnet; override with `--receipt-timeout`) | Re-run; CLI re-checks allowance and skips `approve` if already set |
+| `server: approve receipt: …` / `open receipt: …` | 6 | RPC did not return a receipt within the receipt-timeout ceiling (default 1min testnet / 3min mainnet; override with `--receipt-timeout`) | Inspect the original transaction; a timeout is not a revert. Do not restart after an uncertain `open`; follow [escrow recovery](#escrow-re-entrancy). Allowance checks do not deduplicate escrow funding. |
 | `server: approve tx … reverted on-chain` / `open tx … reverted on-chain` | 6 | Contract rejected the tx — usually insufficient allowance, token not on `allowedTokens`, or nonce/gas issues | Inspect `cast tx <hash>` for revert reason |
 | `auth: …` on `/escrow/params` or `/escrow/finalize` | 3 | Caller is not the poster of the parent task | Use the right API key |
 | `validation [bid_not_in_accepted_pending_escrow]: …` | 7 | Bid was never `accept`ed, already finalized, or was rejected | `taskfast bid accept <bid_id>` first, or check current status |
@@ -299,7 +299,7 @@ Override the generic table when the command sits in a known risk class. CLI defa
 | Read-only (`me`, `ping`, all `list`/`get`/`discover`) | 429, 500-503, network | 3 | 500ms | Safe to retry freely. |
 | `taskfast bid create` | 429, 500-503 | 3 | 500ms | On retry after timeout: check `taskfast bid list` first — 409 `bid_already_exists` = prior call landed. |
 | `taskfast bid accept` / `cancel` / `reject` | 429, 500-503 | 3 | 500ms | State-gated — 409 `invalid_status` on retry = prior call landed, proceed. |
-| `taskfast escrow sign` | 429, 500-503, RPC timeout | 5 | 2s | **Idempotent up to finalize POST** — CLI re-checks allowance and skips `approve` if sufficient. After finalize lands, a re-run exits 409 `bid_not_in_accepted_pending_escrow` — treat as already done. |
+| `taskfast escrow sign` | None automatically for the full command after an ambiguous result | 1 (then investigate) | — | **Not idempotent:** each run can fund a new escrow. Inspect the original transaction and recover its voucher or stop and escalate. Retry only after confirming no successful or pending `open` remains. Verify bid/task state on 409; it does not alone prove success. See [escrow recovery](#escrow-re-entrancy). |
 | `taskfast task claim` / `refuse` / `approve` / `dispute` / `cancel` / `concede` / `remedy` | 429, 500-503 | 3 | 500ms | State-gated; re-read task status on 409. |
 | `taskfast task submit` | 429, 500-503 | 1 (then verify) | 500ms | **Do not blind-retry** — re-read task status + artifact list. If `under_review`, submit succeeded despite timeout. |
 | `taskfast artifact upload` | 429, 500-503 | 1 (then verify) | 1s | **No server dedupe** — re-list before retry; delete partial duplicate if present. |
@@ -309,7 +309,7 @@ Override the generic table when the command sits in a known risk class. CLI defa
 | `taskfast events stream --ack-stdin` | WebSocket drop | Reconnects until stopped | 1s, 30s cap | Ids written while the socket is down are sent after rejoin. An ack lost with a dropped socket is harmless: the server redelivers the in-flight event after rejoin, so ack it again. `taskfast events ack` is retired (no HTTP ack route). |
 | Rate-limit-sensitive bulk poll | 429 | ∞ with jitter | per group table above | When 429s stack, increase interval (10s → 30s → 60s) rather than hammering. |
 
-Non-retryable error codes by bucket: 400/403/404/422 → fix the request. 401 → check agent status (may be paused — see [Status gate](BOOT.md#status-gate)). 409 → read-after-write, usually prior call landed.
+Non-retryable error codes by bucket: 400/403/404/422 → fix the request. 401 → check agent status (may be paused — see [Status gate](BOOT.md#status-gate)). 409 → read-after-write; verify the intended state rather than assuming the prior call landed. For `escrow sign`, inspect the original on-chain transaction too.
 
 ---
 
@@ -336,16 +336,23 @@ Applies to: `artifact upload`, `message send`, `bid create`, `task submit`, `rev
 
 ### Escrow re-entrancy
 
-`taskfast escrow sign` is idempotent **up to** `POST /bids/:id/escrow/finalize`. The CLI:
+`taskfast escrow sign` is **not idempotent**. Every invocation:
 
 1. Re-fetches `/bids/:id/escrow/params`.
 2. Reads on-chain allowance — skips `IERC20.approve` if sufficient.
-3. Derives a **fresh random salt** and broadcasts `TaskEscrow.open` (or `openWithMemo`) every run — there is no on-chain "already open?" check.
+3. Derives a **fresh random salt** and broadcasts `TaskEscrow.open` (or `openWithMemo`) — there is no on-chain "already open?" check.
 4. POSTs the finalize voucher.
 
-**Safe to re-run while the bid is still `:accepted_pending_escrow`** — e.g. after a receipt timeout or a dropped finalize POST. Once finalize has been accepted, a re-run exits 409 (`bid_not_in_accepted_pending_escrow`) — read that as "already done", not a failure.
+**Do not restart after an ambiguous `open` broadcast/receipt result or a failed finalize request.** The original escrow may already be funded while the bid remains `:accepted_pending_escrow`; another invocation can lock the task amount plus fee again. Reusing the same arguments or changing `--receipt-timeout` does not reuse the original escrow. The CLI does not persist a resumable voucher across invocations.
 
-**Not safe:** modifying `taskfast escrow sign` args between retries (e.g. a different `--receipt-timeout`) — use the same invocation.
+Recovery procedure:
+
+1. Inspect the original transaction and re-read the bid/task state. A receipt timeout does not mean the transaction reverted. If the transaction cannot be identified or its outcome remains unknown, **stop and escalate to the operator**.
+2. If `open` succeeded, recover/finalize **that same voucher**, not a new escrow. If the bid is already accepted and the expected task/settlement state is confirmed, do not sign again. The CLI has no resume/finalize-only command; if recovering the original voucher and approval is unavailable, stop and escalate.
+3. If `open` is pending, wait and re-check; do not broadcast another escrow.
+4. Retry the full command only after establishing that no successful or pending `open` from any prior attempt remains (for example, it never broadcast or its receipt confirms a revert).
+
+A 409 `bid_not_in_accepted_pending_escrow` does not itself prove success: a bid that was never accepted or was rejected also fails that precondition. Verify the intended bid/task state before reporting success.
 
 ### Artifact upload dedup
 
