@@ -417,8 +417,12 @@ pub async fn put_presigned_upload<S: std::hash::BuildHasher>(
         .put(url)
         .header(reqwest::header::CONTENT_LENGTH, size_bytes)
         .body(reqwest::Body::from(tokio::fs::File::from_std(file)));
+    // The server signs `content-length` too. `header` appends, and R2's edge
+    // answers 400 to a duplicate, so keep only the one set from `size_bytes`.
     for (name, value) in headers {
-        req = req.header(name, value);
+        if !name.eq_ignore_ascii_case("content-length") {
+            req = req.header(name, value);
+        }
     }
     // The URL is a write credential; errors reach CLI output and agent logs.
     let resp = req.send().await.map_err(reqwest::Error::without_url)?;
