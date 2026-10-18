@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.20.1] - 2026-10-18
+
 ### Fixed
 
 - **Artifact uploads to R2 no longer fail with HTTP 400 (gh#193).** 0.20.0
