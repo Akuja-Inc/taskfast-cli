@@ -212,6 +212,39 @@ async fn put_streams_file_with_exact_headers_and_no_api_key() {
     assert_eq!(put.body, b"hello");
 }
 
+/// The server signs `content-length` alongside `content-type`. Sending it
+/// twice gets HTTP 400 from R2's edge, so exactly one may reach the wire.
+#[tokio::test]
+async fn put_sends_one_content_length_when_server_signs_it() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/pending/x", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let head = String::from_utf8(read_request_head(&mut stream).await).unwrap();
+        let mut body = [0; 5];
+        stream.read_exact(&mut body).await.unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+            .await
+            .unwrap();
+        head
+    });
+    let (path, file) = temp_file(b"hello");
+    let headers = HashMap::from([
+        ("content-length".to_string(), "5".to_string()),
+        ("content-type".to_string(), "video/mp4".to_string()),
+    ]);
+    put_presigned_upload(&url, &headers, file, 5).await.unwrap();
+    std::fs::remove_file(&path).ok();
+
+    let head = server.await.unwrap();
+    let lengths: Vec<&str> = head
+        .lines()
+        .filter(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+        .collect();
+    assert_eq!(lengths, ["content-length: 5"], "{head}");
+}
+
 #[tokio::test]
 async fn put_failure_is_server_error() {
     let server = MockServer::start().await;

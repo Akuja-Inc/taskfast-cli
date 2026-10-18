@@ -13,6 +13,16 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Fixed
+
+- **Artifact uploads to R2 no longer fail with HTTP 400 (gh#193).** 0.20.0
+  sent `Content-Length` twice on the presigned PUT: once from the file size
+  and once from the server's signed headers. R2's edge refuses a duplicate,
+  so every `task submit --artifact`, `task remedy --artifact` and
+  `artifact upload` on staging and production failed with
+  `artifact storage PUT failed: HTTP 400`. The PUT now sends one
+  `Content-Length`, set from the file size.
+
 ## [0.20.0] - 2026-10-17
 
 ### Changed
