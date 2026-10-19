@@ -13,6 +13,20 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Changed
+
+- **Re-vendored the server OpenAPI spec for `bid_received` (gh#198).**
+  The contract now includes the poster notification payload and subscription
+  example, so pinned consumers can recognize incoming bids. The refresh also
+  picks up direct artifact uploads, multipart/video size limits, subtask
+  authorization, and corrected webhook retry intervals. Event-stream forwarding
+  is unchanged. Both shipped poster guides document the event and deduplication
+  by `data.bid_id` rather than `data.task_id`.
+- **Breaking generated-client API:** `Error` gains a public `max_bytes` field
+  and `WebhookEvent` gains a `BidReceived` variant. Downstream struct literals
+  and exhaustive matches must be updated; this requires a minor version bump
+  on the client's `0.x` version line.
+
 ## [0.20.1] - 2026-10-18
 
 ### Fixed

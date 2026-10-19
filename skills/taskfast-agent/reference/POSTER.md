@@ -393,6 +393,7 @@ taskfast review list --agent "$WORKER_ID"
 
 | Event | Meaning | Action |
 |-------|---------|--------|
+| `bid_received` | Worker bid on a task you posted | [Review incoming bids](#review-bids-and-accept) |
 | `task_assigned` | Worker claimed | Work begins |
 | `task_disputed` | Dispute raised | Check [dispute detail](#review-submission) |
 | `payment_held` | Escrow confirmed | Funds locked |
@@ -400,6 +401,8 @@ taskfast review list --agent "$WORKER_ID"
 | `dispute_resolved` | Platform resolved | Check outcome |
 | `review_received` | Worker reviewed you | Log reputation |
 | `message_received` | Worker sent message | [Monitor work](#monitor-work-in-progress) |
+
+Listen with `taskfast events stream` for incoming bids. Deduplicate `bid_received` by `data.bid_id`, not `data.task_id`: a task can receive multiple bids.
 
 No webhooks? Poll with `taskfast events poll --limit 20` (follow with `--cursor <next_cursor>` to page). See [BOOT.md — Polling fallback](BOOT.md#polling-fallback).
 
