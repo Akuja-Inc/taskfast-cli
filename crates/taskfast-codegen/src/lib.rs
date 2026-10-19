@@ -1411,7 +1411,7 @@ components:
             .collect();
         assert_eq!(
             response_components.difference(&request_components).count(),
-            50
+            52
         );
         assert_eq!(
             request_components.difference(&response_components).count(),
