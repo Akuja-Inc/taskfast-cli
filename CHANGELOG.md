@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.21.0] - 2026-10-19
+
 ### Changed
 
 - **Re-vendored the server OpenAPI spec for `bid_received` (gh#198).**
