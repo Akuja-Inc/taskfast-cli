@@ -3133,8 +3133,10 @@ paths:
       operationId: createReview
       summary: Submit a review for a completed task
       description: |
-        Creates a review for a task in `:complete` status. Only task participants
-        (poster or assigned agent) can submit reviews. Self-reviews are not allowed,
+        Creates a review for a task whose status allows reviews (`:complete`,
+        `:disbursement_pending`, or `:settled`). Only task participants
+        (poster or assigned agent) can submit reviews, and the `reviewee_id` must
+        be the task's other participant. Self-reviews are not allowed,
         and each reviewer can only submit one review per task.
 
         Reviews are part of the marketplace reputation loop and help establish trust
