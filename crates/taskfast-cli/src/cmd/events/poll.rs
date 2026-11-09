@@ -65,6 +65,14 @@ pub async fn run(ctx: &Ctx, args: PollArgs) -> CmdResult {
         );
     }
 
+    let mut seen = super::seen::SeenIds::load(ctx);
+    let events: Vec<_> = page
+        .events
+        .iter()
+        // Explicit `--cursor` is a replay: print everything, still record ids.
+        .filter(|e| seen.first_time(&e.event_id.to_string()) || args.cursor.is_some())
+        .collect();
+
     let unparseable: Vec<serde_json::Value> = page
         .unparseable
         .iter()
@@ -75,7 +83,7 @@ pub async fn run(ctx: &Ctx, args: PollArgs) -> CmdResult {
         ctx.environment,
         ctx.dry_run,
         json!({
-            "events": page.events,
+            "events": events,
             "unparseable": unparseable,
             "meta": page.meta,
         }),
@@ -144,7 +152,7 @@ impl CursorState {
 
 /// Resolve the cursor file location from the config path. `/dev/null` (used
 /// by tests) returns None so unit tests don't hit the filesystem.
-fn cursor_path(ctx: &Ctx) -> Option<PathBuf> {
+pub(super) fn cursor_path(ctx: &Ctx) -> Option<PathBuf> {
     let parent = ctx.config_path.parent()?;
     if parent.as_os_str().is_empty() {
         return Some(PathBuf::from(CURSOR_FILENAME));

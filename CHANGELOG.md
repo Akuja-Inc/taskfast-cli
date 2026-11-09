@@ -13,6 +13,14 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Fixed
+
+- **`events stream` and `events poll` drop duplicate events (gh#204).**
+  The newest 10,000 `event_id`s are kept in `events.seen` next to the config
+  and survive restarts. `stream` still acks a duplicate so the server moves on
+  but prints nothing; `poll` skips it. If the file cannot be read or written,
+  the CLI warns once on stderr and keeps printing events.
+
 ## [0.21.0] - 2026-10-19
 
 ### Changed

@@ -15,6 +15,7 @@ ignore = [
     "RUSTSEC-2026-0235",
     # unsafe-libyaml — unmaintained; via serde_yaml in progenitor/taskfast-codegen (build script + xtask only, not in the shipped binary). No safe upgrade upstream.
     "RUSTSEC-2024-0449",
+    "RUSTSEC-2026-0387",
 ]
 
 [licenses]

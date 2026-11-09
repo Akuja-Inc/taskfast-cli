@@ -21,6 +21,7 @@ use super::{CmdError, CmdResult, Ctx};
 pub mod ack;
 pub mod poll;
 pub mod schema;
+pub mod seen;
 pub mod stream;
 
 pub use ack::AckArgs;

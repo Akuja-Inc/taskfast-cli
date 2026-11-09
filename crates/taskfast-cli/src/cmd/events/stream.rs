@@ -115,6 +115,7 @@ pub async fn run(ctx: &Ctx, args: StreamArgs) -> ExitCode {
 
     let shutdown = install_shutdown_signal();
     let mut ack_lines = args.ack_stdin.then(spawn_stdin_reader);
+    let mut seen = super::seen::SeenIds::load(ctx);
 
     loop {
         if shutdown.is_cancelled() {
@@ -129,6 +130,7 @@ pub async fn run(ctx: &Ctx, args: StreamArgs) -> ExitCode {
             args.once,
             &shutdown,
             ack_lines.as_mut(),
+            &mut seen,
         )
         .await
         {
@@ -182,6 +184,7 @@ async fn run_once(
     once: bool,
     shutdown: &ShutdownToken,
     mut ack_lines: Option<&mut UnboundedReceiver<String>>,
+    seen: &mut super::seen::SeenIds,
 ) -> ConnectOutcome {
     let req = match build_request(ws_url, api_key) {
         Ok(r) => r,
@@ -274,6 +277,17 @@ async fn run_once(
                                 return ConnectOutcome::AuthFailed;
                             }
                             FrameKind::Event(payload) => {
+                                let id = payload.get("event_id").and_then(Value::as_str);
+                                if let Some(id) = id.filter(|id| !seen.first_time(id)) {
+                                    // Duplicate (replay after a lost ack): re-ack so the
+                                    // server moves on, print nothing.
+                                    msg_ref += 1;
+                                    let ack = phx_frame(JOIN_REF, &msg_ref.to_string(), TOPIC, "ack", json!({ "event_id": id }));
+                                    if sink.send(Message::Text(ack.into())).await.is_err() {
+                                        return ConnectOutcome::Disconnected;
+                                    }
+                                    continue;
+                                }
                                 emit_event(&payload);
                                 if once {
                                     let _ = sink.send(Message::Close(None)).await;
