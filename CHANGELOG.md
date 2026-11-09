@@ -13,6 +13,11 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Changed
+
+- **Re-vendored the OpenAPI spec** (fetched 2026-11-09). Adds operations
+  `getDisputeSigningParams`, `rejectRemedy`, `triggerReviewTimeout`.
+
 ### Fixed
 
 - **`events stream` and `events poll` drop duplicate events (gh#204).**
