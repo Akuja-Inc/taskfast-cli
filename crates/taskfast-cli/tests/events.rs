@@ -285,3 +285,44 @@ async fn poll_tolerates_malformed_event_and_surfaces_unparseable() {
         .unwrap()
         .contains("event_id"));
 }
+
+/// gh#204: with no persisted cursor the server returns the same event on
+/// every poll; the seen-id file makes the second poll skip it.
+#[tokio::test]
+async fn poll_skips_event_already_printed() {
+    let server = MockServer::start().await;
+    let event = json!({
+        "event_id": "00000000-0000-0000-0000-0000000000e1",
+        "event": "task_disputed",
+        "occurred_at": "2026-04-13T21:00:00Z",
+        "task_id": "00000000-0000-0000-0000-0000000000aa",
+        "data": {},
+    });
+    Mock::given(method("GET"))
+        .and(path("/agents/me/events"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [event],
+            "meta": { "next_cursor": null, "has_more": false, "total_count": 1 },
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ctx_for(&server, Some("test-key"));
+    ctx.config_path = dir.path().join("config.json");
+    let poll = || PollArgs {
+        cursor: Some("-".into()),
+        limit: 25,
+    };
+
+    let first = run(&ctx, Command::Poll(poll())).await.unwrap();
+    assert_eq!(
+        envelope_value(&first)["data"]["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let second = run(&ctx, Command::Poll(poll())).await.unwrap();
+    assert_eq!(envelope_value(&second)["data"]["events"], json!([]));
+}
