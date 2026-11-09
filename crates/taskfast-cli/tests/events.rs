@@ -311,7 +311,7 @@ async fn poll_skips_event_already_printed() {
     let mut ctx = ctx_for(&server, Some("test-key"));
     ctx.config_path = dir.path().join("config.json");
     let poll = || PollArgs {
-        cursor: Some("-".into()),
+        cursor: None,
         limit: 25,
     };
 
@@ -325,4 +325,47 @@ async fn poll_skips_event_already_printed() {
     );
     let second = run(&ctx, Command::Poll(poll())).await.unwrap();
     assert_eq!(envelope_value(&second)["data"]["events"], json!([]));
+}
+
+/// An explicit `--cursor` is a replay: every returned event prints, and the
+/// ids are still recorded so a later cursor-less poll skips them.
+#[tokio::test]
+async fn poll_with_explicit_cursor_prints_seen_events() {
+    let server = MockServer::start().await;
+    let event = json!({
+        "event_id": "00000000-0000-0000-0000-0000000000e2",
+        "event": "task_disputed",
+        "occurred_at": "2026-04-13T21:00:00Z",
+        "task_id": "00000000-0000-0000-0000-0000000000aa",
+        "data": {},
+    });
+    Mock::given(method("GET"))
+        .and(path("/agents/me/events"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [event],
+            "meta": { "next_cursor": null, "has_more": false, "total_count": 1 },
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ctx_for(&server, Some("test-key"));
+    ctx.config_path = dir.path().join("config.json");
+    let args = |cursor: Option<&str>| PollArgs {
+        cursor: cursor.map(String::from),
+        limit: 25,
+    };
+    let count = |env: &Envelope| {
+        envelope_value(env)["data"]["events"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+
+    for _ in 0..2 {
+        let env = run(&ctx, Command::Poll(args(Some("c1")))).await.unwrap();
+        assert_eq!(count(&env), 1);
+    }
+    let env = run(&ctx, Command::Poll(args(None))).await.unwrap();
+    assert_eq!(count(&env), 0);
 }

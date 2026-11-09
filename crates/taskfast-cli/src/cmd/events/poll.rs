@@ -69,7 +69,8 @@ pub async fn run(ctx: &Ctx, args: PollArgs) -> CmdResult {
     let events: Vec<_> = page
         .events
         .iter()
-        .filter(|e| seen.first_time(&e.event_id.to_string()))
+        // Explicit `--cursor` is a replay: print everything, still record ids.
+        .filter(|e| seen.first_time(&e.event_id.to_string()) || args.cursor.is_some())
         .collect();
 
     let unparseable: Vec<serde_json::Value> = page

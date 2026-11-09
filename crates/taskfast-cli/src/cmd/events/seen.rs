@@ -87,7 +87,6 @@ impl SeenIds {
                 fs::create_dir_all(dir)?;
             }
             if self.file_lines >= 2 * CAP {
-                // ponytail: full rewrite every CAP inserts; fine at this size.
                 let body: String = self.order.iter().flat_map(|i| [i.as_str(), "\n"]).collect();
                 fs::write(&path, body)?;
                 self.file_lines = self.order.len();
