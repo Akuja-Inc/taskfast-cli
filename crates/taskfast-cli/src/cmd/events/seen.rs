@@ -2,7 +2,7 @@
 //! Seen-event-id set for `events poll` / `events stream` (gh#204).
 //!
 //! The server delivers at least once, so the same `event_id` can arrive
-//! twice. The newest [`CAP`] ids live in one file next to the config
+//! twice. The newest 10,000 ids live in one file next to the config
 //! (`events.seen`, one id per line, oldest first). The server retries for
 //! about 6 minutes, so 10,000 ids covers every retry with a wide margin.
 //!
