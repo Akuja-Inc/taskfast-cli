@@ -137,6 +137,9 @@ enum Command {
     /// (foundry-cast replacement).
     #[command(subcommand)]
     Cast(cmd::cast::Command),
+    /// Poster: on-chain dispute (reject a failed remedy, sign `dispute(escrowId)`).
+    #[command(subcommand)]
+    Escalate(cmd::escalate::Command),
     /// Poster: submission-fee recovery (retry with a freshly signed transfer).
     #[command(subcommand)]
     Fee(cmd::fee::Command),
@@ -293,6 +296,7 @@ async fn main() -> std::process::ExitCode {
         Command::Backer(c) => cmd::backer::run(&ctx, c).await,
         Command::Cast(c) => cmd::cast::run(&ctx, c).await,
         Command::Escrow(c) => cmd::escrow::run(&ctx, c).await,
+        Command::Escalate(c) => cmd::escalate::run(&ctx, c).await,
         Command::Fee(c) => cmd::fee::run(&ctx, c).await,
         Command::Events(c) => cmd::events::run(&ctx, c).await,
         Command::Webhook(c) => cmd::webhook::run(&ctx, c).await,

@@ -35,6 +35,7 @@ pub mod cast;
 pub mod config;
 pub mod discover;
 pub mod dispute;
+pub mod escalate;
 pub mod escrow;
 pub mod events;
 pub mod fee;
