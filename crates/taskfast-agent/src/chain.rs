@@ -81,6 +81,22 @@ sol! {
     }
 }
 
+/// Private so no new public enum appears next to `TaskEscrowCalls`
+/// (cargo-semver-checks `enum_variant_added`); only the helper below is public.
+mod dispute_abi {
+    alloy_sol_types::sol! {
+        function dispute(bytes32 escrowId) external;
+    }
+}
+
+/// Calldata for `ArbitratedEscrow.dispute(escrowId)` (poster- or worker-signed
+/// dispute of a held escrow). The caller sends it from its own wallet.
+pub fn dispute_calldata(escrow_id: B256) -> Vec<u8> {
+    alloy_sol_types::SolCall::abi_encode(&dispute_abi::disputeCall {
+        escrowId: escrow_id,
+    })
+}
+
 /// Derive the `bytes32 taskRef` that `TaskBond.post` binds for a given task.
 ///
 /// The server verifier expects `taskRef` = 16 zero bytes concatenated with the
@@ -246,6 +262,19 @@ mod tests {
         let bytes: [u8; 32] = task_ref.into();
         assert_eq!(&bytes[..16], &[0u8; 16], "high 16 bytes must be zero");
         assert_eq!(&bytes[16..], id.as_bytes(), "low 16 bytes must be the UUID");
+    }
+
+    #[test]
+    fn dispute_calldata_is_selector_plus_escrow_id() {
+        let id = B256::from([0xab; 32]);
+        let data = dispute_calldata(id);
+        // Second, independent derivation: keccak of the canonical signature.
+        assert_eq!(&data[..4], &keccak256("dispute(bytes32)")[..4]);
+        // Golden vector, computed offline: `cast calldata "dispute(bytes32)" 0xabab…ab`.
+        assert_eq!(
+            hex::encode(&data),
+            "add98c70abababababababababababababababababababababababababababababababab"
+        );
     }
 
     #[test]
