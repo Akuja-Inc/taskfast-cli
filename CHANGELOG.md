@@ -13,6 +13,35 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Added
+
+- **`taskfast escalate reject-remedy <task_id>` and `escalate sign <task_id>`
+  (Part of taskfast#2044).** A poster can reject a failed remedy, then sign and
+  send `dispute(escrowId)` from their own wallet, with every value taken from
+  `GET /tasks/{id}/dispute/signing-params`. `sign` refuses before any
+  transaction when the keystore differs from the escrow's `poster_wallet_address`,
+  when `chain_id` differs from the configured network or the RPC node, or when
+  the escrow contract is malformed or zero. A `lapse_pending` response warns and
+  still sends. Output says "submitted": the dispute counts once the server
+  observes the finalized `EscrowDisputed` log. The server's 409/503 refusals keep
+  their codes and gain a one-line hint. `taskfast-agent` gains
+  `TaskEscrow::disputeCall`.
+- **`taskfast fee retry <task_id> --submission-fee-voucher <0x...>`.** Retries a
+  failed submission-fee charge. The server now requires the poster's freshly
+  signed fee transfer (or the hash of one already broadcast) in the request
+  body; the flag is passed through unchanged. The CLI signs and sends nothing.
+
+### Changed
+
+- **`task retry-fee <id>` is now a redirect and makes no request.** Since
+  2026-11-01 the server refuses a retry without the poster's fresh voucher, and
+  adding the flag here would break the library API without a version bump, so
+  the command prints a usage error naming `taskfast fee retry`. Moving the flag
+  back under `task` needs the next minor release.
+
+- **Re-vendored the OpenAPI spec** (fetched 2026-11-09). Adds operations
+  `getDisputeSigningParams`, `rejectRemedy`, `triggerReviewTimeout`.
+
 ### Fixed
 
 - **`events stream` and `events poll` drop duplicate events (gh#204).**
