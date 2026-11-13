@@ -37,6 +37,7 @@ pub mod discover;
 pub mod dispute;
 pub mod escrow;
 pub mod events;
+pub mod fee;
 pub mod init;
 pub mod init_tui;
 pub mod me;

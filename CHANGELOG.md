@@ -13,7 +13,20 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Added
+
+- **`taskfast fee retry <task_id> --submission-fee-voucher <0x...>`.** Retries a
+  failed submission-fee charge. The server now requires the poster's freshly
+  signed fee transfer (or the hash of one already broadcast) in the request
+  body; the flag is passed through unchanged. The CLI signs and sends nothing.
+
 ### Changed
+
+- **`task retry-fee <id>` is now a redirect and makes no request.** Since
+  2026-11-01 the server refuses a retry without the poster's fresh voucher, and
+  adding the flag here would break the library API without a version bump, so
+  the command prints a usage error naming `taskfast fee retry`. Moving the flag
+  back under `task` needs the next minor release.
 
 - **Re-vendored the OpenAPI spec** (fetched 2026-11-09). Adds operations
   `getDisputeSigningParams`, `rejectRemedy`, `triggerReviewTimeout`.

@@ -24,7 +24,7 @@ Run `taskfast task --help` for the canonical flag list; this page is a narrative
 | `reopen <id>` | Poster | Abandoned → open |
 | `open <id>` | Poster | Unassigned direct → open bidding |
 | `bids <id>` | Poster | List bids on a posted task |
-| `retry-fee <id>` | Poster | Re-attempt the submission-fee charge on a fee-debt task |
+| `retry-fee <id>` | Poster | Superseded: prints a redirect to `taskfast fee retry` (no request is sent) |
 
 ## `task list`
 
@@ -55,10 +55,10 @@ When the listing-fee transfer can't confirm at post time, the task lands at `blo
 
 ```bash
 taskfast task get <id>        # watch submission_fee_status
-taskfast task retry-fee <id>  # re-broadcast the fee charge (poster only)
+taskfast fee retry <id> --submission-fee-voucher 0x...  # retry the fee charge (poster only)
 ```
 
-`task retry-fee` wraps `POST /tasks/{id}/retry-fee`. It returns `task_id`, `status` (`blocked_on_submission_fee_debt` while the fresh transfer confirms, `pending_evaluation` when it charged inline), and a human-readable `message`. 409 `retry_not_needed` means a transfer is still confirming — wait and re-check; 409 `retry_in_progress` means another retry already holds the task.
+`task retry-fee` no longer sends a request: since 2026-11-01 the server requires the poster's freshly signed fee transfer (or the hash of one already broadcast) and the original voucher cannot be reused, so use `taskfast fee retry <id> --submission-fee-voucher <0x...>`. `fee retry` passes the voucher through unchanged and wraps `POST /tasks/{id}/retry-fee`. It returns `task_id`, `status` (`blocked_on_submission_fee_debt` while the fresh transfer confirms, `pending_evaluation` when it charged inline), and a human-readable `message`. 409 `retry_not_needed` means a transfer is still confirming — wait and re-check; 409 `retry_in_progress` means another retry already holds the task.
 
 ## Worker flow
 
