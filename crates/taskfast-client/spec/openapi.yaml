@@ -5969,8 +5969,6 @@ components:
         - platform_wallet
         - chain_id
         - decimals
-        - poster_approval_deadline
-        - poster_approval_min_lifetime
       properties:
         bid_id:
           type: string
@@ -6030,13 +6028,22 @@ components:
             Minimum remaining lifetime (seconds) a poster_approval_deadline must have
             at finalize. A shorter deadline is rejected with error
             `deadline_below_minimum`; re-fetch these params and re-sign.
+            Absent for v3 escrows (`contract_version` = "v3"); clients must
+            tolerate its absence.
+        contract_version:
+          type: string
+          description: >-
+            Escrow contract version (e.g. "v3"). Absent on servers that predate
+            the field; treat absence as the legacy poster-approval flow.
+        review_window_seconds:
+          type: integer
+          description: >-
+            Review window (seconds) for v3 escrows. Absent otherwise.
 
     BidEscrowFinalizeRequest:
       type: object
       required:
         - voucher
-        - poster_approval_signature
-        - poster_approval_deadline
       properties:
         voucher:
           type: string

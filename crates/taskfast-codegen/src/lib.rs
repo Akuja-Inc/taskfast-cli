@@ -141,8 +141,6 @@ pub const KEEP_REQUIRED: &[(&str, &str)] = &[
     ("BidEscrowParamsResponse", "decimals"),
     ("BidEscrowParamsResponse", "platform_fee_amount"),
     ("BidEscrowParamsResponse", "platform_wallet"),
-    ("BidEscrowParamsResponse", "poster_approval_deadline"),
-    ("BidEscrowParamsResponse", "poster_approval_min_lifetime"),
     ("BidEscrowParamsResponse", "task_escrow_contract"),
     ("BidEscrowParamsResponse", "task_id"),
     ("BidEscrowParamsResponse", "token_address"),

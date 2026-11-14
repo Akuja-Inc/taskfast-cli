@@ -25,6 +25,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall;
 use clap::Parser;
 use serde_json::json;
@@ -38,7 +39,9 @@ use crate::envelope::Envelope;
 
 use taskfast_agent::chain::{compute_escrow_id, EscrowIdParams, TaskEscrow, IERC20};
 use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
-use taskfast_chains::tempo::{sign_distribution, DistributionDomain, TEMPO_MAINNET_CHAIN_ID};
+use taskfast_chains::tempo::{
+    sign_distribution, DistributionDomain, SigningError, TEMPO_MAINNET_CHAIN_ID,
+};
 use taskfast_client::api::types::{
     BidEscrowFinalizeRequest, BidEscrowFinalizeRequestPosterApprovalDeadline,
     BidEscrowParamsResponse,
@@ -142,21 +145,6 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                     message: "server omitted `arbitrator_address`; this deployment predates \
                               v2 arbitrated escrow — upgrade the server or use a CLI version \
                               that matches it"
-                        .into(),
-                });
-            }
-            // Same version-skew shape for the server-issued deadline: a server
-            // predating the deadline-floor rollout omits `poster_approval_*`,
-            // which this CLI now requires (it no longer computes a deadline).
-            if matches!(&mapped, taskfast_client::Error::Decode(_))
-                && (mapped.to_string().contains("poster_approval_deadline")
-                    || mapped.to_string().contains("poster_approval_min_lifetime"))
-            {
-                return Err(CmdError::Validation {
-                    code: "server_missing_approval_deadline".into(),
-                    message: "server omitted `poster_approval_deadline`; this deployment predates \
-                              the server-issued escrow deadline — upgrade the server or use a CLI \
-                              version that matches it"
                         .into(),
                 });
             }
@@ -304,8 +292,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     //    we never strand funds behind an approval the server would reject at
     //    finalize (gh#118 / taskfast#935).
     let mut deadline_unix = server_deadline_or_abort(&params)?;
-    let mut signature_hex =
-        sign_distribution(&signer, &domain, escrow_id, U256::from(deadline_unix))?;
+    let mut signature_hex = sign_deadline(&signer, &domain, escrow_id, deadline_unix)?;
 
     // 9. Build open / openWithMemo calldata up front — we reuse it for the
     //    dry-run envelope and the live broadcast.
@@ -489,14 +476,17 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         // Checked back to i64 at the API boundary — `deadline_unix` originates as
         // the i64 `poster_approval_deadline`, so this always fits, but an explicit
         // conversion refuses to silently wrap if the generated type ever widens.
-        let deadline_i64 = i64::try_from(deadline_unix)
-            .map_err(|_| CmdError::Decode(format!("deadline {deadline_unix} exceeds i64 range")))?;
+        let deadline_i64 = deadline_unix
+            .map(|d| {
+                i64::try_from(d)
+                    .map_err(|_| CmdError::Decode(format!("deadline {d} exceeds i64 range")))
+            })
+            .transpose()?;
         let body = BidEscrowFinalizeRequest {
             voucher: voucher_hex.clone(),
             poster_approval_signature: signature_hex.clone(),
-            poster_approval_deadline: BidEscrowFinalizeRequestPosterApprovalDeadline::Integer(
-                deadline_i64,
-            ),
+            poster_approval_deadline: deadline_i64
+                .map(BidEscrowFinalizeRequestPosterApprovalDeadline::Integer),
             memo_hash: params.memo_hash.clone(),
         };
         match client.inner().finalize_bid_escrow(&bid_id, &body).await {
@@ -510,8 +500,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                         Err(e) => return Err(map_api_error(e).await.into()),
                     };
                     deadline_unix = server_deadline_or_abort(&fresh)?;
-                    signature_hex =
-                        sign_distribution(&signer, &domain, escrow_id, U256::from(deadline_unix))?;
+                    signature_hex = sign_deadline(&signer, &domain, escrow_id, deadline_unix)?;
                     continue;
                 }
                 return Err(mapped.into());
@@ -541,17 +530,35 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
 /// against an approval the server would reject at finalize (gh#118). This should
 /// never fire when params are fetched immediately before signing — it catches a
 /// stale fetch, clock skew, or a retry.
-fn server_deadline_or_abort(params: &BidEscrowParamsResponse) -> Result<u64, CmdError> {
-    let deadline = u64::try_from(params.poster_approval_deadline).map_err(|_| {
+///
+/// Both fields absent with `contract_version == "v3"` is valid (v3 signs its
+/// approval later) and yields `None`. Any other absence aborts, as before the
+/// fields became optional (taskfast#2044).
+fn server_deadline_or_abort(params: &BidEscrowParamsResponse) -> Result<Option<u64>, CmdError> {
+    let (deadline, min_lifetime) = match (
+        params.poster_approval_deadline,
+        params.poster_approval_min_lifetime,
+    ) {
+        (Some(d), Some(m)) => (d, m),
+        (None, None) if params.contract_version.as_deref() == Some("v3") => return Ok(None),
+        _ => {
+            return Err(CmdError::Validation {
+                code: "server_missing_approval_deadline".into(),
+                message: "server omitted `poster_approval_deadline`; this deployment predates \
+                          the server-issued escrow deadline — upgrade the server or use a CLI \
+                          version that matches it"
+                    .into(),
+            })
+        }
+    };
+    let deadline = u64::try_from(deadline).map_err(|_| {
         CmdError::Decode(format!(
-            "server poster_approval_deadline={} is negative",
-            params.poster_approval_deadline
+            "server poster_approval_deadline={deadline} is negative"
         ))
     })?;
-    let min_lifetime = u64::try_from(params.poster_approval_min_lifetime).map_err(|_| {
+    let min_lifetime = u64::try_from(min_lifetime).map_err(|_| {
         CmdError::Decode(format!(
-            "server poster_approval_min_lifetime={} is negative",
-            params.poster_approval_min_lifetime
+            "server poster_approval_min_lifetime={min_lifetime} is negative"
         ))
     })?;
     let now = u64::try_from(chrono::Utc::now().timestamp())
@@ -567,7 +574,19 @@ fn server_deadline_or_abort(params: &BidEscrowParamsResponse) -> Result<u64, Cmd
             ),
         });
     }
-    Ok(deadline)
+    Ok(Some(deadline))
+}
+
+/// Sign the poster approval when the server issued a deadline; `None` skips it.
+fn sign_deadline(
+    signer: &PrivateKeySigner,
+    domain: &DistributionDomain,
+    escrow_id: B256,
+    deadline: Option<u64>,
+) -> Result<Option<String>, SigningError> {
+    deadline
+        .map(|d| sign_distribution(signer, domain, escrow_id, U256::from(d)))
+        .transpose()
 }
 
 /// True when the API surfaced the server's `deadline_below_minimum` finalize

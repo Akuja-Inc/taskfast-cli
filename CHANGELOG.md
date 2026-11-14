@@ -15,6 +15,14 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Added
 
+- **`escrow sign` accepts params without the approval-deadline fields (refs
+  taskfast#2044).** `poster_approval_deadline` and `poster_approval_min_lifetime`
+  are now optional in the spec, and `contract_version` / `review_window_seconds`
+  are accepted. With both deadline fields absent and `contract_version` `"v3"`,
+  the command no longer aborts: it signs no approval and finalizes without one.
+  Absent fields on any other version still abort with
+  `server_missing_approval_deadline`; v2 params behave as before.
+
 - **`taskfast escalate timeout-resolve <task_id>` (Closes #211, refs
   taskfast#2044).** After the arbitrator stays silent for the contract's
   `DISPUTE_TIMEOUT` (120 days), the worker can send
