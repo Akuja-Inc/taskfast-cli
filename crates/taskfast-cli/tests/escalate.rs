@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use taskfast_cli::cmd::escalate::{run, Command, RejectRemedyArgs, SignArgs};
+use taskfast_cli::cmd::escalate::{run, Command, RejectRemedyArgs, SignArgs, TimeoutResolveArgs};
 use taskfast_cli::cmd::{CmdError, Ctx};
 use taskfast_cli::{Envelope, Environment};
 
@@ -329,7 +329,7 @@ async fn sign_refuses_when_chain_id_differs_from_configured_network() {
 }
 
 #[tokio::test]
-async fn sign_refuses_when_node_chain_id_differs_before_any_send() {
+async fn sign_refuses_when_node_id_id_differs_before_any_send() {
     let server = MockServer::start().await;
     let keys = fresh_keys();
     mount_params(
@@ -478,4 +478,277 @@ async fn sign_output_says_submitted_not_disputed() {
     let text = v.to_string();
     assert!(!text.contains("\"disputed\""), "{text}");
     assert!(text.contains("would_submit_dispute"), "{text}");
+}
+
+// ─── timeout-resolve ──────────────────────────────────────────────────────
+
+const DISPUTED_AT: u64 = 1_800_000_000;
+const TIMEOUT: u64 = 10_368_000; // 120 days, served by the mock like the contract would
+const STATE_DISPUTED: u8 = 5;
+
+/// Answers the JSON-RPC calls `timeout-resolve` makes, from fixed chain facts.
+struct Chain {
+    node_id: u64,
+    state: u8,
+    block_ts: u64,
+}
+
+fn word(n: u64) -> String {
+    format!("0x{n:064x}")
+}
+
+impl wiremock::Respond for Chain {
+    fn respond(&self, req: &wiremock::Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        let result = match body["method"].as_str().unwrap() {
+            "eth_chainId" => json!(format!("0x{:x}", self.node_id)),
+            "eth_getBlockByNumber" => json!({ "timestamp": format!("0x{:x}", self.block_ts) }),
+            "eth_call" => {
+                let data = body["params"][0]["data"].as_str().unwrap();
+                if data.len() == 10 {
+                    json!(word(TIMEOUT)) // DISPUTE_TIMEOUT(): selector only, no args
+                } else if data.starts_with(&hex_selector(
+                    &taskfast_agent::chain::disputed_at_calldata(ESCROW_ID.parse().unwrap()),
+                )) {
+                    json!(word(DISPUTED_AT))
+                } else {
+                    // getEscrow: 8 words, `state` last.
+                    json!(format!("0x{}{:064x}", "00".repeat(32 * 7), self.state))
+                }
+            }
+            m => panic!("unexpected rpc method {m}"),
+        };
+        ResponseTemplate::new(200)
+            .set_body_json(json!({ "jsonrpc": "2.0", "id": 1, "result": result }))
+    }
+}
+
+fn hex_selector(calldata: &[u8]) -> String {
+    format!("0x{}", hex::encode(&calldata[..4]))
+}
+
+fn task_json(escrow_id: Option<&str>, contract: &str, chain_id: i64) -> Value {
+    json!({
+        "id": TASK_ID,
+        "status": "disputed",
+        "escrow_id": escrow_id,
+        "settlement_domain": { "chain_id": chain_id, "verifying_contract": contract },
+    })
+}
+
+async fn mount_task(server: &MockServer, body: Value) {
+    Mock::given(method("GET"))
+        .and(path(format!("/tasks/{TASK_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(server)
+        .await;
+}
+
+async fn mount_chain(server: &MockServer, chain: Chain) {
+    Mock::given(method("POST"))
+        .and(path("/rpc"))
+        .respond_with(chain)
+        .mount(server)
+        .await;
+}
+
+fn tr_args(keys: &Keys, server: &MockServer) -> TimeoutResolveArgs {
+    TimeoutResolveArgs {
+        task_id: TASK_ID.into(),
+        keystore: Some(keys.keystore_path.display().to_string()),
+        wallet_password_file: Some(keys.password_path.clone()),
+        wallet_address: None,
+        rpc_url: Some(format!("{}/rpc", server.uri())),
+        receipt_timeout: None,
+    }
+}
+
+async fn tr(server: &MockServer, keys: &Keys, dry_run: bool) -> Result<Envelope, CmdError> {
+    let mut ctx = ctx_for(server);
+    ctx.dry_run = dry_run;
+    run(&ctx, Command::TimeoutResolve(tr_args(keys, server))).await
+}
+
+async fn assert_nothing_sent(server: &MockServer) {
+    for r in server.received_requests().await.unwrap() {
+        if r.url.path() == "/rpc" {
+            let body = String::from_utf8_lossy(&r.body);
+            assert!(!body.contains("sendRawTransaction"), "{body}");
+            assert!(
+                !body.contains("estimateGas") && !body.contains("getTransactionCount"),
+                "{body}"
+            );
+        }
+    }
+}
+
+fn code_of(err: &CmdError) -> &str {
+    match err {
+        CmdError::Validation { code, .. } => code,
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+async fn ready(chain: Chain) -> (MockServer, Keys) {
+    let server = MockServer::start().await;
+    mount_task(&server, task_json(Some(ESCROW_ID), CONTRACT, CHAIN_ID)).await;
+    mount_network(&server, CHAIN_ID).await;
+    mount_chain(&server, chain).await;
+    (server, fresh_keys())
+}
+
+const ELIGIBLE: u64 = DISPUTED_AT + TIMEOUT;
+
+#[tokio::test]
+async fn timeout_resolve_refuses_one_second_before_the_deadline() {
+    let (server, keys) = ready(Chain {
+        node_id: CHAIN_ID as u64,
+        state: STATE_DISPUTED,
+        block_ts: ELIGIBLE - 1,
+    })
+    .await;
+    let err = tr(&server, &keys, false).await.expect_err("too early");
+    assert_eq!(code_of(&err), "dispute_timeout_not_elapsed");
+    assert_nothing_sent(&server).await;
+}
+
+#[tokio::test]
+async fn timeout_resolve_builds_the_call_at_exactly_the_deadline() {
+    let (server, keys) = ready(Chain {
+        node_id: CHAIN_ID as u64,
+        state: STATE_DISPUTED,
+        block_ts: ELIGIBLE,
+    })
+    .await;
+    let v = envelope_value(&tr(&server, &keys, true).await.expect("dry-run"));
+    assert_eq!(v["data"]["action"], "would_submit_timeout_resolve");
+    // The task's settlement_domain contract is what we address.
+    assert_eq!(v["data"]["to"], CONTRACT);
+    assert_eq!(v["data"]["from"], format!("{:#x}", keys.address));
+    assert_eq!(v["data"]["chain_id"], CHAIN_ID);
+    // Golden: `cast calldata "timeoutResolveDispute(bytes32)" <ESCROW_ID>`.
+    let selector = hex_selector(&taskfast_agent::chain::timeout_resolve_calldata(
+        ESCROW_ID.parse().unwrap(),
+    ));
+    assert_eq!(
+        v["data"]["calldata"],
+        format!("{selector}{}", &ESCROW_ID[2..])
+    );
+    assert_eq!(v["data"]["eligible_at"], ELIGIBLE.to_string());
+    assert_nothing_sent(&server).await;
+}
+
+#[tokio::test]
+async fn timeout_resolve_judges_by_chain_time_not_the_local_clock() {
+    // Block time is far before the deadline while the real clock is long past it.
+    let (server, keys) = ready(Chain {
+        node_id: CHAIN_ID as u64,
+        state: STATE_DISPUTED,
+        block_ts: 1,
+    })
+    .await;
+    let err = tr(&server, &keys, true)
+        .await
+        .expect_err("chain clock behind");
+    assert_eq!(code_of(&err), "dispute_timeout_not_elapsed");
+}
+
+#[tokio::test]
+async fn timeout_resolve_refuses_every_non_disputed_state() {
+    for state in [0u8, 1, 2, 3, 4] {
+        let (server, keys) = ready(Chain {
+            node_id: CHAIN_ID as u64,
+            state,
+            block_ts: ELIGIBLE + 1,
+        })
+        .await;
+        let err = tr(&server, &keys, false).await.expect_err("not disputed");
+        assert_eq!(code_of(&err), "escrow_not_disputed", "state {state}");
+        assert_nothing_sent(&server).await;
+    }
+}
+
+#[tokio::test]
+async fn timeout_resolve_refuses_when_task_chain_differs_from_configured_network() {
+    let server = MockServer::start().await;
+    mount_task(&server, task_json(Some(ESCROW_ID), CONTRACT, 1)).await;
+    mount_network(&server, CHAIN_ID).await;
+    mount_chain(
+        &server,
+        Chain {
+            node_id: 1,
+            state: STATE_DISPUTED,
+            block_ts: ELIGIBLE,
+        },
+    )
+    .await;
+    let keys = fresh_keys();
+    let err = tr(&server, &keys, false)
+        .await
+        .expect_err("config chain mismatch");
+    assert_eq!(code_of(&err), "chain_id_mismatch");
+    assert_nothing_sent(&server).await;
+}
+
+#[tokio::test]
+async fn timeout_resolve_refuses_when_node_id_differs() {
+    let (server, keys) = ready(Chain {
+        node_id: 1,
+        state: STATE_DISPUTED,
+        block_ts: ELIGIBLE,
+    })
+    .await;
+    let err = tr(&server, &keys, false)
+        .await
+        .expect_err("node chain mismatch");
+    assert_eq!(code_of(&err), "chain_id_mismatch");
+    assert_nothing_sent(&server).await;
+}
+
+#[tokio::test]
+async fn timeout_resolve_refuses_a_null_escrow_id_without_touching_the_chain() {
+    let server = MockServer::start().await;
+    mount_task(&server, task_json(None, CONTRACT, CHAIN_ID)).await;
+    let err = tr(&server, &fresh_keys(), false)
+        .await
+        .expect_err("no escrow");
+    assert_eq!(code_of(&err), "escrow_not_initialized");
+    assert_eq!(requests_to(&server, "/rpc").await, 0);
+}
+
+#[tokio::test]
+async fn timeout_resolve_never_falls_back_to_the_readiness_contract() {
+    // No per-task domain: refuse rather than guess the (L1) readiness contract.
+    let server = MockServer::start().await;
+    mount_task(&server, json!({ "id": TASK_ID, "status": "disputed", "escrow_id": ESCROW_ID, "settlement_domain": null })).await;
+    let err = tr(&server, &fresh_keys(), false)
+        .await
+        .expect_err("no domain");
+    assert_eq!(code_of(&err), "settlement_domain_unavailable");
+    assert_eq!(requests_to(&server, "/agents/me/readiness").await, 0);
+    assert_eq!(requests_to(&server, "/rpc").await, 0);
+}
+
+#[tokio::test]
+async fn timeout_resolve_refuses_zero_contract_and_bad_task_id() {
+    let server = MockServer::start().await;
+    mount_task(
+        &server,
+        task_json(
+            Some(ESCROW_ID),
+            "0x0000000000000000000000000000000000000000",
+            CHAIN_ID,
+        ),
+    )
+    .await;
+    let err = tr(&server, &fresh_keys(), false)
+        .await
+        .expect_err("zero contract");
+    assert!(matches!(err, CmdError::Decode(_)), "got {err:?}");
+    let mut a = tr_args(&fresh_keys(), &server);
+    a.task_id = "nope".into();
+    let err = run(&ctx_for(&server), Command::TimeoutResolve(a))
+        .await
+        .expect_err("bad id");
+    assert!(matches!(err, CmdError::Usage(_)), "got {err:?}");
 }
