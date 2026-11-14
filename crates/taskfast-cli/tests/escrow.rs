@@ -235,6 +235,106 @@ async fn escrow_sign_params_missing_deadline_is_actionable_version_skew() {
     }
 }
 
+fn without_approval_fields(mut params: Value) -> Value {
+    let o = params.as_object_mut().unwrap();
+    o.remove("poster_approval_deadline");
+    o.remove("poster_approval_min_lifetime");
+    params
+}
+
+#[tokio::test]
+async fn escrow_sign_v2_params_with_both_fields_present_sign_as_before() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    let mut params = escrow_params_json();
+    params["contract_version"] = json!("v2");
+    mount_params(&server, params, 200).await;
+    mount_readiness(&server).await;
+    let mut ctx = ctx_for(&server, Some("k"));
+    ctx.dry_run = true;
+
+    let env = run(&ctx, Command::Sign(base_args(&keys)))
+        .await
+        .expect("v2");
+    let data = &envelope_value(&env)["data"];
+    assert_eq!(
+        data["deadline"].as_u64(),
+        Some(POSTER_APPROVAL_DEADLINE as u64)
+    );
+    assert!(data["signature"]
+        .as_str()
+        .is_some_and(|s| s.starts_with("0x")));
+}
+
+#[tokio::test]
+async fn escrow_sign_v3_params_without_approval_fields_are_accepted() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    let mut params = without_approval_fields(escrow_params_json());
+    params["contract_version"] = json!("v3");
+    params["review_window_seconds"] = json!(86_400);
+    mount_params(&server, params, 200).await;
+    mount_readiness(&server).await;
+    let mut ctx = ctx_for(&server, Some("k"));
+    ctx.dry_run = true;
+
+    let env = run(&ctx, Command::Sign(base_args(&keys)))
+        .await
+        .expect("v3");
+    let data = &envelope_value(&env)["data"];
+    assert!(data["deadline"].is_null());
+    assert!(data["signature"].is_null());
+}
+
+#[tokio::test]
+async fn escrow_sign_non_v3_params_without_approval_fields_still_abort() {
+    for version in [Some("v2"), Some("v4"), None] {
+        let server = MockServer::start().await;
+        let keys = fresh_keys();
+        let mut params = without_approval_fields(escrow_params_json());
+        if let Some(v) = version {
+            params["contract_version"] = json!(v);
+        }
+        mount_params(&server, params, 200).await;
+
+        let err = run(
+            &ctx_for(&server, Some("k")),
+            Command::Sign(base_args(&keys)),
+        )
+        .await
+        .expect_err("non-v3 without deadline must abort");
+        match err {
+            CmdError::Validation { code, .. } => {
+                assert_eq!(
+                    code, "server_missing_approval_deadline",
+                    "version {version:?}"
+                )
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn escrow_sign_params_with_unknown_extra_field_still_decode() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    let mut params = escrow_params_json();
+    params["some_future_field"] = json!({"nested": [1, 2, 3]});
+    mount_params(&server, params, 200).await;
+    mount_readiness(&server).await;
+    let mut ctx = ctx_for(&server, Some("k"));
+    ctx.dry_run = true;
+
+    let env = run(&ctx, Command::Sign(base_args(&keys)))
+        .await
+        .expect("extra field");
+    assert_eq!(
+        envelope_value(&env)["data"]["deadline"].as_u64(),
+        Some(POSTER_APPROVAL_DEADLINE as u64)
+    );
+}
+
 #[tokio::test]
 async fn escrow_sign_dry_run_emits_signature_and_calldata_without_rpc() {
     let server = MockServer::start().await;
