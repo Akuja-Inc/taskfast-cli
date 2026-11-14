@@ -97,6 +97,70 @@ pub fn dispute_calldata(escrow_id: B256) -> Vec<u8> {
     })
 }
 
+/// Private for the same reason as `dispute_abi`. `state` is bound as `uint8`
+/// (ABI-identical to the contract's `EscrowState` enum) so no public enum appears.
+mod timeout_abi {
+    alloy_sol_types::sol! {
+        struct Escrow {
+            address poster;
+            address worker;
+            address platform;
+            address arbitrator;
+            address token;
+            uint256 deposit;
+            uint256 platformFeeAmount;
+            uint8 state;
+        }
+        function timeoutResolveDispute(bytes32 escrowId) external;
+        function getEscrow(bytes32 escrowId) external view returns (Escrow memory);
+        function disputedAt(bytes32 escrowId) external view returns (uint256);
+        function DISPUTE_TIMEOUT() external view returns (uint256);
+    }
+}
+
+/// `EscrowState::Disputed` in `ArbitratedEscrow.sol`.
+pub const ESCROW_STATE_DISPUTED: u8 = 5;
+
+/// Calldata for `ArbitratedEscrow.timeoutResolveDispute(escrowId)`. Anyone may
+/// send it once `disputedAt + DISPUTE_TIMEOUT` has passed on a `Disputed` escrow.
+pub fn timeout_resolve_calldata(escrow_id: B256) -> Vec<u8> {
+    alloy_sol_types::SolCall::abi_encode(&timeout_abi::timeoutResolveDisputeCall {
+        escrowId: escrow_id,
+    })
+}
+
+/// Calldata for the view `getEscrow(escrowId)`; decode with [`decode_escrow_state`].
+pub fn get_escrow_calldata(escrow_id: B256) -> Vec<u8> {
+    alloy_sol_types::SolCall::abi_encode(&timeout_abi::getEscrowCall {
+        escrowId: escrow_id,
+    })
+}
+
+/// Calldata for the view `disputedAt(escrowId)`; decode with [`decode_u256`].
+pub fn disputed_at_calldata(escrow_id: B256) -> Vec<u8> {
+    alloy_sol_types::SolCall::abi_encode(&timeout_abi::disputedAtCall {
+        escrowId: escrow_id,
+    })
+}
+
+/// Calldata for the view `DISPUTE_TIMEOUT()`; decode with [`decode_u256`].
+pub fn dispute_timeout_calldata() -> Vec<u8> {
+    alloy_sol_types::SolCall::abi_encode(&timeout_abi::DISPUTE_TIMEOUTCall {})
+}
+
+/// Decode a single `uint256` return (`disputedAt`, `DISPUTE_TIMEOUT`).
+pub fn decode_u256(data: &[u8]) -> Result<U256, String> {
+    <alloy_sol_types::sol_data::Uint<256> as alloy_sol_types::SolType>::abi_decode(data)
+        .map_err(|e| format!("not a uint256: {e}"))
+}
+
+/// Decode the raw `EscrowState` byte (0 None … 5 Disputed) out of a `getEscrow` return.
+pub fn decode_escrow_state(data: &[u8]) -> Result<u8, String> {
+    let e = <timeout_abi::Escrow as alloy_sol_types::SolType>::abi_decode(data)
+        .map_err(|e| format!("not an Escrow struct: {e}"))?;
+    Ok(e.state)
+}
+
 /// Derive the `bytes32 taskRef` that `TaskBond.post` binds for a given task.
 ///
 /// The server verifier expects `taskRef` = 16 zero bytes concatenated with the
@@ -275,6 +339,39 @@ mod tests {
             hex::encode(&data),
             "add98c70abababababababababababababababababababababababababababababababab"
         );
+    }
+
+    #[test]
+    fn timeout_resolve_abi_selectors_and_golden_calldata() {
+        let id = B256::from([0xab; 32]);
+        let tail = "abababababababababababababababababababababababababababababababab";
+        for (data, sig) in [
+            (
+                timeout_resolve_calldata(id),
+                "timeoutResolveDispute(bytes32)",
+            ),
+            (get_escrow_calldata(id), "getEscrow(bytes32)"),
+            (disputed_at_calldata(id), "disputedAt(bytes32)"),
+        ] {
+            assert_eq!(&data[..4], &keccak256(sig)[..4], "{sig}");
+            assert_eq!(hex::encode(&data[4..]), tail, "{sig}");
+        }
+        assert_eq!(
+            dispute_timeout_calldata(),
+            keccak256("DISPUTE_TIMEOUT()")[..4].to_vec()
+        );
+    }
+
+    #[test]
+    fn decoders_read_the_uint_and_the_state_word() {
+        let mut word = [0u8; 32];
+        word[31] = 7;
+        assert_eq!(decode_u256(&word).unwrap(), U256::from(7u64));
+        assert!(decode_u256(&word[..31]).is_err());
+        let mut escrow = [0u8; 256];
+        escrow[255] = ESCROW_STATE_DISPUTED;
+        assert_eq!(decode_escrow_state(&escrow).unwrap(), 5);
+        assert!(decode_escrow_state(&escrow[..224]).is_err());
     }
 
     #[test]

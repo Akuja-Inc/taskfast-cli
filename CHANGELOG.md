@@ -15,6 +15,17 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Added
 
+- **`taskfast escalate timeout-resolve <task_id>` (Closes #211, refs
+  taskfast#2044).** After the arbitrator stays silent for the contract's
+  `DISPUTE_TIMEOUT` (120 days), the worker can send
+  `timeoutResolveDispute(escrowId)` from their own wallet. The escrow id and
+  venue contract come from `GET /tasks/{id}` (`escrow_id`, `settlement_domain`);
+  escrow state, `disputedAt`, `DISPUTE_TIMEOUT` and the latest block time are read
+  from the chain, so the deadline is the chain's, not the local clock's. It
+  refuses, sending nothing, when the escrow is not `Disputed`, when the deadline
+  has not passed, or on a chain id mismatch. The transaction hash is a hint only;
+  the CLI writes nothing to the server and does not predict who is paid.
+  `--dry-run` makes read-only RPC calls and sends nothing.
 - **`taskfast escalate reject-remedy <task_id>` and `escalate sign <task_id>`
   (Part of taskfast#2044).** A poster can reject a failed remedy, then sign and
   send `dispute(escrowId)` from their own wallet, with every value taken from
