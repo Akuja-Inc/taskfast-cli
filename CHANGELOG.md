@@ -22,6 +22,10 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Added
 
+- **Deepen lifecycle event intake with unified `EventIntake` module (Closes #217).**
+  Consolidates event intake across polling and streaming transports into `EventIntake` in `taskfast-cli::cmd::events::intake`.
+  Encapsulates bounded `SeenIds` ring-buffer deduplication, coordinated cursor progression and seen-id commitment after successful batch processing via `StateStore`, and tolerant per-item JSON decoding.
+
 - **Deepen `.taskfast/` local state and secret persistence into unified `StateStore` (Closes #215).**
   Consolidates `.taskfast/` local directory management into `StateStore` in `taskfast-cli`.
   Enforces atomic file creation with mode `0600` on Unix directly from creation, eliminating

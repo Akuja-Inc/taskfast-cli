@@ -84,6 +84,19 @@ pub async fn list_events_page(
     }
 }
 
+/// Decode a single event JSON value tolerantly into an [`AgentEvent`].
+pub fn decode_event_item(
+    item: serde_json::Value,
+) -> std::result::Result<AgentEvent, UnparseableEvent> {
+    match serde_json::from_value::<AgentEvent>(item.clone()) {
+        Ok(ev) => Ok(ev),
+        Err(e) => Err(UnparseableEvent {
+            raw: item,
+            error: e.to_string(),
+        }),
+    }
+}
+
 /// Tolerant variant of [`list_events_page`].
 ///
 /// Tries the strict progenitor decode first. On [`Error::Decode`] (the
@@ -134,12 +147,9 @@ async fn decode_raw_page(
     let mut events = Vec::with_capacity(data.len());
     let mut unparseable = Vec::new();
     for item in data {
-        match serde_json::from_value::<AgentEvent>(item.clone()) {
+        match decode_event_item(item) {
             Ok(ev) => events.push(ev),
-            Err(e) => unparseable.push(UnparseableEvent {
-                raw: item,
-                error: e.to_string(),
-            }),
+            Err(e) => unparseable.push(e),
         }
     }
     Ok(TolerantEventPage {

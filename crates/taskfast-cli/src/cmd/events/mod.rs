@@ -19,12 +19,14 @@ use clap::Subcommand;
 use super::{CmdError, CmdResult, Ctx};
 
 pub mod ack;
+pub mod intake;
 pub mod poll;
 pub mod schema;
 pub mod seen;
 pub mod stream;
 
 pub use ack::AckArgs;
+pub use intake::{EventIntake, IngestBatchOutcome, IntakeMetrics, StreamItemOutcome};
 pub use poll::PollArgs;
 pub use schema::SchemaArgs;
 pub use stream::StreamArgs;

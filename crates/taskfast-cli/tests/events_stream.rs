@@ -183,3 +183,66 @@ async fn replayed_event_is_printed_once_and_still_acked() {
     assert_eq!(next_json(&mut lines).await["event_id"], EVENT_B);
     assert!(cfg.path().join("events.seen").exists());
 }
+
+#[tokio::test]
+#[allow(clippy::result_large_err)]
+async fn stream_once_terminates_on_malformed_event_frame() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_hdr_async(tcp, |_: &Request, mut resp: Response| {
+            resp.headers_mut().insert(
+                "sec-websocket-protocol",
+                HeaderValue::from_static("taskfast.v1"),
+            );
+            Ok(resp)
+        })
+        .await
+        .unwrap();
+
+        while let Some(Ok(msg)) = ws.next().await {
+            let Message::Text(raw) = msg else { continue };
+            let frame: Value = serde_json::from_str(&raw).unwrap();
+            let (join_ref, msg_ref) = (&frame[0], &frame[1]);
+            if frame[3].as_str() == Some("phx_join") {
+                let reply = json!([join_ref, msg_ref, "agent:me", "phx_reply",
+                    { "status": "ok", "response": {} }]);
+                ws.send(text(reply)).await.unwrap();
+                let malformed = text(json!(["1", null, "agent:me", "event", {
+                    "event": "corrupted_event",
+                    "data": {}
+                }]));
+                ws.send(malformed).await.unwrap();
+            }
+        }
+    });
+
+    let cfg = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_taskfast"))
+        .args(["--env", "local", "--allow-custom-endpoints", "--no-trace"])
+        .args(["--api-base", &format!("http://127.0.0.1:{port}")])
+        .args(["--api-key", "test-key"])
+        .args(["events", "stream", "--once", "--no-reconnect"])
+        .env("TASKFAST_CONFIG", cfg.path().join("config.json"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    assert_eq!(
+        next_json(&mut lines).await,
+        json!({ "sentinel": "connected" })
+    );
+    let err_frame = next_json(&mut lines).await;
+    assert_eq!(err_frame["type"], "unparseable");
+
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("stream timed out waiting to exit under --once")
+        .unwrap();
+    assert!(status.success());
+}
