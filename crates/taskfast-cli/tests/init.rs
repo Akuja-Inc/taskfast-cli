@@ -146,7 +146,7 @@ async fn byow_happy_path_registers_wallet_and_writes_env_file() {
 }
 
 #[tokio::test]
-async fn byow_409_already_configured_is_treated_as_idempotent_success() {
+async fn byow_409_already_configured_returns_validation_error() {
     let server = MockServer::start().await;
     mount_profile_active(&server).await;
     mount_readiness(&server, "missing", false).await;
@@ -168,21 +168,64 @@ async fn byow_409_already_configured_is_treated_as_idempotent_success() {
     let mut args = base_args();
     args.wallet_address = Some(BYOW_ADDRESS.to_string());
 
-    let envelope = run(
+    let err = run(
         &ctx_for(&server, Some("test-key"), cfg_path.clone(), false),
         args,
     )
     .await
-    .expect("409 wallet_already_configured must succeed idempotently");
+    .expect_err("409 wallet_already_configured with explicit address must error");
 
-    let v = envelope_value(&envelope);
-    assert_eq!(v["ok"], true);
-    assert_eq!(v["data"]["wallet"]["status"], "byo_registered");
-    assert_eq!(v["data"]["wallet"]["address"], BYOW_ADDRESS);
-    assert_eq!(v["data"]["config_file"]["written"], true);
+    match err {
+        CmdError::Validation { code, .. } => {
+            assert_eq!(code, "wallet_already_configured");
+        }
+        other => panic!("expected Validation error, got {other:?}"),
+    }
+}
 
-    let loaded = Config::load(&cfg_path).unwrap();
-    assert_eq!(loaded.wallet_address.as_deref(), Some(BYOW_ADDRESS));
+#[tokio::test]
+async fn generate_wallet_409_already_configured_returns_validation_error_and_cleans_up() {
+    let server = MockServer::start().await;
+    mount_profile_active(&server).await;
+    mount_readiness(&server, "missing", false).await;
+
+    Mock::given(method("POST"))
+        .and(path("/agents/me/wallet"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "wallet_already_configured",
+            "message": "agent already has a tempo wallet configured",
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let cfg_path = config_path_in(tmp.path());
+    let pw_path = tmp.path().join("pw");
+    fs::write(&pw_path, "s3kret\n").unwrap();
+    let keystore_path = tmp.path().join("wallet.json");
+
+    let mut args = base_args();
+    args.generate_wallet = true;
+    args.wallet_password_file = Some(pw_path);
+    args.keystore_path = Some(keystore_path.clone());
+
+    let err = run(
+        &ctx_for(&server, Some("test-key"), cfg_path.clone(), false),
+        args,
+    )
+    .await
+    .expect_err("409 wallet_already_configured with generate_wallet must error");
+
+    match err {
+        CmdError::Validation { code, .. } => {
+            assert_eq!(code, "wallet_already_configured");
+        }
+        other => panic!("expected Validation error, got {other:?}"),
+    }
+    assert!(
+        !keystore_path.exists(),
+        "keystore must be cleaned up on failed registration"
+    );
 }
 
 #[tokio::test]

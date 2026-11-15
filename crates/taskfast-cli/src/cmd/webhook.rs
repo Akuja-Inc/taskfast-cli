@@ -113,23 +113,10 @@ pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
 #[derive(Debug, Clone)]
 pub struct WebhookProvisionOutcome {
     pub url: String,
-    pub events: Option<Vec<String>>,
     pub secret_returned: bool,
     pub secret_persisted: bool,
     pub secret_file: Option<PathBuf>,
     pub subscribed: Option<Vec<String>>,
-    pub available: Option<Vec<String>>,
-}
-
-impl WebhookProvisionOutcome {
-    /// Return the subscription payload suitable for CLI envelope serialization.
-    pub fn subscription_json(&self) -> Option<serde_json::Value> {
-        let subscribed = self.subscribed.as_ref()?;
-        Some(json!({
-            "subscribed": subscribed,
-            "available": self.available.clone().unwrap_or_default(),
-        }))
-    }
 }
 
 /// Orchestrate the multi-step webhook provisioning flow:
@@ -163,32 +150,21 @@ pub async fn provision_webhook(
         _ => false,
     };
 
-    let subs = if events.is_empty() {
+    let subscribed = if events.is_empty() {
         None
     } else {
-        Some(
-            webhooks::update_subscriptions(client, events.to_vec())
-                .await
-                .map_err(CmdError::from)?,
-        )
-    };
-
-    let (subscribed, available) = match subs {
-        Some(s) => (
-            Some(s.subscribed_event_types),
-            Some(s.available_event_types),
-        ),
-        None => (None, None),
+        let subs = webhooks::update_subscriptions(client, events.to_vec())
+            .await
+            .map_err(CmdError::from)?;
+        Some(subs.subscribed_event_types)
     };
 
     Ok(WebhookProvisionOutcome {
         url: cfg.url,
-        events: cfg.events,
         secret_returned: cfg.secret.is_some(),
         secret_persisted,
         secret_file: secret_file.map(std::path::Path::to_path_buf),
         subscribed,
-        available,
     })
 }
 
@@ -222,15 +198,16 @@ async fn register(ctx: &Ctx, args: RegisterArgs) -> CmdResult {
     let mut data = json!({
         "action": "registered",
         "url": outcome.url,
-        "events": outcome.events,
         "secret_returned": outcome.secret_returned,
         "secret_persisted": outcome.secret_persisted,
     });
     if let Some(path) = outcome.secret_file.as_ref() {
         data["secret_file"] = json!(path.display().to_string());
     }
-    if let Some(s) = outcome.subscription_json() {
-        data["subscription"] = s;
+    if let Some(subscribed) = outcome.subscribed {
+        data["subscription"] = json!({
+            "subscribed": subscribed,
+        });
     }
     Ok(Envelope::success(ctx.environment, ctx.dry_run, data))
 }

@@ -657,16 +657,18 @@ async fn provision_wallet(
         if dry_run {
             return Ok(WalletOutcome::Skipped);
         }
-        match wallet::register_wallet(client, addr)
+        return match wallet::register_wallet(client, addr)
             .await
             .map_err(CmdError::from)?
         {
-            wallet::WalletRegistration::Configured(_)
-            | wallet::WalletRegistration::AlreadyConfigured => {}
-        }
-        return Ok(WalletOutcome::ByoRegistered {
-            address: addr.to_string(),
-        });
+            wallet::WalletRegistration::Configured(_) => Ok(WalletOutcome::ByoRegistered {
+                address: addr.to_string(),
+            }),
+            wallet::WalletRegistration::AlreadyConfigured => Err(CmdError::Validation {
+                code: "wallet_already_configured".into(),
+                message: "agent already has a tempo wallet configured".into(),
+            }),
+        };
     }
     if !args.generate_wallet {
         return Err(CmdError::Usage(
@@ -685,17 +687,23 @@ async fn provision_wallet(
 
     let password = resolve_wallet_password(args)?;
     let keystore_path = persist_keystore(&signer, args, &password)?;
-    match wallet::register_wallet(client, &address)
-        .await
-        .map_err(CmdError::from)?
-    {
-        wallet::WalletRegistration::Configured(_)
-        | wallet::WalletRegistration::AlreadyConfigured => {}
+    match wallet::register_wallet(client, &address).await {
+        Ok(wallet::WalletRegistration::Configured(_)) => Ok(WalletOutcome::Generated {
+            address,
+            keystore_path,
+        }),
+        Ok(wallet::WalletRegistration::AlreadyConfigured) => {
+            let _ = std::fs::remove_file(&keystore_path);
+            Err(CmdError::Validation {
+                code: "wallet_already_configured".into(),
+                message: "agent already has a tempo wallet configured".into(),
+            })
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&keystore_path);
+            Err(CmdError::from(e))
+        }
     }
-    Ok(WalletOutcome::Generated {
-        address,
-        keystore_path,
-    })
 }
 
 fn resolve_wallet_password(args: &Args) -> Result<zeroize::Zeroizing<String>, CmdError> {

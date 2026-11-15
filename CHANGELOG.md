@@ -16,7 +16,7 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 ### Changed
 
 - **Unify agent wallet registration and webhook provisioning orchestration (Closes #216).**
-  Combines address format validation with idempotent 409 conflict handling behind `taskfast_agent::wallet::register_wallet`.
+  Changes `taskfast_agent::wallet::register_wallet` return type from `Result<WalletSetupResponse>` to `Result<WalletRegistration>` to surface 409 `wallet_already_configured` conflicts structurally (source-breaking for `taskfast-agent`).
   Consolidates multi-step webhook configuration, atomic 0600 secret persistence, and event subscription replacement into `provision_webhook` shared by `taskfast init --webhook-url` and `taskfast webhook register`.
   Deprecates dead pass-through wrappers in `taskfast_agent::poster` and updates documentation on two-phase voucher task creation.
 
