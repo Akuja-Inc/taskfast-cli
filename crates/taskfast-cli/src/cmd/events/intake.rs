@@ -4,7 +4,7 @@
 //! Encapsulates:
 //! - Tolerant per-item JSON decoding with metrics/counters for schema drift.
 //! - Bounded [`SeenIds`] ring-buffer deduplication across reconnects and poll iterations.
-//! - Atomic cursor progression and seen-id commitment after successful batch processing (integrating with [`StateStore`]).
+//! - Coordinated cursor progression and seen-id commitment after successful batch processing (integrating with [`StateStore`]).
 //! - A clean seam accepting incoming event batches from both HTTP polling and WebSocket streaming transports.
 
 use std::io;
@@ -48,16 +48,9 @@ pub struct IngestBatchOutcome {
 /// Outcome of ingesting a single stream payload.
 #[derive(Debug, Clone)]
 pub enum StreamItemOutcome {
-    Accepted {
-        event_id: String,
-        event: Option<AgentEvent>,
-    },
-    Duplicate {
-        event_id: String,
-    },
-    Malformed {
-        error: String,
-    },
+    Accepted { event_id: String },
+    Duplicate { event_id: String },
+    Malformed { error: String },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -95,7 +88,7 @@ impl EventIntake {
         let sentinel = matches!(cursor_arg, Some(s) if s == DISABLE_SENTINEL);
         let persistence_enabled = !env_disabled && !sentinel && !store.is_ephemeral();
 
-        let replay_mode = cursor_arg.is_some() && !sentinel;
+        let replay_mode = cursor_arg.is_some();
 
         let request_cursor = match cursor_arg {
             Some(s) if s == DISABLE_SENTINEL => None,
@@ -147,16 +140,14 @@ impl EventIntake {
 
     /// Ingest a tolerant event page from an HTTP poll response.
     pub fn ingest_poll_page(&mut self, page: TolerantEventPage) -> IngestBatchOutcome {
-        let next_cursor = page.meta.next_cursor.clone();
-        self.ingest_batch(page.events, page.unparseable, next_cursor, page.meta)
+        self.ingest_batch(page.events, page.unparseable, page.meta)
     }
 
-    /// Ingest a batch of typed events, unparseable items, and pagination cursor.
+    /// Ingest a batch of typed events, unparseable items, and pagination metadata.
     pub fn ingest_batch(
         &mut self,
         events: Vec<AgentEvent>,
         unparseable: Vec<UnparseableEvent>,
-        next_cursor: Option<String>,
         meta: PaginatedMeta,
     ) -> IngestBatchOutcome {
         for u in &unparseable {
@@ -179,43 +170,19 @@ impl EventIntake {
                 self.metrics.deduplicated_events += 1;
             } else {
                 self.metrics.accepted_events += 1;
-                accepted.push(ev);
+                self.seen.remember(&id);
                 self.pending_seen.push(id);
+                accepted.push(ev);
             }
         }
 
-        self.pending_cursor = PendingCursor::Update(next_cursor);
+        self.pending_cursor = PendingCursor::Update(meta.next_cursor.clone());
 
         IngestBatchOutcome {
             accepted_events: accepted,
             unparseable_events: unparseable,
             meta,
         }
-    }
-
-    /// Ingest raw JSON items, applying tolerant item-by-item decoding.
-    pub fn ingest_raw_items(
-        &mut self,
-        items: Vec<Value>,
-        next_cursor: Option<String>,
-    ) -> IngestBatchOutcome {
-        let mut events = Vec::new();
-        let mut unparseable = Vec::new();
-
-        for item in items {
-            match decode_event_item(item) {
-                Ok(ev) => events.push(ev),
-                Err(u) => unparseable.push(u),
-            }
-        }
-
-        let meta = PaginatedMeta {
-            has_more: next_cursor.is_some(),
-            next_cursor: next_cursor.clone(),
-            total_count: Some(events.len() as i64),
-        };
-
-        self.ingest_batch(events, unparseable, next_cursor, meta)
     }
 
     /// Ingest a single WebSocket event payload.
@@ -235,21 +202,18 @@ impl EventIntake {
             };
         }
 
-        let maybe_event = match decode_event_item(payload.clone()) {
-            Ok(ev) => Some(ev),
-            Err(u) => {
-                self.metrics.unparseable_events += 1;
-                tracing::warn!(
-                    target: "taskfast::events",
-                    event_id = %event_id,
-                    error = %u.error,
-                    "schema drift in lifecycle event payload"
-                );
-                None
-            }
-        };
+        if let Err(u) = decode_event_item(payload.clone()) {
+            self.metrics.unparseable_events += 1;
+            tracing::warn!(
+                target: "taskfast::events",
+                event_id = %event_id,
+                error = %u.error,
+                "schema drift in lifecycle event payload"
+            );
+        } else {
+            self.metrics.accepted_events += 1;
+        }
 
-        self.metrics.accepted_events += 1;
         if self.persistence_enabled {
             self.seen.commit_ids(&[event_id.to_string()]);
         } else {
@@ -258,7 +222,6 @@ impl EventIntake {
 
         StreamItemOutcome::Accepted {
             event_id: event_id.to_string(),
-            event: maybe_event,
         }
     }
 
@@ -267,12 +230,13 @@ impl EventIntake {
         self.metrics.unparseable_events += 1;
     }
 
-    /// Atomically commit cursor progression and seen-id deduplication state to StateStore.
+    /// Commit cursor progression and seen-id deduplication state to StateStore.
     pub fn commit(&mut self) -> io::Result<()> {
         if self.persistence_enabled {
-            if let PendingCursor::Update(cursor_opt) = std::mem::take(&mut self.pending_cursor) {
+            if let PendingCursor::Update(ref cursor_opt) = self.pending_cursor {
                 self.store.write_cursor(cursor_opt.as_deref())?;
             }
+            self.pending_cursor = PendingCursor::None;
             if !self.pending_seen.is_empty() {
                 self.seen.commit_ids(&self.pending_seen);
                 self.pending_seen.clear();
@@ -326,7 +290,6 @@ mod tests {
         let outcome = intake.ingest_batch(
             vec![ev1.clone(), ev2.clone()],
             Vec::new(),
-            Some("cur_1".to_string()),
             PaginatedMeta {
                 has_more: true,
                 next_cursor: Some("cur_1".to_string()),
@@ -344,7 +307,6 @@ mod tests {
         let outcome2 = intake.ingest_batch(
             vec![ev2.clone(), ev3.clone()],
             Vec::new(),
-            Some("cur_2".to_string()),
             PaginatedMeta {
                 has_more: false,
                 next_cursor: Some("cur_2".to_string()),
@@ -359,13 +321,12 @@ mod tests {
         intake.commit().unwrap();
         assert_eq!(store.read_cursor(), Some("cur_2".to_string()));
 
-        let mut intake_reconnect = EventIntake::new(store.clone(), None, true);
+        let mut intake_reconnect = EventIntake::new(store, None, true);
         assert_eq!(intake_reconnect.effective_cursor(), Some("cur_2"));
 
         let outcome3 = intake_reconnect.ingest_batch(
-            vec![ev3.clone()],
+            vec![ev3],
             Vec::new(),
-            None,
             PaginatedMeta {
                 has_more: false,
                 next_cursor: None,
@@ -374,6 +335,67 @@ mod tests {
         );
         assert_eq!(outcome3.accepted_events.len(), 0);
         assert_eq!(intake_reconnect.metrics().deduplicated_events, 1);
+    }
+
+    #[test]
+    fn within_batch_duplicate_events_are_deduplicated() {
+        let store = StateStore::ephemeral();
+        let mut intake = EventIntake::new(store, None, true);
+
+        let ev = sample_event("00000000-0000-0000-0000-000000000001", "task_assigned");
+        let outcome = intake.ingest_batch(
+            vec![ev.clone(), ev],
+            Vec::new(),
+            PaginatedMeta {
+                has_more: false,
+                next_cursor: None,
+                total_count: Some(2),
+            },
+        );
+
+        assert_eq!(outcome.accepted_events.len(), 1);
+        assert_eq!(intake.metrics().deduplicated_events, 1);
+        assert_eq!(intake.metrics().accepted_events, 1);
+    }
+
+    #[test]
+    fn dash_sentinel_replays_all_seen_events() {
+        let tmp = TempDir::new().unwrap();
+        let store = StateStore::from_config_path(&tmp.path().join("config.json"));
+
+        let mut init_intake = EventIntake::new(store.clone(), None, true);
+        let ev = sample_event("00000000-0000-0000-0000-000000000001", "task_assigned");
+        init_intake.ingest_batch(
+            vec![ev.clone()],
+            Vec::new(),
+            PaginatedMeta {
+                has_more: false,
+                next_cursor: Some("c1".to_string()),
+                total_count: Some(1),
+            },
+        );
+        init_intake.commit().unwrap();
+
+        // One-shot inspection with `--cursor -` against populated seen-file
+        let mut sentinel_intake = EventIntake::new(store, Some(DISABLE_SENTINEL), true);
+        assert_eq!(sentinel_intake.effective_cursor(), None);
+        assert!(!sentinel_intake.persistence_enabled());
+        assert!(sentinel_intake.replay_mode());
+
+        let outcome = sentinel_intake.ingest_batch(
+            vec![ev],
+            Vec::new(),
+            PaginatedMeta {
+                has_more: false,
+                next_cursor: None,
+                total_count: Some(1),
+            },
+        );
+        assert_eq!(
+            outcome.accepted_events.len(),
+            1,
+            "sentinel must replay seen events"
+        );
     }
 
     #[test]
@@ -387,9 +409,8 @@ mod tests {
 
         let ev = sample_event("00000000-0000-0000-0000-000000000001", "task_assigned");
         let _ = intake.ingest_batch(
-            vec![ev.clone()],
+            vec![ev],
             Vec::new(),
-            Some("aborted_cursor".to_string()),
             PaginatedMeta {
                 has_more: false,
                 next_cursor: Some("aborted_cursor".to_string()),
@@ -399,34 +420,11 @@ mod tests {
 
         drop(intake);
 
-        let resumed = EventIntake::new(store.clone(), None, true);
+        let resumed = EventIntake::new(store, None, true);
         assert_eq!(resumed.effective_cursor(), Some("initial_cursor"));
         assert!(!resumed
             .seen
             .contains("00000000-0000-0000-0000-000000000001"));
-    }
-
-    #[test]
-    fn tolerant_raw_items_counts_schema_drift_without_aborting() {
-        let store = StateStore::ephemeral();
-        let mut intake = EventIntake::new(store, None, true);
-
-        let good = json!({
-            "event_id": "00000000-0000-0000-0000-000000000001",
-            "event": "task_disputed",
-            "occurred_at": "2026-11-15T22:00:00Z",
-            "data": {},
-        });
-        let bad = json!({
-            "event": "missing_event_id_and_occurred_at",
-            "data": {},
-        });
-
-        let outcome = intake.ingest_raw_items(vec![good, bad], Some("c1".to_string()));
-        assert_eq!(outcome.accepted_events.len(), 1);
-        assert_eq!(outcome.unparseable_events.len(), 1);
-        assert_eq!(intake.metrics().unparseable_events, 1);
-        assert_eq!(intake.metrics().accepted_events, 1);
     }
 
     #[test]
@@ -438,20 +436,20 @@ mod tests {
         let payload = json!({
             "event_id": "00000000-0000-0000-0000-000000000001",
             "event": "task_assigned",
+            // Has timestamp instead of occurred_at (schema drift)
             "timestamp": "2026-11-15T22:00:00Z",
             "data": {},
         });
 
         match intake.ingest_stream_payload(&payload) {
-            StreamItemOutcome::Accepted { event_id, event } => {
+            StreamItemOutcome::Accepted { event_id } => {
                 assert_eq!(event_id, "00000000-0000-0000-0000-000000000001");
-                assert!(event.is_none());
             }
             other => panic!("expected Accepted, got {other:?}"),
         }
 
         assert_eq!(intake.metrics().unparseable_events, 1);
-        assert_eq!(intake.metrics().accepted_events, 1);
+        assert_eq!(intake.metrics().accepted_events, 0);
 
         match intake.ingest_stream_payload(&payload) {
             StreamItemOutcome::Duplicate { event_id } => {
@@ -484,7 +482,6 @@ mod tests {
         let o1 = intake.ingest_batch(
             vec![ev.clone()],
             Vec::new(),
-            None,
             PaginatedMeta {
                 has_more: false,
                 next_cursor: None,
@@ -496,9 +493,8 @@ mod tests {
         intake.commit().unwrap();
 
         let o2 = intake.ingest_batch(
-            vec![ev.clone()],
+            vec![ev],
             Vec::new(),
-            None,
             PaginatedMeta {
                 has_more: false,
                 next_cursor: None,
@@ -506,5 +502,34 @@ mod tests {
             },
         );
         assert_eq!(o2.accepted_events.len(), 1);
+    }
+
+    #[test]
+    fn commit_cursor_write_failure_preserves_pending_state() {
+        let tmp = TempDir::new().unwrap();
+        let store = StateStore::from_config_path(&tmp.path().join("config.json"));
+        // Make the cursor path a directory so writing fails
+        std::fs::create_dir_all(
+            store
+                .path_for(crate::state_store::StateAsset::EventsCursor)
+                .unwrap(),
+        )
+        .unwrap();
+
+        let mut intake = EventIntake::new(store, None, true);
+        let ev = sample_event("00000000-0000-0000-0000-000000000001", "task_assigned");
+        intake.ingest_batch(
+            vec![ev],
+            Vec::new(),
+            PaginatedMeta {
+                has_more: false,
+                next_cursor: Some("c_fail".to_string()),
+                total_count: Some(1),
+            },
+        );
+
+        assert!(intake.commit().is_err());
+        assert_eq!(intake.pending_seen.len(), 1);
+        assert!(matches!(intake.pending_cursor, PendingCursor::Update(_)));
     }
 }

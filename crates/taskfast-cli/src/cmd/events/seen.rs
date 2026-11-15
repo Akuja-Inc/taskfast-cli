@@ -11,7 +11,6 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use crate::cmd::Ctx;
 use crate::state_store::{StateAsset, StateStore};
 
 const CAP: usize = 10_000;
@@ -53,23 +52,9 @@ impl SeenIds {
         s
     }
 
-    pub fn load(ctx: &Ctx) -> Self {
-        Self::new(ctx.state_store(), ctx.quiet)
-    }
-
     /// Check if `id` has already been seen.
     pub fn contains(&self, id: &str) -> bool {
         self.set.contains(id)
-    }
-
-    /// Record `id`; true when it was not seen before (print it), false for
-    /// a duplicate (drop it).
-    pub fn first_time(&mut self, id: &str) -> bool {
-        if self.contains(id) {
-            return false;
-        }
-        self.commit_ids(&[id.to_string()]);
-        true
     }
 
     pub fn remember(&mut self, id: &str) {
@@ -85,23 +70,15 @@ impl SeenIds {
 
     /// Commit a batch of seen IDs into memory and persist to StateStore.
     pub fn commit_ids(&mut self, ids: &[String]) {
-        let mut appended = Vec::new();
-        for id in ids {
-            if self.set.insert(id.clone()) {
-                self.order.push_back(id.clone());
-                appended.push(id.as_str());
-            }
-            while self.order.len() > CAP {
-                if let Some(old) = self.order.pop_front() {
-                    self.set.remove(&old);
-                }
-            }
-        }
-        if appended.is_empty() {
+        if ids.is_empty() {
             return;
         }
 
-        let res = if self.file_lines + appended.len() >= 2 * CAP {
+        for id in ids {
+            self.remember(id);
+        }
+
+        let res = if self.file_lines + ids.len() >= 2 * CAP {
             let res = self.store.rewrite_seen_lines(&self.order);
             if res.is_ok() {
                 self.file_lines = self.order.len();
@@ -109,7 +86,7 @@ impl SeenIds {
             res
         } else {
             let mut write_err = Ok(());
-            for id in &appended {
+            for id in ids {
                 if let Err(e) = self.store.append_seen_line(id) {
                     write_err = Err(e);
                     break;
@@ -140,48 +117,52 @@ impl SeenIds {
 mod tests {
     use super::*;
 
-    fn ctx_in(dir: &std::path::Path) -> Ctx {
-        Ctx {
-            config_path: dir.join("config.json"),
-            quiet: true,
-            ..Default::default()
+    fn store_in(dir: &std::path::Path) -> StateStore {
+        StateStore::from_config_path(&dir.join("config.json"))
+    }
+
+    fn record_id(s: &mut SeenIds, id: &str) -> bool {
+        if s.contains(id) {
+            return false;
         }
+        s.commit_ids(&[id.to_string()]);
+        true
     }
 
     #[test]
     fn duplicate_is_dropped_and_survives_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx_in(dir.path());
-        let mut a = SeenIds::load(&ctx);
-        assert!(a.first_time("e1"));
-        assert!(!a.first_time("e1"));
-        let mut b = SeenIds::load(&ctx);
-        assert!(!b.first_time("e1"));
-        assert!(b.first_time("e2"));
+        let store = store_in(dir.path());
+        let mut a = SeenIds::new(store.clone(), true);
+        assert!(record_id(&mut a, "e1"));
+        assert!(!record_id(&mut a, "e1"));
+        let mut b = SeenIds::new(store, true);
+        assert!(!record_id(&mut b, "e1"));
+        assert!(record_id(&mut b, "e2"));
     }
 
     #[test]
     fn keeps_only_newest_cap_ids() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx_in(dir.path());
-        let mut s = SeenIds::load(&ctx);
+        let store = store_in(dir.path());
+        let mut s = SeenIds::new(store.clone(), true);
         for i in 0..CAP + 5 {
-            assert!(s.first_time(&format!("id{i}")));
+            assert!(record_id(&mut s, &format!("id{i}")));
         }
-        assert!(s.first_time("id0"), "oldest evicted");
-        assert!(!s.first_time(&format!("id{}", CAP + 4)));
-        assert!(SeenIds::load(&ctx).set.len() <= CAP);
+        assert!(record_id(&mut s, "id0"), "oldest evicted");
+        assert!(!record_id(&mut s, &format!("id{}", CAP + 4)));
+        assert!(SeenIds::new(store, true).set.len() <= CAP);
     }
 
     #[test]
     fn unwritable_file_warns_once_and_still_reports_first_time() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx_in(dir.path());
+        let store = store_in(dir.path());
         // A directory where the file should be makes read and write fail.
         std::fs::create_dir(dir.path().join(StateAsset::EventsSeen.filename())).unwrap();
-        let mut s = SeenIds::load(&ctx);
-        assert!(s.warned || ctx.quiet);
-        assert!(s.first_time("e1"));
-        assert!(!s.first_time("e1"));
+        let mut s = SeenIds::new(store, true);
+        assert!(s.warned || s.quiet);
+        assert!(record_id(&mut s, "e1"));
+        assert!(!record_id(&mut s, "e1"));
     }
 }

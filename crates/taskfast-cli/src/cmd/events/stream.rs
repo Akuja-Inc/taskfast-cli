@@ -297,6 +297,10 @@ async fn run_once(
                                     }
                                     super::intake::StreamItemOutcome::Malformed { error } => {
                                         emit_unparseable(&payload.to_string(), &error);
+                                        if once {
+                                            let _ = sink.send(Message::Close(None)).await;
+                                            return ConnectOutcome::OnceDone;
+                                        }
                                     }
                                 }
                             }

@@ -125,7 +125,6 @@ mod tests {
         let _ = intake.ingest_batch(
             Vec::new(),
             Vec::new(),
-            Some("xyz".to_string()),
             taskfast_client::api::types::PaginatedMeta {
                 has_more: false,
                 next_cursor: Some("xyz".to_string()),
@@ -146,7 +145,6 @@ mod tests {
         let _ = intake.ingest_batch(
             Vec::new(),
             Vec::new(),
-            Some("abc".to_string()),
             taskfast_client::api::types::PaginatedMeta {
                 has_more: false,
                 next_cursor: Some("abc".to_string()),
@@ -159,7 +157,6 @@ mod tests {
         let _ = intake2.ingest_batch(
             Vec::new(),
             Vec::new(),
-            None,
             taskfast_client::api::types::PaginatedMeta {
                 has_more: false,
                 next_cursor: None,
