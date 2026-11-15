@@ -1,18 +1,15 @@
 // SPDX-License-Identifier: MIT
 //! Two-phase task creation for poster-role agents.
 //!
-//! Phase 1 — [`create_task_draft`] — asks the server to prepare an unsigned
-//! `payload_to_sign` alongside the ERC-20 token address the submission fee
-//! will be pulled from. The caller signs the payload offline with its own
-//! private key; the platform never touches it.
+//! Two-phase task posting is handled directly by `taskfast-cli/src/cmd/post.rs`:
 //!
-//! Phase 2 — [`submit_task_draft`] — hands the signature back. The server
-//! verifies it, broadcasts the submission-fee transfer, and mints the task.
+//! Phase 1: `prepare_task_draft` asks the server to prepare an unsigned payload
+//! and ERC-20 token address for the submission fee.
 //!
-//! Both wrappers are thin: they call the generated progenitor client and
-//! funnel errors through `map_api_error`. No bootstrap-layer invariants —
-//! the two-phase flow is self-describing (draft_id threads through) and the
-//! server owns all validation.
+//! Phase 2: The poster signs and broadcasts the submission-fee transfer locally via
+//! `TempoSession`, producing a transaction voucher submitted with `submit_task_draft`.
+//!
+//! Direct client pass-through functions were deprecated per GH#216.
 
 use taskfast_client::api::types::{
     TaskDraftPrepareRequest, TaskDraftPrepareResponse, TaskDraftSubmitRequest,
@@ -22,10 +19,7 @@ use taskfast_client::{map_api_error, Result, TaskFastClient};
 use uuid::Uuid;
 
 /// `POST /task_drafts` — prepare an unsigned task payload for offline signing.
-///
-/// Returns `{draft_id, payload_to_sign, token_address}`. Caller must sign
-/// `payload_to_sign` with the key tied to `poster_wallet_address` and then
-/// call [`submit_task_draft`] with the resulting signature.
+#[deprecated(note = "call client.inner().prepare_task_draft directly")]
 pub async fn create_task_draft(
     client: &TaskFastClient,
     body: &TaskDraftPrepareRequest,
@@ -36,11 +30,8 @@ pub async fn create_task_draft(
     }
 }
 
-/// `POST /task_drafts/{draft_id}/submit` — exchange the signed payload for a
-/// live task.
-///
-/// Idempotent: resubmitting with the same `draft_id` returns the
-/// already-created task rather than double-minting.
+/// `POST /task_drafts/{draft_id}/submit` — exchange the signed payload for a live task.
+#[deprecated(note = "call client.inner().submit_task_draft directly")]
 pub async fn submit_task_draft(
     client: &TaskFastClient,
     draft_id: &Uuid,

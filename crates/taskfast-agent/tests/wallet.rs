@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alloy_primitives::U256;
-use taskfast_agent::wallet::{poll_balance, register_wallet, PollOptions};
+use taskfast_agent::wallet::{poll_balance, register_wallet, PollOptions, WalletRegistration};
 use taskfast_client::{Error, TaskFastClient};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -35,16 +35,44 @@ async fn register_wallet_returns_setup_response_on_200() {
         .mount(&server)
         .await;
 
-    let resp = register_wallet(
+    let reg = register_wallet(
         &client(&server),
         "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
     )
     .await
     .expect("200 decodes");
-    assert_eq!(
-        resp.tempo_wallet_address.as_deref(),
-        Some("0x71C7656EC7ab88b098defB751B7401B5f6d8976F")
-    );
+    match reg {
+        WalletRegistration::Configured(resp) => {
+            assert_eq!(
+                resp.tempo_wallet_address.as_deref(),
+                Some("0x71C7656EC7ab88b098defB751B7401B5f6d8976F")
+            );
+        }
+        WalletRegistration::AlreadyConfigured => panic!("expected Configured"),
+    }
+}
+
+#[tokio::test]
+async fn register_wallet_treats_409_already_configured_as_idempotent_success() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/agents/me/wallet"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+            "error": "wallet_already_configured",
+            "message": "agent already has a tempo wallet configured",
+        })))
+        .mount(&server)
+        .await;
+
+    match register_wallet(
+        &client(&server),
+        "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
+    )
+    .await
+    {
+        Ok(WalletRegistration::AlreadyConfigured) => {}
+        other => panic!("expected AlreadyConfigured, got {other:?}"),
+    }
 }
 
 #[tokio::test]
