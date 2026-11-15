@@ -31,40 +31,17 @@ use clap::Parser;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{
-    is_proxy_rpc_url, network_policy_for_chain_id, validate_override_rpc_url, CmdError, CmdResult,
-    Ctx,
-};
+use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
-use taskfast_agent::chain::{compute_escrow_id, EscrowIdParams, TaskEscrow, IERC20};
-use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
-use taskfast_chains::tempo::{
-    sign_distribution, DistributionDomain, SigningError, TEMPO_MAINNET_CHAIN_ID,
-};
+use taskfast_agent::chain::{compute_escrow_id, EscrowIdParams, TaskEscrow};
+use taskfast_agent::tempo_rpc::TempoRpcClient;
+use taskfast_chains::tempo::{sign_distribution, DistributionDomain, SigningError};
 use taskfast_client::api::types::{
     BidEscrowFinalizeRequest, BidEscrowFinalizeRequestPosterApprovalDeadline,
     BidEscrowParamsResponse,
 };
 use taskfast_client::map_api_error;
-
-/// `TaskEscrow.open()` receipt polling defaults. Mainnet gets a 3min
-/// ceiling to ride out block-time jitter under congestion; testnet and
-/// unknown chain_ids keep the prior 1min budget.
-const DEFAULT_RECEIPT_TIMEOUT_MAINNET: Duration = Duration::from_mins(3);
-const DEFAULT_RECEIPT_TIMEOUT_TESTNET: Duration = Duration::from_mins(1);
-const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-/// Network-aware default receipt-timeout used when the caller supplies
-/// neither `--receipt-timeout` nor `receipt_timeout` in config. The mapping
-/// is client-side tuning; the chain-id constant it keys on lives once, in
-/// `taskfast_chains::tempo`. Negative ids fall through to the short budget.
-fn default_receipt_timeout(chain_id: i64) -> Duration {
-    match u64::try_from(chain_id) {
-        Ok(TEMPO_MAINNET_CHAIN_ID) => DEFAULT_RECEIPT_TIMEOUT_MAINNET,
-        _ => DEFAULT_RECEIPT_TIMEOUT_TESTNET,
-    }
-}
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
@@ -241,32 +218,20 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         .transpose()?;
 
     // 6. Load signer + preflight address equality.
-    let keystore_ref = args.keystore.as_deref().map(str::to_string).or_else(|| {
-        ctx.keystore_path
-            .as_deref()
-            .and_then(|p| p.to_str().map(str::to_string))
-    });
-    let signer = super::wallet_args::load_signer(
+    let keystore_ref = super::wallet_args::resolve_keystore_ref(
+        args.keystore.as_deref(),
+        ctx.keystore_path.as_deref(),
+    );
+    let expected_wallet = super::wallet_args::resolve_expected_wallet_address(
+        args.wallet_address.as_deref(),
+        ctx.wallet_address.as_deref(),
+    );
+    let signer = super::wallet_args::load_signer_and_validate(
         keystore_ref.as_deref(),
         args.wallet_password_file.as_deref(),
+        expected_wallet,
         "escrow approval",
     )?;
-    let wallet_address_for_check = args
-        .wallet_address
-        .as_deref()
-        .or(ctx.wallet_address.as_deref());
-    if let Some(expected) = wallet_address_for_check {
-        let expected_addr: Address = expected.parse().map_err(|e| {
-            CmdError::Usage(format!("--wallet-address is not a valid EVM address: {e}"))
-        })?;
-        if signer.address() != expected_addr {
-            return Err(CmdError::Usage(format!(
-                "keystore address {:#x} does not match --wallet-address {}",
-                signer.address(),
-                expected
-            )));
-        }
-    }
 
     // 7. Derive random salt + predicted escrow_id. Must byte-match Solidity
     //    `TaskEscrow.computeEscrowId`. See
@@ -329,39 +294,12 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     // server-returned escrow params). The proxy URL is sanity-checked to
     // live under the authenticated api_base — catches a misconfigured (or
     // malicious) deployment returning an off-host upstream.
-    let (rpc_url, _via_proxy) = if let Some(ref url) = args.rpc_url {
-        validate_override_rpc_url(
-            url,
-            network_policy_for_chain_id(chain_id_u64),
-            ctx.allow_custom_endpoints,
-        )?;
-        (url.clone(), false)
-    } else {
-        let cfg = client.fetch_network_config().await.map_err(|e| {
-            CmdError::Server(format!("fetch network config from {}: {e}", ctx.base_url()))
-        })?;
-        let (_name, entry) = cfg.entry_by_chain_id(params.chain_id).map_err(|e| {
-            CmdError::Server(format!(
-                "deployment at {} does not advertise chain_id={}: {e}",
-                ctx.base_url(),
-                params.chain_id
-            ))
-        })?;
-        // Same-host guard as post::resolve_proxy_rpc_url — the proxy may be mounted
-        // at any path on api_base (`/rpc/…` or `/api/rpc/…`); only the host
-        // must match so the API key never leaves the approved deployment.
-        if !is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
-            return Err(CmdError::Server(format!(
-                "deployment at {} returned rpc_url {:?} for chain_id={}, \
-                 which is not on the same host. Refusing to route RPC \
-                 traffic off-host.",
-                ctx.base_url(),
-                entry.rpc_url,
-                params.chain_id,
-            )));
-        }
-        (entry.rpc_url.clone(), true)
-    };
+    let (rpc_url, http) = crate::tempo_session::resolve_rpc_endpoint(
+        ctx,
+        args.rpc_url.as_deref(),
+        Some(params.chain_id),
+    )
+    .await?;
 
     if ctx.dry_run {
         return Ok(Envelope::success(
@@ -387,13 +325,21 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         ));
     }
 
-    // Receipt-timeout precedence: flag > config > network-aware default.
-    // Resolved here (post-`params.chain_id`) so both approve + open receipts
-    // share the same ceiling.
-    let receipt_timeout = super::resolve_duration(
-        args.receipt_timeout,
-        ctx.receipt_timeout,
-        default_receipt_timeout(params.chain_id),
+    let keystore_path = super::wallet_args::resolve_keystore_path(
+        args.keystore.as_deref(),
+        ctx.keystore_path.as_deref(),
+    );
+    let rpc = TempoRpcClient::new(http, rpc_url);
+    let default_timeout = crate::tempo_session::default_receipt_timeout_for_chain_id(chain_id_u64);
+    let receipt_timeout =
+        super::resolve_duration(args.receipt_timeout, ctx.receipt_timeout, default_timeout);
+    let session = crate::tempo_session::TempoSession::new(
+        signer,
+        keystore_path,
+        rpc,
+        chain_id_u64,
+        receipt_timeout,
+        crate::tempo_session::RECEIPT_POLL_INTERVAL,
     );
 
     // 10. Live RPC: allowance preflight + optional approve.
@@ -403,66 +349,32 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     let total_required = deposit
         .checked_add(platform_fee)
         .ok_or_else(|| CmdError::Decode("deposit + platform_fee overflow U256".into()))?;
-    // Pick the http client by URL prefix (any URL on `{api_base}/rpc/`
-    // is our authenticated proxy and needs `X-API-Key`); see
-    // `Ctx::rpc_http_client` for the rationale. A `--rpc-url` override that
-    // happens to point at the proxy still gets the authenticated client.
-    let http = ctx.rpc_http_client(&client, &rpc_url);
-    let rpc = TempoRpcClient::new(http, rpc_url.clone());
+
     let mut approval_tx_hex: Option<String> = None;
     if !args.skip_allowance_check {
-        let balance = erc20_balance_of(&rpc, token_address, signer.address()).await?;
+        let balance = session
+            .erc20_balance_of(token_address, session.address())
+            .await?;
         if balance < total_required {
             return Err(CmdError::Usage(format!(
                 "poster balance {balance} < required {total_required} (deposit {deposit} + fee {platform_fee}) on token {token_address:#x}"
             )));
         }
-        let current_allowance =
-            erc20_allowance(&rpc, token_address, signer.address(), task_escrow).await?;
-        if current_allowance < total_required {
-            let approve_calldata: Bytes = IERC20::approveCall {
-                spender: task_escrow,
-                amount: total_required,
-            }
-            .abi_encode()
-            .into();
-            let approve_hash =
-                sign_and_broadcast_tx(&rpc, &signer, token_address, approve_calldata)
-                    .await
-                    .map_err(|e| CmdError::Server(format!("approve broadcast failed: {e}")))?;
-            let ok = rpc
-                .wait_for_receipt(approve_hash, receipt_timeout, RECEIPT_POLL_INTERVAL)
-                .await
-                .map_err(|e| CmdError::Server(format!("approve receipt: {e}")))?;
-            if !ok {
-                return Err(CmdError::Server(format!(
-                    "approve tx {approve_hash:#x} reverted on-chain"
-                )));
-            }
-            let new_allowance =
-                erc20_allowance(&rpc, token_address, signer.address(), task_escrow).await?;
-            if new_allowance < total_required {
-                return Err(CmdError::Server(format!(
-                    "allowance still {new_allowance} after approve tx {approve_hash:#x} (needed {total_required})"
-                )));
-            }
-            approval_tx_hex = Some(format!("{approve_hash:#x}"));
-        }
+        approval_tx_hex = session
+            .ensure_allowance(token_address, task_escrow, total_required)
+            .await?
+            .map(|h| format!("{h:#x}"));
     }
 
     // 11. Broadcast TaskEscrow.open / openWithMemo, wait for receipt.
-    let voucher_tx = sign_and_broadcast_tx(&rpc, &signer, task_escrow, open_calldata)
-        .await
-        .map_err(|e| CmdError::Server(format!("open broadcast failed: {e}")))?;
-    let voucher_ok = rpc
-        .wait_for_receipt(voucher_tx, receipt_timeout, RECEIPT_POLL_INTERVAL)
-        .await
-        .map_err(|e| CmdError::Server(format!("open receipt: {e}")))?;
-    if !voucher_ok {
-        return Err(CmdError::Server(format!(
-            "open tx {voucher_tx:#x} reverted on-chain — finalize aborted"
-        )));
-    }
+    let voucher_tx = session
+        .send_transaction_and_wait(
+            task_escrow,
+            open_calldata,
+            "open",
+            Some(" — finalize aborted"),
+        )
+        .await?;
     let voucher_hex = format!("{voucher_tx:#x}");
 
     // 12. POST finalize. The escrow is already funded on-chain, so the voucher
@@ -500,7 +412,8 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                         Err(e) => return Err(map_api_error(e).await.into()),
                     };
                     deadline_unix = server_deadline_or_abort(&fresh)?;
-                    signature_hex = sign_deadline(&signer, &domain, escrow_id, deadline_unix)?;
+                    signature_hex =
+                        sign_deadline(session.signer(), &domain, escrow_id, deadline_unix)?;
                     continue;
                 }
                 return Err(mapped.into());
@@ -598,45 +511,6 @@ fn is_deadline_below_minimum(err: &taskfast_client::Error) -> bool {
     )
 }
 
-async fn erc20_balance_of(
-    rpc: &TempoRpcClient,
-    token: Address,
-    owner: Address,
-) -> Result<U256, CmdError> {
-    let calldata: Bytes = IERC20::balanceOfCall { account: owner }.abi_encode().into();
-    // from = owner: zone TIP-20 balance privacy (see TempoRpcClient::eth_call_from).
-    let raw = rpc
-        .eth_call_from(owner, token, &calldata)
-        .await
-        .map_err(|e| CmdError::Server(format!("balanceOf rpc: {e}")))?;
-    decode_u256(&raw, "balanceOf")
-}
-
-async fn erc20_allowance(
-    rpc: &TempoRpcClient,
-    token: Address,
-    owner: Address,
-    spender: Address,
-) -> Result<U256, CmdError> {
-    let calldata: Bytes = IERC20::allowanceCall { owner, spender }.abi_encode().into();
-    // from = owner: zone TIP-20 balance privacy (see TempoRpcClient::eth_call_from).
-    let raw = rpc
-        .eth_call_from(owner, token, &calldata)
-        .await
-        .map_err(|e| CmdError::Server(format!("allowance rpc: {e}")))?;
-    decode_u256(&raw, "allowance")
-}
-
-fn decode_u256(bytes: &[u8], label: &str) -> Result<U256, CmdError> {
-    if bytes.len() < 32 {
-        return Err(CmdError::Decode(format!(
-            "{label} returned {} bytes, expected >=32",
-            bytes.len()
-        )));
-    }
-    Ok(U256::from_be_slice(&bytes[..32]))
-}
-
 /// Scale a decimal string (`"75.00"`) to raw U256 token units given `decimals`.
 /// Rejects negatives, exponential notation, and fractional digits that exceed
 /// `decimals` (would silently truncate user intent).
@@ -676,6 +550,14 @@ fn decimal_to_u256(s: &str, decimals: u8) -> Result<U256, CmdError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use taskfast_chains::tempo::TEMPO_MAINNET_CHAIN_ID;
+
+    fn default_receipt_timeout(chain_id: i64) -> Duration {
+        match u64::try_from(chain_id) {
+            Ok(id) => crate::tempo_session::default_receipt_timeout_for_chain_id(id),
+            _ => crate::tempo_session::DEFAULT_RECEIPT_TIMEOUT_TESTNET,
+        }
+    }
 
     #[test]
     fn decimal_to_u256_scales_basic() {

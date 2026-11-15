@@ -57,7 +57,7 @@ use taskfast_agent::chain::{
     decode_escrow_state, decode_u256, dispute_calldata, dispute_timeout_calldata,
     disputed_at_calldata, get_escrow_calldata, timeout_resolve_calldata, ESCROW_STATE_DISPUTED,
 };
-use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
+use taskfast_agent::tempo_rpc::TempoRpcClient;
 use taskfast_chains::tempo::TEMPO_MAINNET_CHAIN_ID;
 use taskfast_client::map_api_error;
 
@@ -266,31 +266,20 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     })?;
 
     // 2. Signer + guards 4 and 1.
-    let keystore_ref = args.keystore.as_deref().map(str::to_string).or_else(|| {
-        ctx.keystore_path
-            .as_deref()
-            .and_then(|p| p.to_str().map(str::to_string))
-    });
-    let signer = super::wallet_args::load_signer(
+    let keystore_ref = super::wallet_args::resolve_keystore_ref(
+        args.keystore.as_deref(),
+        ctx.keystore_path.as_deref(),
+    );
+    let expected_wallet = super::wallet_args::resolve_expected_wallet_address(
+        args.wallet_address.as_deref(),
+        ctx.wallet_address.as_deref(),
+    );
+    let signer = super::wallet_args::load_signer_and_validate(
         keystore_ref.as_deref(),
         args.wallet_password_file.as_deref(),
+        expected_wallet,
         "escrow dispute",
     )?;
-    if let Some(expected) = args
-        .wallet_address
-        .as_deref()
-        .or(ctx.wallet_address.as_deref())
-    {
-        let expected_addr: Address = expected.parse().map_err(|e| {
-            CmdError::Usage(format!("--wallet-address is not a valid EVM address: {e}"))
-        })?;
-        if signer.address() != expected_addr {
-            return Err(CmdError::Usage(format!(
-                "keystore address {:#x} does not match --wallet-address {expected}",
-                signer.address()
-            )));
-        }
-    }
     let mut warnings: Vec<SecurityWarning> = Vec::new();
     match params.poster_wallet_address.as_deref() {
         Some(poster) => {
@@ -368,6 +357,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         entry.rpc_url.clone()
     };
 
+    let signer_address = signer.address();
     let calldata: Bytes = dispute_calldata(escrow_id).into();
     let common = |action: &str| {
         json!({
@@ -376,7 +366,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             "escrow_id": format!("{escrow_id:#x}"),
             "to": format!("{contract:#x}"),
             "chain_id": chain_id,
-            "from": format!("{:#x}", signer.address()),
+            "from": format!("{:#x}", signer_address),
             "calldata": format!("0x{}", hex::encode(&calldata)),
             "lapse_pending": params.lapse_pending,
             "escalation_deadline": params.escalation_deadline,
@@ -405,24 +395,33 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             ),
         });
     }
+    let keystore_path = super::wallet_args::resolve_keystore_path(
+        args.keystore.as_deref(),
+        ctx.keystore_path.as_deref(),
+    );
     let receipt_timeout = super::resolve_duration(
         args.receipt_timeout,
         ctx.receipt_timeout,
         default_receipt_timeout(chain_id_u64),
     );
-    let tx = sign_and_broadcast_tx(&rpc, &signer, contract, calldata.clone())
-        .await
-        .map_err(|e| CmdError::Server(format!("dispute broadcast failed: {e}")))?;
-    let ok = rpc
-        .wait_for_receipt(tx, receipt_timeout, RECEIPT_POLL_INTERVAL)
-        .await
-        .map_err(|e| CmdError::Server(format!("dispute receipt: {e}")))?;
-    if !ok {
-        return Err(CmdError::Server(format!(
-            "dispute tx {tx:#x} reverted on-chain (Unauthorized: not the poster's wallet; \
-             InvalidState: the escrow can no longer be disputed)"
-        )));
-    }
+    let session = crate::tempo_session::TempoSession::new(
+        signer,
+        keystore_path,
+        rpc,
+        node_chain,
+        receipt_timeout,
+        RECEIPT_POLL_INTERVAL,
+    );
+    let tx = session
+        .send_transaction_and_wait(
+            contract,
+            calldata.clone(),
+            "dispute",
+            Some(
+                " (Unauthorized: not the poster's wallet; InvalidState: the escrow can no longer be disputed)",
+            ),
+        )
+        .await?;
     let mut data = common("dispute_submitted");
     data["tx_hash"] = json!(format!("{tx:#x}"));
     data["note"] = json!(
@@ -488,31 +487,20 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
 
     // 2. Signer + wallet-address preflight. Any wallet may send this call, so
     //    there is no "must be the worker" guard.
-    let keystore_ref = args.keystore.as_deref().map(str::to_string).or_else(|| {
-        ctx.keystore_path
-            .as_deref()
-            .and_then(|p| p.to_str().map(str::to_string))
-    });
-    let signer = super::wallet_args::load_signer(
+    let keystore_ref = super::wallet_args::resolve_keystore_ref(
+        args.keystore.as_deref(),
+        ctx.keystore_path.as_deref(),
+    );
+    let expected_wallet = super::wallet_args::resolve_expected_wallet_address(
+        args.wallet_address.as_deref(),
+        ctx.wallet_address.as_deref(),
+    );
+    let signer = super::wallet_args::load_signer_and_validate(
         keystore_ref.as_deref(),
         args.wallet_password_file.as_deref(),
+        expected_wallet,
         "escrow timeout-resolve",
     )?;
-    if let Some(expected) = args
-        .wallet_address
-        .as_deref()
-        .or(ctx.wallet_address.as_deref())
-    {
-        let expected_addr: Address = expected.parse().map_err(|e| {
-            CmdError::Usage(format!("--wallet-address is not a valid EVM address: {e}"))
-        })?;
-        if signer.address() != expected_addr {
-            return Err(CmdError::Usage(format!(
-                "keystore address {:#x} does not match --wallet-address {expected}",
-                signer.address()
-            )));
-        }
-    }
 
     // 3. Chain id vs the configured network, then RPC url.
     let cfg = client.fetch_network_config().await.map_err(|e| {
@@ -624,6 +612,7 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
         });
     }
 
+    let signer_address = signer.address();
     let calldata: Bytes = timeout_resolve_calldata(escrow_id).into();
     let common = |action: &str| {
         json!({
@@ -632,7 +621,7 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
             "escrow_id": format!("{escrow_id:#x}"),
             "to": format!("{contract:#x}"),
             "chain_id": chain_id,
-            "from": format!("{:#x}", signer.address()),
+            "from": format!("{:#x}", signer_address),
             "calldata": format!("0x{}", hex::encode(&calldata)),
             "disputed_at": disputed_at.to_string(),
             "eligible_at": eligible_at.to_string(),
@@ -647,24 +636,33 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
     }
 
     // 5. Send.
+    let keystore_path = super::wallet_args::resolve_keystore_path(
+        args.keystore.as_deref(),
+        ctx.keystore_path.as_deref(),
+    );
     let receipt_timeout = super::resolve_duration(
         args.receipt_timeout,
         ctx.receipt_timeout,
         default_receipt_timeout(chain_id_u64),
     );
-    let tx = sign_and_broadcast_tx(&rpc, &signer, contract, calldata.clone())
-        .await
-        .map_err(|e| CmdError::Server(format!("timeout-resolve broadcast failed: {e}")))?;
-    let ok = rpc
-        .wait_for_receipt(tx, receipt_timeout, RECEIPT_POLL_INTERVAL)
-        .await
-        .map_err(|e| CmdError::Server(format!("timeout-resolve receipt: {e}")))?;
-    if !ok {
-        return Err(CmdError::Server(format!(
-            "timeout-resolve tx {tx:#x} reverted on-chain (InvalidState: the escrow is no \
-             longer Disputed; DisputeTimeoutNotElapsed: the chain clock is behind)"
-        )));
-    }
+    let session = crate::tempo_session::TempoSession::new(
+        signer,
+        keystore_path,
+        rpc,
+        chain_id_u64,
+        receipt_timeout,
+        RECEIPT_POLL_INTERVAL,
+    );
+    let tx = session
+        .send_transaction_and_wait(
+            contract,
+            calldata.clone(),
+            "timeout-resolve",
+            Some(
+                " (InvalidState: the escrow is no longer Disputed; DisputeTimeoutNotElapsed: the chain clock is behind)",
+            ),
+        )
+        .await?;
     let mut data = common("timeout_resolve_submitted");
     data["tx_hash"] = json!(format!("{tx:#x}"));
     data["note"] = json!(

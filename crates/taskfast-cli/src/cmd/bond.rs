@@ -40,20 +40,12 @@ use super::{
 };
 use crate::envelope::Envelope;
 
-use taskfast_agent::chain::{compute_task_ref, TaskBond, IERC20};
-use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
-use taskfast_chains::tempo::TEMPO_MAINNET_CHAIN_ID;
+use taskfast_agent::chain::{compute_task_ref, TaskBond};
+use taskfast_agent::tempo_rpc::TempoRpcClient;
 use taskfast_client::api::types::{
     GetStakeQuoteStakeSource, ReportStakePostTxBody, ReportStakePostTxBodyStakeSource,
 };
 use taskfast_client::map_api_error;
-
-/// `TaskBond.post` receipt polling defaults (same shape as `escrow sign`):
-/// 3min mainnet, 1min testnet, 1min for unknown chains. The mainnet chain-id
-/// constant lives once, in `taskfast_chains::tempo`.
-const DEFAULT_RECEIPT_TIMEOUT_MAINNET: Duration = Duration::from_mins(3);
-const DEFAULT_RECEIPT_TIMEOUT_TESTNET: Duration = Duration::from_mins(1);
-const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Server-side `BondPosted` verification is asynchronous, so after reporting we
 /// re-quote until `bond_status=posted`. Bounded so the command still returns if
@@ -63,8 +55,8 @@ const VERIFY_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 fn default_receipt_timeout(chain_id: i64) -> Duration {
     match u64::try_from(chain_id) {
-        Ok(TEMPO_MAINNET_CHAIN_ID) => DEFAULT_RECEIPT_TIMEOUT_MAINNET,
-        _ => DEFAULT_RECEIPT_TIMEOUT_TESTNET,
+        Ok(id) => crate::tempo_session::default_receipt_timeout_for_chain_id(id),
+        _ => crate::tempo_session::DEFAULT_RECEIPT_TIMEOUT_TESTNET,
     }
 }
 
@@ -230,31 +222,20 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
         .transpose()?;
 
     // 5. Load signer + preflight the wallet address.
-    let keystore_ref = args.keystore.as_deref().map(str::to_string).or_else(|| {
-        ctx.keystore_path
-            .as_deref()
-            .and_then(|p| p.to_str().map(str::to_string))
-    });
-    let signer = super::wallet_args::load_signer(
+    let keystore_ref = super::wallet_args::resolve_keystore_ref(
+        args.keystore.as_deref(),
+        ctx.keystore_path.as_deref(),
+    );
+    let expected_wallet = super::wallet_args::resolve_expected_wallet_address(
+        args.wallet_address.as_deref(),
+        ctx.wallet_address.as_deref(),
+    );
+    let signer = super::wallet_args::load_signer_and_validate(
         keystore_ref.as_deref(),
         args.wallet_password_file.as_deref(),
+        expected_wallet,
         "bond post",
     )?;
-    let wallet_address_for_check = args
-        .wallet_address
-        .as_deref()
-        .or(ctx.wallet_address.as_deref());
-    if let Some(expected) = wallet_address_for_check {
-        let expected_addr: Address = expected.parse().map_err(|e| {
-            CmdError::Usage(format!("--wallet-address is not a valid EVM address: {e}"))
-        })?;
-        if signer.address() != expected_addr {
-            return Err(CmdError::Usage(format!(
-                "keystore address {:#x} does not match --wallet-address {expected}",
-                signer.address(),
-            )));
-        }
-    }
 
     // 6. Resolve chain + token + contracts + RPC URL from the deployment's
     //    network config.
@@ -331,21 +312,30 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
         ));
     }
 
-    // Receipt-timeout precedence: flag > config > chain-aware default.
+    let keystore_path = super::wallet_args::resolve_keystore_path(
+        args.keystore.as_deref(),
+        ctx.keystore_path.as_deref(),
+    );
+    let http = ctx.rpc_http_client(&client, &rpc_url);
+    let rpc = TempoRpcClient::new(http, rpc_url.clone());
     let receipt_timeout = resolve_duration(
         args.receipt_timeout,
         ctx.receipt_timeout,
         default_receipt_timeout(chain_id),
     );
-
-    // 9. Live RPC: balance preflight, then allowance preflight + approve.
-    let http = ctx.rpc_http_client(&client, &rpc_url);
-    let rpc = TempoRpcClient::new(http, rpc_url.clone());
+    let session = crate::tempo_session::TempoSession::new(
+        signer,
+        keystore_path,
+        rpc,
+        chain_id as u64,
+        receipt_timeout,
+        crate::tempo_session::RECEIPT_POLL_INTERVAL,
+    );
 
     // Balance preflight always runs — independent of --skip-allowance-check,
     // which governs only the allowance + approve path — so an underfunded
     // poster fails fast before broadcasting anything.
-    let balance = erc20_balance_of(&rpc, token, signer.address()).await?;
+    let balance = session.erc20_balance_of(token, session.address()).await?;
     if balance < amount {
         return Err(CmdError::Usage(format!(
             "poster balance {balance} < required bond {amount} on token {token:#x}"
@@ -354,52 +344,21 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
 
     let mut approval_tx_hex: Option<String> = None;
     if !args.skip_allowance_check {
-        let current_allowance = erc20_allowance(&rpc, token, signer.address(), task_bond).await?;
-        if current_allowance < amount {
-            let approve_calldata: Bytes = IERC20::approveCall {
-                spender: task_bond,
-                amount,
-            }
-            .abi_encode()
-            .into();
-            let approve_hash = sign_and_broadcast_tx(&rpc, &signer, token, approve_calldata)
-                .await
-                .map_err(|e| CmdError::Server(format!("approve broadcast failed: {e}")))?;
-            let ok = rpc
-                .wait_for_receipt(approve_hash, receipt_timeout, RECEIPT_POLL_INTERVAL)
-                .await
-                .map_err(|e| CmdError::Server(format!("approve receipt: {e}")))?;
-            if !ok {
-                return Err(CmdError::Server(format!(
-                    "approve tx {approve_hash:#x} reverted on-chain"
-                )));
-            }
-            // Re-read allowance: a non-standard or no-op approve can leave it
-            // short, which would revert TaskBond.post and waste gas (mirrors
-            // `escrow sign`).
-            let new_allowance = erc20_allowance(&rpc, token, signer.address(), task_bond).await?;
-            if new_allowance < amount {
-                return Err(CmdError::Server(format!(
-                    "allowance still {new_allowance} after approve tx {approve_hash:#x} (needed {amount})"
-                )));
-            }
-            approval_tx_hex = Some(format!("{approve_hash:#x}"));
-        }
+        approval_tx_hex = session
+            .ensure_allowance(token, task_bond, amount)
+            .await?
+            .map(|h| format!("{h:#x}"));
     }
 
     // 10. Broadcast TaskBond.post, wait for receipt.
-    let post_tx = sign_and_broadcast_tx(&rpc, &signer, task_bond, post_calldata)
-        .await
-        .map_err(|e| CmdError::Server(format!("TaskBond.post broadcast failed: {e}")))?;
-    let post_ok = rpc
-        .wait_for_receipt(post_tx, receipt_timeout, RECEIPT_POLL_INTERVAL)
-        .await
-        .map_err(|e| CmdError::Server(format!("post receipt: {e}")))?;
-    if !post_ok {
-        return Err(CmdError::Server(format!(
-            "TaskBond.post tx {post_tx:#x} reverted on-chain — report aborted"
-        )));
-    }
+    let post_tx = session
+        .send_transaction_and_wait(
+            task_bond,
+            post_calldata,
+            "TaskBond.post",
+            Some(" — report aborted"),
+        )
+        .await?;
     let post_tx_hex = format!("{post_tx:#x}");
 
     // 11. Report the tx hash. The server enqueues `BondPosted` verification.
@@ -513,47 +472,4 @@ async fn resolve_network(
         entry.default_stablecoin.clone(),
         entry.task_bond_contract.clone(),
     ))
-}
-
-// ponytail: these three ERC-20 read helpers are copied verbatim from
-// `escrow.rs` (which keeps them private). Duplicating ~30 trivial lines is a
-// smaller, lower-risk diff than hoisting them into a shared module and
-// touching the escrow path; hoist if a third caller appears.
-async fn erc20_balance_of(
-    rpc: &TempoRpcClient,
-    token: Address,
-    owner: Address,
-) -> Result<U256, CmdError> {
-    let calldata: Bytes = IERC20::balanceOfCall { account: owner }.abi_encode().into();
-    // from = owner: zone TIP-20 balance privacy (see TempoRpcClient::eth_call_from).
-    let raw = rpc
-        .eth_call_from(owner, token, &calldata)
-        .await
-        .map_err(|e| CmdError::Server(format!("balanceOf rpc: {e}")))?;
-    decode_u256(&raw, "balanceOf")
-}
-
-async fn erc20_allowance(
-    rpc: &TempoRpcClient,
-    token: Address,
-    owner: Address,
-    spender: Address,
-) -> Result<U256, CmdError> {
-    let calldata: Bytes = IERC20::allowanceCall { owner, spender }.abi_encode().into();
-    // from = owner: zone TIP-20 balance privacy (see TempoRpcClient::eth_call_from).
-    let raw = rpc
-        .eth_call_from(owner, token, &calldata)
-        .await
-        .map_err(|e| CmdError::Server(format!("allowance rpc: {e}")))?;
-    decode_u256(&raw, "allowance")
-}
-
-fn decode_u256(bytes: &[u8], label: &str) -> Result<U256, CmdError> {
-    if bytes.len() < 32 {
-        return Err(CmdError::Decode(format!(
-            "{label} returned {} bytes, expected >=32",
-            bytes.len()
-        )));
-    }
-    Ok(U256::from_be_slice(&bytes[..32]))
 }

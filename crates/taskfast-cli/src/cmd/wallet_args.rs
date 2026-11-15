@@ -19,6 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
 use zeroize::Zeroizing;
 
@@ -29,6 +30,65 @@ use super::CmdError;
 /// One-shot guard so the env-var deprecation warning fires at most once
 /// per process. Streaming subcommands could otherwise spam stderr.
 static PWD_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
+
+/// Resolve the keystore reference string from either CLI args or Ctx config.
+pub fn resolve_keystore_ref(
+    cli_keystore: Option<&str>,
+    ctx_keystore: Option<&Path>,
+) -> Option<String> {
+    cli_keystore
+        .map(str::to_string)
+        .or_else(|| ctx_keystore.and_then(|p| p.to_str().map(str::to_string)))
+}
+
+/// Resolve the clean PathBuf for the keystore, stripping any `file:` prefix.
+pub fn resolve_keystore_path(
+    cli_keystore: Option<&str>,
+    ctx_keystore: Option<&Path>,
+) -> Option<PathBuf> {
+    let raw = resolve_keystore_ref(cli_keystore, ctx_keystore)?;
+    let path_str = raw.strip_prefix("file:").unwrap_or(&raw);
+    Some(PathBuf::from(path_str))
+}
+
+/// Pick the expected wallet address: explicit CLI arg takes precedence over Ctx config.
+pub fn resolve_expected_wallet_address<'a>(
+    explicit: Option<&'a str>,
+    ctx: Option<&'a str>,
+) -> Option<&'a str> {
+    explicit.or(ctx)
+}
+
+/// Validate that the decrypted signer address matches an expected address string, if given.
+pub fn validate_signer_address(
+    signer_address: Address,
+    expected_address: Option<&str>,
+) -> Result<(), CmdError> {
+    if let Some(expected) = expected_address {
+        let expected_addr: Address = expected.parse().map_err(|e| {
+            CmdError::Usage(format!("--wallet-address is not a valid EVM address: {e}"))
+        })?;
+        if signer_address != expected_addr {
+            return Err(CmdError::Usage(format!(
+                "keystore address {:#x} does not match --wallet-address {}",
+                signer_address, expected
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Decrypt the keystore at `keystore_ref` and validate against the expected address.
+pub fn load_signer_and_validate(
+    keystore_ref: Option<&str>,
+    password_file: Option<&Path>,
+    expected_address: Option<&str>,
+    purpose: &str,
+) -> Result<PrivateKeySigner, CmdError> {
+    let signer = load_signer(keystore_ref, password_file, purpose)?;
+    validate_signer_address(signer.address(), expected_address)?;
+    Ok(signer)
+}
 
 /// Decrypt the keystore at `keystore_ref` using the resolved password.
 ///
@@ -51,6 +111,31 @@ pub fn load_signer(
     // `&*password` narrows `Zeroizing<String>` → `&str` only at the
     // keystore boundary; the buffer zeroizes on drop at end of scope.
     keystore::load(&KeySource::File { path }, &password).map_err(CmdError::from)
+}
+
+/// Resolve the keystore password with an optional interactive/prompted inline password.
+///
+/// Precedence:
+/// 1. `inline_password` (interactive prompt, avoids being second-guessed by stale env vars)
+/// 2. `TASKFAST_WALLET_PASSWORD` environment variable (warns if used)
+/// 3. `password_file` contents (single line required, trimmed of trailing CR/LF)
+pub fn resolve_password_with_inline(
+    inline_password: Option<&str>,
+    password_file: Option<&Path>,
+) -> Result<Zeroizing<String>, CmdError> {
+    if let Some(pw) = inline_password {
+        let trimmed = pw.trim_end_matches(['\n', '\r']);
+        if !trimmed.is_empty() {
+            if trimmed.contains('\n') || trimmed.contains('\r') {
+                return Err(CmdError::Usage(
+                    "inline wallet password must contain a single line (found an interior newline)"
+                        .into(),
+                ));
+            }
+            return Ok(Zeroizing::new(trimmed.to_string()));
+        }
+    }
+    resolve_password(password_file)
 }
 
 /// Resolve the keystore password: env var wins over file. Trims trailing
@@ -213,5 +298,50 @@ mod tests {
             }
             other => panic!("expected Usage, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn inline_password_wins_and_rejects_interior_newlines() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("TASKFAST_WALLET_PASSWORD", "from-env");
+        let pw = resolve_password_with_inline(Some("inline-secret\n"), None).expect("ok");
+        assert_eq!(pw.as_str(), "inline-secret");
+
+        let err = resolve_password_with_inline(Some("first\nsecond"), None)
+            .expect_err("interior newline must fail");
+        assert!(matches!(err, CmdError::Usage(m) if m.contains("single line")));
+        std::env::remove_var("TASKFAST_WALLET_PASSWORD");
+    }
+
+    #[test]
+    fn resolve_keystore_helpers() {
+        assert_eq!(
+            resolve_keystore_ref(Some("file:/tmp/key.json"), None),
+            Some("file:/tmp/key.json".into())
+        );
+        assert_eq!(
+            resolve_keystore_path(Some("file:/tmp/key.json"), None),
+            Some(PathBuf::from("/tmp/key.json"))
+        );
+        assert_eq!(
+            resolve_keystore_path(None, Some(Path::new("/etc/key.json"))),
+            Some(PathBuf::from("/etc/key.json"))
+        );
+    }
+
+    #[test]
+    fn validate_signer_address_checks() {
+        let addr = Address::repeat_byte(0x11);
+        validate_signer_address(addr, None).expect("no expected address passes");
+        validate_signer_address(addr, Some(&format!("{addr:#x}")))
+            .expect("matching address passes");
+
+        let err = validate_signer_address(addr, Some("not-hex")).expect_err("invalid address");
+        assert!(matches!(err, CmdError::Usage(m) if m.contains("not a valid EVM address")));
+
+        let mismatch = Address::repeat_byte(0x22);
+        let err = validate_signer_address(addr, Some(&format!("{mismatch:#x}")))
+            .expect_err("mismatch must fail");
+        assert!(matches!(err, CmdError::Usage(m) if m.contains("does not match --wallet-address")));
     }
 }
