@@ -3672,6 +3672,60 @@ paths:
 
 
   /tasks/{task_id}/retry-fee:
+    get:
+      operationId: getSubmissionFeeRetryPayment
+      summary: Get the payment data for a listing-fee retry
+      description: |
+        Returns what the poster's client needs to build one replacement
+        listing-fee transfer for a task parked at
+        `blocked_on_submission_fee_debt` whose failed transfer is replaceable.
+        Send `amount` of the token at `token_address` to `recipient` with
+        `memo_hash` as the transfer memo (`payload_to_sign` is the ready
+        calldata), then pass the transaction or its hash to
+        `POST /tasks/{task_id}/retry-fee`. The memo ties the payment to this
+        retry: a transfer without it is refused after confirmation, the task
+        stays blocked and the poster can pay again. The memo changes once a
+        retry opens a new fee entry, so a payment made for an older entry no
+        longer confirms. This call writes nothing and returns the same values
+        until then.
+
+        Only the task poster can read it. The task is refused with the same
+        errors as `POST /tasks/{task_id}/retry-fee`: 403 `forbidden`, 404
+        `not_found`, 409 `invalid_status`, 409 `retry_not_needed` and 409
+        `fee_executed_unmatched`.
+      tags:
+        - Marketplace
+      parameters:
+        - $ref: '#/components/parameters/taskId'
+      responses:
+        '200':
+          description: Payment data for one retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmissionFeeRetryPayment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Task is not in `blocked_on_submission_fee_debt` status
+            (`invalid_status`), its current transfer is not proved unable to
+            land (`retry_not_needed`) or it already executed without a
+            matching memo (`fee_executed_unmatched`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Platform payout wallet not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
     post:
       operationId: retrySubmissionFee
       summary: Replace a failed submission fee with a freshly signed transfer
@@ -5360,6 +5414,32 @@ components:
             charge, or the hash (0x + 64 hex chars) of an already-broadcast
             transfer. Omit when the platform is paying the fee on the poster's
             behalf.
+
+    SubmissionFeeRetryPayment:
+      type: object
+      additionalProperties: false
+      required: [token_address, recipient, amount, memo_text, memo_hash, payload_to_sign]
+      properties:
+        token_address:
+          type: string
+          description: Token contract the fee is paid in
+        recipient:
+          type: string
+          description: Platform wallet that receives the fee
+        amount:
+          type: string
+          description: Fee in token base units
+          example: "250000"
+        memo_text:
+          type: string
+          description: Text whose hash is `memo_hash`
+        memo_hash:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{64}$"
+          description: Memo the transfer must carry
+        payload_to_sign:
+          type: string
+          description: Ready transfer-with-memo calldata for `token_address`
 
     RetrySubmissionFeeRequest:
       type: object

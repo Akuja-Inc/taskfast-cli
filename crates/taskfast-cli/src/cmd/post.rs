@@ -530,7 +530,10 @@ fn preflight(ctx: &Ctx, args: &Args) -> Result<Preflight, CmdError> {
 /// the CLI at `{api_base}/rpc/{network}`, which the server proxies to its
 /// own Tempo upstream (Alchemy by default). The caller should carry the
 /// authenticated reqwest::Client through to `TempoRpcClient`.
-async fn resolve_proxy_rpc_url(client: &TaskFastClient, ctx: &Ctx) -> Result<String, CmdError> {
+pub(crate) async fn resolve_proxy_rpc_url(
+    client: &TaskFastClient,
+    ctx: &Ctx,
+) -> Result<String, CmdError> {
     let cfg = client.fetch_network_config().await.map_err(|e| match e {
         taskfast_client::Error::Auth(_) | taskfast_client::Error::Validation { .. } => {
             CmdError::Server(format!("fetch network config from {}: {e}", ctx.base_url()))
@@ -641,7 +644,7 @@ fn parse_iso_opt(
     }
 }
 
-fn decode_0x_bytes(s: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn decode_0x_bytes(s: &str) -> Result<Vec<u8>, String> {
     let stripped = s.strip_prefix("0x").unwrap_or(s);
     hex::decode(stripped).map_err(|e| e.to_string())
 }
