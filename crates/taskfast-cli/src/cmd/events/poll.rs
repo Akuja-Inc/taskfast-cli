@@ -20,6 +20,7 @@ use clap::Parser;
 use serde_json::json;
 
 use super::super::{CmdError, CmdResult, Ctx};
+use super::intake::EventIntake;
 use crate::envelope::Envelope;
 
 use taskfast_agent::events::list_events_page_tolerant;
@@ -39,39 +40,22 @@ pub struct PollArgs {
 }
 
 pub async fn run(ctx: &Ctx, args: PollArgs) -> CmdResult {
-    let cursor_state = CursorState::resolve(args.cursor.as_deref(), ctx);
-    let effective_cursor = cursor_state.effective_cursor();
+    let mut intake = EventIntake::from_ctx(ctx, args.cursor.as_deref());
+    let effective_cursor = intake.effective_cursor().map(str::to_string);
 
     let client = ctx.client()?;
-    let page = list_events_page_tolerant(&client, effective_cursor, Some(args.limit))
+    let page = list_events_page_tolerant(&client, effective_cursor.as_deref(), Some(args.limit))
         .await
         .map_err(CmdError::from)?;
 
-    if cursor_state.persistence_enabled() {
-        if let Err(e) = cursor_state.persist(page.meta.next_cursor.as_deref()) {
-            warn_persist_failed(ctx, &e.to_string());
-        }
+    let outcome = intake.ingest_poll_page(page);
+
+    if let Err(e) = intake.commit() {
+        intake.warn(&format!("failed to persist events cursor: {e}"));
     }
 
-    for item in &page.unparseable {
-        tracing::warn!(
-            target: "taskfast::events",
-            raw = %item.raw,
-            error = %item.error,
-            "unparseable event surfaced via tolerant decode"
-        );
-    }
-
-    let mut seen = super::seen::SeenIds::load(ctx);
-    let events: Vec<_> = page
-        .events
-        .iter()
-        // Explicit `--cursor` is a replay: print everything, still record ids.
-        .filter(|e| seen.first_time(&e.event_id.to_string()) || args.cursor.is_some())
-        .collect();
-
-    let unparseable: Vec<serde_json::Value> = page
-        .unparseable
+    let unparseable: Vec<serde_json::Value> = outcome
+        .unparseable_events
         .iter()
         .map(|u| json!({ "raw": u.raw, "error": u.error }))
         .collect();
@@ -80,79 +64,11 @@ pub async fn run(ctx: &Ctx, args: PollArgs) -> CmdResult {
         ctx.environment,
         ctx.dry_run,
         json!({
-            "events": events,
+            "events": outcome.accepted_events,
             "unparseable": unparseable,
-            "meta": page.meta,
+            "meta": outcome.meta,
         }),
     ))
-}
-
-/// Sentinel passed via `--cursor -` to bypass the file completely.
-const DISABLE_SENTINEL: &str = "-";
-
-/// Env var that disables cursor persistence globally (read + write). Useful
-/// for CI or transient debug runs that share a config dir with a real loop.
-const DISABLE_ENV: &str = "TASKFAST_NO_CURSOR_STATE";
-
-/// Carries the cursor value the request will use plus, if persistence
-/// is enabled, the state store to update with `next_cursor` after the
-/// poll succeeds.
-struct CursorState {
-    /// Cursor sent to the API on this call. None = first page.
-    request_cursor: Option<String>,
-    /// State store to write `next_cursor` into on success. None = no
-    /// persistence (sentinel passed or env opt-out).
-    store: Option<crate::state_store::StateStore>,
-}
-
-impl CursorState {
-    fn resolve(cursor_arg: Option<&str>, ctx: &Ctx) -> Self {
-        let env_disabled = std::env::var(DISABLE_ENV).is_ok_and(|v| v == "1");
-        let sentinel = matches!(cursor_arg, Some(s) if s == DISABLE_SENTINEL);
-        let store = if env_disabled || sentinel {
-            None
-        } else {
-            let s = ctx.state_store();
-            if s.is_ephemeral() {
-                None
-            } else {
-                Some(s)
-            }
-        };
-
-        let request_cursor = match cursor_arg {
-            Some(s) if s == DISABLE_SENTINEL => None,
-            Some(s) => Some(s.to_string()),
-            None => store.as_ref().and_then(|s| s.read_cursor()),
-        };
-
-        Self {
-            request_cursor,
-            store,
-        }
-    }
-
-    fn effective_cursor(&self) -> Option<&str> {
-        self.request_cursor.as_deref()
-    }
-
-    fn persistence_enabled(&self) -> bool {
-        self.store.is_some()
-    }
-
-    fn persist(&self, next_cursor: Option<&str>) -> std::io::Result<()> {
-        if let Some(store) = &self.store {
-            store.write_cursor(next_cursor)?;
-        }
-        Ok(())
-    }
-}
-
-fn warn_persist_failed(ctx: &Ctx, reason: &str) {
-    if ctx.quiet {
-        return;
-    }
-    eprintln!("warning: failed to persist events cursor: {reason}");
 }
 
 #[cfg(test)]
@@ -170,33 +86,33 @@ mod tests {
     #[test]
     fn dash_sentinel_disables_both_request_and_persistence() {
         let ctx = ctx_with_config(PathBuf::from("/tmp/x/.taskfast/config.json"));
-        let s = CursorState::resolve(Some("-"), &ctx);
-        assert!(!s.persistence_enabled());
-        assert_eq!(s.effective_cursor(), None);
+        let intake = EventIntake::from_ctx(&ctx, Some("-"));
+        assert!(!intake.persistence_enabled());
+        assert_eq!(intake.effective_cursor(), None);
     }
 
     #[test]
     fn explicit_cursor_uses_passed_value() {
         let ctx = ctx_with_config(PathBuf::from("/tmp/x/.taskfast/config.json"));
-        let s = CursorState::resolve(Some("abc"), &ctx);
-        assert_eq!(s.effective_cursor(), Some("abc"));
-        assert!(s.persistence_enabled());
+        let intake = EventIntake::from_ctx(&ctx, Some("abc"));
+        assert_eq!(intake.effective_cursor(), Some("abc"));
+        assert!(intake.persistence_enabled());
     }
 
     #[test]
     fn explicit_cursor_still_sent_when_persistence_unavailable() {
         let ctx = ctx_with_config(PathBuf::from("/dev/null"));
-        let s = CursorState::resolve(Some("abc"), &ctx);
-        assert_eq!(s.effective_cursor(), Some("abc"));
-        assert!(!s.persistence_enabled());
+        let intake = EventIntake::from_ctx(&ctx, Some("abc"));
+        assert_eq!(intake.effective_cursor(), Some("abc"));
+        assert!(!intake.persistence_enabled());
     }
 
     #[test]
     fn dev_null_config_disables_persistence() {
         let ctx = ctx_with_config(PathBuf::from("/dev/null"));
-        let s = CursorState::resolve(None, &ctx);
-        assert_eq!(s.effective_cursor(), None);
-        assert!(!s.persistence_enabled());
+        let intake = EventIntake::from_ctx(&ctx, None);
+        assert_eq!(intake.effective_cursor(), None);
+        assert!(!intake.persistence_enabled());
     }
 
     #[test]
@@ -204,11 +120,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.json");
         let ctx = ctx_with_config(cfg);
-        let s = CursorState::resolve(None, &ctx);
-        assert!(s.persistence_enabled());
-        s.persist(Some("xyz")).unwrap();
-        let s2 = CursorState::resolve(None, &ctx);
-        assert_eq!(s2.effective_cursor(), Some("xyz"));
+        let mut intake = EventIntake::from_ctx(&ctx, None);
+        assert!(intake.persistence_enabled());
+        let _ = intake.ingest_batch(
+            Vec::new(),
+            Vec::new(),
+            Some("xyz".to_string()),
+            taskfast_client::api::types::PaginatedMeta {
+                has_more: false,
+                next_cursor: Some("xyz".to_string()),
+                total_count: Some(0),
+            },
+        );
+        intake.commit().unwrap();
+        let intake2 = EventIntake::from_ctx(&ctx, None);
+        assert_eq!(intake2.effective_cursor(), Some("xyz"));
     }
 
     #[test]
@@ -216,10 +142,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.json");
         let ctx = ctx_with_config(cfg);
-        let s = CursorState::resolve(None, &ctx);
-        s.persist(Some("abc")).unwrap();
-        s.persist(None).unwrap();
-        let s2 = CursorState::resolve(None, &ctx);
-        assert_eq!(s2.effective_cursor(), Some("abc"));
+        let mut intake = EventIntake::from_ctx(&ctx, None);
+        let _ = intake.ingest_batch(
+            Vec::new(),
+            Vec::new(),
+            Some("abc".to_string()),
+            taskfast_client::api::types::PaginatedMeta {
+                has_more: false,
+                next_cursor: Some("abc".to_string()),
+                total_count: Some(0),
+            },
+        );
+        intake.commit().unwrap();
+
+        let mut intake2 = EventIntake::from_ctx(&ctx, None);
+        let _ = intake2.ingest_batch(
+            Vec::new(),
+            Vec::new(),
+            None,
+            taskfast_client::api::types::PaginatedMeta {
+                has_more: false,
+                next_cursor: None,
+                total_count: Some(0),
+            },
+        );
+        intake2.commit().unwrap();
+
+        let intake3 = EventIntake::from_ctx(&ctx, None);
+        assert_eq!(intake3.effective_cursor(), Some("abc"));
     }
 }

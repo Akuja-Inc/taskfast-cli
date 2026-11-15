@@ -27,14 +27,13 @@ pub struct SeenIds {
 }
 
 impl SeenIds {
-    pub fn load(ctx: &Ctx) -> Self {
-        let store = ctx.state_store();
+    pub fn new(store: StateStore, quiet: bool) -> Self {
         let mut s = Self {
             store: store.clone(),
             order: VecDeque::new(),
             set: HashSet::new(),
             file_lines: 0,
-            quiet: ctx.quiet,
+            quiet,
             warned: false,
         };
         match store.load_seen_lines() {
@@ -54,18 +53,26 @@ impl SeenIds {
         s
     }
 
+    pub fn load(ctx: &Ctx) -> Self {
+        Self::new(ctx.state_store(), ctx.quiet)
+    }
+
+    /// Check if `id` has already been seen.
+    pub fn contains(&self, id: &str) -> bool {
+        self.set.contains(id)
+    }
+
     /// Record `id`; true when it was not seen before (print it), false for
     /// a duplicate (drop it).
     pub fn first_time(&mut self, id: &str) -> bool {
-        if self.set.contains(id) {
+        if self.contains(id) {
             return false;
         }
-        self.remember(id);
-        self.persist(id);
+        self.commit_ids(&[id.to_string()]);
         true
     }
 
-    fn remember(&mut self, id: &str) {
+    pub fn remember(&mut self, id: &str) {
         if self.set.insert(id.to_string()) {
             self.order.push_back(id.to_string());
         }
@@ -76,19 +83,40 @@ impl SeenIds {
         }
     }
 
-    fn persist(&mut self, id: &str) {
-        let res = if self.file_lines >= 2 * CAP {
+    /// Commit a batch of seen IDs into memory and persist to StateStore.
+    pub fn commit_ids(&mut self, ids: &[String]) {
+        let mut appended = Vec::new();
+        for id in ids {
+            if self.set.insert(id.clone()) {
+                self.order.push_back(id.clone());
+                appended.push(id.as_str());
+            }
+            while self.order.len() > CAP {
+                if let Some(old) = self.order.pop_front() {
+                    self.set.remove(&old);
+                }
+            }
+        }
+        if appended.is_empty() {
+            return;
+        }
+
+        let res = if self.file_lines + appended.len() >= 2 * CAP {
             let res = self.store.rewrite_seen_lines(&self.order);
             if res.is_ok() {
                 self.file_lines = self.order.len();
             }
             res
         } else {
-            let res = self.store.append_seen_line(id);
-            if res.is_ok() {
+            let mut write_err = Ok(());
+            for id in &appended {
+                if let Err(e) = self.store.append_seen_line(id) {
+                    write_err = Err(e);
+                    break;
+                }
                 self.file_lines += 1;
             }
-            res
+            write_err
         };
         if let Err(e) = res {
             let display = self

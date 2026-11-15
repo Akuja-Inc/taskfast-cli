@@ -115,7 +115,7 @@ pub async fn run(ctx: &Ctx, args: StreamArgs) -> ExitCode {
 
     let shutdown = install_shutdown_signal();
     let mut ack_lines = args.ack_stdin.then(spawn_stdin_reader);
-    let mut seen = super::seen::SeenIds::load(ctx);
+    let mut intake = super::intake::EventIntake::from_ctx(ctx, None);
 
     loop {
         if shutdown.is_cancelled() {
@@ -130,7 +130,7 @@ pub async fn run(ctx: &Ctx, args: StreamArgs) -> ExitCode {
             args.once,
             &shutdown,
             ack_lines.as_mut(),
-            &mut seen,
+            &mut intake,
         )
         .await
         {
@@ -184,7 +184,7 @@ async fn run_once(
     once: bool,
     shutdown: &ShutdownToken,
     mut ack_lines: Option<&mut UnboundedReceiver<String>>,
-    seen: &mut super::seen::SeenIds,
+    intake: &mut super::intake::EventIntake,
 ) -> ConnectOutcome {
     let req = match build_request(ws_url, api_key) {
         Ok(r) => r,
@@ -261,6 +261,7 @@ async fn run_once(
                                     error = %e,
                                     "WS text frame was not valid JSON; surfacing as unparseable"
                                 );
+                                intake.record_unparseable();
                                 emit_unparseable(&text, &e.to_string());
                                 continue;
                             }
@@ -277,21 +278,26 @@ async fn run_once(
                                 return ConnectOutcome::AuthFailed;
                             }
                             FrameKind::Event(payload) => {
-                                let id = payload.get("event_id").and_then(Value::as_str);
-                                if let Some(id) = id.filter(|id| !seen.first_time(id)) {
-                                    // Duplicate (replay after a lost ack): re-ack so the
-                                    // server moves on, print nothing.
-                                    msg_ref += 1;
-                                    let ack = phx_frame(JOIN_REF, &msg_ref.to_string(), TOPIC, "ack", json!({ "event_id": id }));
-                                    if sink.send(Message::Text(ack.into())).await.is_err() {
-                                        return ConnectOutcome::Disconnected;
+                                match intake.ingest_stream_payload(&payload) {
+                                    super::intake::StreamItemOutcome::Duplicate { event_id } => {
+                                        // Duplicate (replay after a lost ack): re-ack so the
+                                        // server moves on, print nothing.
+                                        msg_ref += 1;
+                                        let ack = phx_frame(JOIN_REF, &msg_ref.to_string(), TOPIC, "ack", json!({ "event_id": event_id }));
+                                        if sink.send(Message::Text(ack.into())).await.is_err() {
+                                            return ConnectOutcome::Disconnected;
+                                        }
                                     }
-                                    continue;
-                                }
-                                emit_event(&payload);
-                                if once {
-                                    let _ = sink.send(Message::Close(None)).await;
-                                    return ConnectOutcome::OnceDone;
+                                    super::intake::StreamItemOutcome::Accepted { .. } => {
+                                        emit_event(&payload);
+                                        if once {
+                                            let _ = sink.send(Message::Close(None)).await;
+                                            return ConnectOutcome::OnceDone;
+                                        }
+                                    }
+                                    super::intake::StreamItemOutcome::Malformed { error } => {
+                                        emit_unparseable(&payload.to_string(), &error);
+                                    }
                                 }
                             }
                             FrameKind::Acked(id) => {
