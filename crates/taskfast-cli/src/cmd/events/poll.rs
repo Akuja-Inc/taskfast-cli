@@ -16,9 +16,6 @@
 //! disable read+write for ad-hoc inspection runs that shouldn't
 //! mutate the persisted offset.
 
-use std::fs;
-use std::path::{Path, PathBuf};
-
 use clap::Parser;
 use serde_json::json;
 
@@ -51,8 +48,8 @@ pub async fn run(ctx: &Ctx, args: PollArgs) -> CmdResult {
         .map_err(CmdError::from)?;
 
     if cursor_state.persistence_enabled() {
-        if let Some(path) = cursor_state.path() {
-            persist_cursor(path, page.meta.next_cursor.as_deref(), ctx);
+        if let Err(e) = cursor_state.persist(page.meta.next_cursor.as_deref()) {
+            warn_persist_failed(ctx, &e.to_string());
         }
     }
 
@@ -90,11 +87,6 @@ pub async fn run(ctx: &Ctx, args: PollArgs) -> CmdResult {
     ))
 }
 
-/// Filename relative to the config directory. Living next to `config.json`
-/// keeps a project's TaskFast state self-contained (one dir to back up,
-/// one dir to gitignore) rather than scattering across XDG paths.
-const CURSOR_FILENAME: &str = "events.cursor";
-
 /// Sentinel passed via `--cursor -` to bypass the file completely.
 const DISABLE_SENTINEL: &str = "-";
 
@@ -103,37 +95,40 @@ const DISABLE_SENTINEL: &str = "-";
 const DISABLE_ENV: &str = "TASKFAST_NO_CURSOR_STATE";
 
 /// Carries the cursor value the request will use plus, if persistence
-/// is enabled, the file path to overwrite with `next_cursor` after the
-/// poll succeeds. The two are decoupled because an explicit `--cursor`
-/// must still hit the API even when the file path is unavailable
-/// (e.g. tests that point `config_path` at `/dev/null`).
+/// is enabled, the state store to update with `next_cursor` after the
+/// poll succeeds.
 struct CursorState {
     /// Cursor sent to the API on this call. None = first page.
     request_cursor: Option<String>,
-    /// File path to write `next_cursor` into on success. None = no
-    /// persistence (sentinel passed, env opt-out, or no config dir).
-    persist_to: Option<PathBuf>,
+    /// State store to write `next_cursor` into on success. None = no
+    /// persistence (sentinel passed or env opt-out).
+    store: Option<crate::state_store::StateStore>,
 }
 
 impl CursorState {
     fn resolve(cursor_arg: Option<&str>, ctx: &Ctx) -> Self {
         let env_disabled = std::env::var(DISABLE_ENV).is_ok_and(|v| v == "1");
         let sentinel = matches!(cursor_arg, Some(s) if s == DISABLE_SENTINEL);
-        let persist_to = if env_disabled || sentinel {
+        let store = if env_disabled || sentinel {
             None
         } else {
-            cursor_path(ctx)
+            let s = ctx.state_store();
+            if s.is_ephemeral() {
+                None
+            } else {
+                Some(s)
+            }
         };
 
         let request_cursor = match cursor_arg {
             Some(s) if s == DISABLE_SENTINEL => None,
             Some(s) => Some(s.to_string()),
-            None => persist_to.as_deref().and_then(read_cursor),
+            None => store.as_ref().and_then(|s| s.read_cursor()),
         };
 
         Self {
             request_cursor,
-            persist_to,
+            store,
         }
     }
 
@@ -142,68 +137,22 @@ impl CursorState {
     }
 
     fn persistence_enabled(&self) -> bool {
-        self.persist_to.is_some()
+        self.store.is_some()
     }
 
-    fn path(&self) -> Option<&Path> {
-        self.persist_to.as_deref()
-    }
-}
-
-/// Resolve the cursor file location from the config path. `/dev/null` (used
-/// by tests) returns None so unit tests don't hit the filesystem.
-pub(super) fn cursor_path(ctx: &Ctx) -> Option<PathBuf> {
-    let parent = ctx.config_path.parent()?;
-    if parent.as_os_str().is_empty() {
-        return Some(PathBuf::from(CURSOR_FILENAME));
-    }
-    if parent == Path::new("/dev") {
-        return None;
-    }
-    Some(parent.join(CURSOR_FILENAME))
-}
-
-fn read_cursor(path: &Path) -> Option<String> {
-    let raw = fs::read_to_string(path).ok()?;
-    let trimmed = raw.trim().to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
-/// Best-effort write. A failure (read-only FS, permission denied) is logged
-/// to stderr but does not fail the command — the user already got their
-/// page; losing the cursor only costs one redundant poll on next run.
-///
-/// When the server returns `next_cursor: null` (tip reached) the on-disk
-/// cursor is left untouched. Overwriting with an empty string would make
-/// the next `events poll` (without `--cursor`) restart from the beginning
-/// and replay backlog.
-fn persist_cursor(path: &Path, next_cursor: Option<&str>, ctx: &Ctx) {
-    let Some(payload) = next_cursor else {
-        return;
-    };
-    if let Some(dir) = path.parent() {
-        if let Err(e) = fs::create_dir_all(dir) {
-            warn_persist_failed(ctx, path, &e.to_string());
-            return;
+    fn persist(&self, next_cursor: Option<&str>) -> std::io::Result<()> {
+        if let Some(store) = &self.store {
+            store.write_cursor(next_cursor)?;
         }
-    }
-    if let Err(e) = fs::write(path, payload) {
-        warn_persist_failed(ctx, path, &e.to_string());
+        Ok(())
     }
 }
 
-fn warn_persist_failed(ctx: &Ctx, path: &Path, reason: &str) {
+fn warn_persist_failed(ctx: &Ctx, reason: &str) {
     if ctx.quiet {
         return;
     }
-    eprintln!(
-        "warning: failed to persist events cursor to {}: {reason}",
-        path.display()
-    );
+    eprintln!("warning: failed to persist events cursor: {reason}");
 }
 
 #[cfg(test)]
@@ -216,21 +165,6 @@ mod tests {
             config_path: path,
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn cursor_path_uses_config_parent() {
-        let ctx = ctx_with_config(PathBuf::from("/tmp/foo/.taskfast/config.json"));
-        assert_eq!(
-            cursor_path(&ctx),
-            Some(PathBuf::from("/tmp/foo/.taskfast/events.cursor"))
-        );
-    }
-
-    #[test]
-    fn cursor_path_skips_dev_null() {
-        let ctx = ctx_with_config(PathBuf::from("/dev/null"));
-        assert_eq!(cursor_path(&ctx), None);
     }
 
     #[test]
@@ -270,9 +204,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.json");
         let ctx = ctx_with_config(cfg);
-        let path = cursor_path(&ctx).unwrap();
-        persist_cursor(&path, Some("xyz"), &ctx);
-        assert_eq!(read_cursor(&path), Some("xyz".into()));
+        let s = CursorState::resolve(None, &ctx);
+        assert!(s.persistence_enabled());
+        s.persist(Some("xyz")).unwrap();
+        let s2 = CursorState::resolve(None, &ctx);
+        assert_eq!(s2.effective_cursor(), Some("xyz"));
     }
 
     #[test]
@@ -280,9 +216,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.json");
         let ctx = ctx_with_config(cfg);
-        let path = cursor_path(&ctx).unwrap();
-        persist_cursor(&path, Some("abc"), &ctx);
-        persist_cursor(&path, None, &ctx);
-        assert_eq!(read_cursor(&path), Some("abc".into()));
+        let s = CursorState::resolve(None, &ctx);
+        s.persist(Some("abc")).unwrap();
+        s.persist(None).unwrap();
+        let s2 = CursorState::resolve(None, &ctx);
+        assert_eq!(s2.effective_cursor(), Some("abc"));
     }
 }
