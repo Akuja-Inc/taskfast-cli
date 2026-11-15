@@ -186,18 +186,16 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     // 6. Load keystore and validate --wallet-address preflight.
     //    Bead spec calls for the signature to appear in the dry-run envelope,
     //    so we sign even in dry-run and never short-circuit before keystore resolution.
-    let keystore_ref = super::wallet_args::resolve_keystore_ref(
+    let keystore_path = super::wallet_args::resolve_keystore_path(
         args.keystore.as_deref(),
         ctx.keystore_path.as_deref(),
     );
-    let expected_wallet = super::wallet_args::resolve_expected_wallet_address(
-        args.wallet_address.as_deref(),
-        ctx.wallet_address.as_deref(),
-    );
     let signer = super::wallet_args::load_signer_and_validate(
-        keystore_ref.as_deref(),
+        keystore_path.as_deref(),
         args.wallet_password_file.as_deref(),
-        expected_wallet,
+        args.wallet_address
+            .as_deref()
+            .or(ctx.wallet_address.as_deref()),
         "settlement approval",
     )?;
 

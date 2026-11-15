@@ -694,16 +694,11 @@ async fn provision_wallet(
 }
 
 fn resolve_wallet_password(args: &Args) -> Result<zeroize::Zeroizing<String>, CmdError> {
-    super::wallet_args::resolve_password_with_inline(
+    super::wallet_args::resolve_password_with_inline_and_missing_hint(
         args.inline_wallet_password.as_deref(),
         args.wallet_password_file.as_deref(),
+        "--generate-wallet requires --wallet-password-file or TASKFAST_WALLET_PASSWORD",
     )
-    .map_err(|e| match e {
-        CmdError::Usage(msg) if msg.contains("required to unlock keystore") => CmdError::Usage(
-            "--generate-wallet requires --wallet-password-file or TASKFAST_WALLET_PASSWORD".into(),
-        ),
-        other => other,
-    })
 }
 
 fn persist_keystore(

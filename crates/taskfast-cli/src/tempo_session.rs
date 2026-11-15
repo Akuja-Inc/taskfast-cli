@@ -5,26 +5,27 @@
 //! ERC-20 allowances/balances, and automatically serializes every mutating
 //! transaction broadcast under the exclusive [`wallet_lock`].
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use alloy_primitives::{Address, Bytes, TxHash, U256};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall;
 
-use taskfast_agent::chain::IERC20;
+use taskfast_agent::chain::{decode_u256, IERC20};
 use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
 use taskfast_chains::tempo::TEMPO_MAINNET_CHAIN_ID;
 
-use crate::cmd::{
-    is_proxy_rpc_url, network_policy_for_chain_id, resolve_duration, validate_override_rpc_url,
-    CmdError, Ctx,
-};
+use crate::cmd::CmdError;
 use crate::wallet_lock::{self, WalletGuard};
 use crate::Network;
+
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::{Arc, Mutex};
 
 /// Default receipt timeouts and polling interval across all on-chain commands.
 pub const DEFAULT_RECEIPT_TIMEOUT_MAINNET: Duration = Duration::from_mins(3);
@@ -49,21 +50,21 @@ pub fn default_receipt_timeout_for_network(network: Network) -> Duration {
 }
 
 /// In-process mock RPC adapter for hermetic tests without WireMock scaffolding.
+#[cfg(test)]
 #[derive(Debug)]
 pub struct MockTempoRpc {
     pub chain_id: AtomicU64,
     pub balances: Mutex<HashMap<(Address, Address), U256>>,
     pub allowances: Mutex<HashMap<(Address, Address, Address), U256>>,
     pub broadcast_delay: Mutex<Option<Duration>>,
-    pub active_broadcasts: std::sync::atomic::AtomicUsize,
-    pub max_concurrent_broadcasts: std::sync::atomic::AtomicUsize,
+    pub active_broadcasts: AtomicUsize,
+    pub max_concurrent_broadcasts: AtomicUsize,
     pub receipts: Mutex<HashMap<TxHash, bool>>,
-    pub default_receipt_status: AtomicBool,
     pub sent_transactions: Mutex<Vec<(Address, Bytes)>>,
-    pub calls: Mutex<HashMap<(Address, Bytes), Vec<u8>>>,
-    pub raw_responses: Mutex<HashMap<String, serde_json::Value>>,
+    nonce: AtomicU64,
 }
 
+#[cfg(test)]
 impl Default for MockTempoRpc {
     fn default() -> Self {
         Self {
@@ -71,27 +72,19 @@ impl Default for MockTempoRpc {
             balances: Mutex::new(HashMap::new()),
             allowances: Mutex::new(HashMap::new()),
             broadcast_delay: Mutex::new(None),
-            active_broadcasts: std::sync::atomic::AtomicUsize::new(0),
-            max_concurrent_broadcasts: std::sync::atomic::AtomicUsize::new(0),
+            active_broadcasts: AtomicUsize::new(0),
+            max_concurrent_broadcasts: AtomicUsize::new(0),
             receipts: Mutex::new(HashMap::new()),
-            default_receipt_status: AtomicBool::new(true),
             sent_transactions: Mutex::new(Vec::new()),
-            calls: Mutex::new(HashMap::new()),
-            raw_responses: Mutex::new(HashMap::new()),
+            nonce: AtomicU64::new(1),
         }
     }
 }
 
+#[cfg(test)]
 impl MockTempoRpc {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn with_chain_id(chain_id: u64) -> Self {
-        Self {
-            chain_id: AtomicU64::new(chain_id),
-            ..Default::default()
-        }
     }
 
     pub fn set_balance(&self, token: Address, account: Address, balance: U256) {
@@ -115,8 +108,9 @@ impl MockTempoRpc {
 
 /// Backend variant for RPC operations: live HTTP client or in-process mock.
 #[derive(Clone, Debug)]
-pub enum TempoRpcBackend {
+pub(crate) enum TempoRpcBackend {
     Client(TempoRpcClient),
+    #[cfg(test)]
     Mock(Arc<MockTempoRpc>),
 }
 
@@ -126,9 +120,7 @@ pub struct TempoSession {
     signer: PrivateKeySigner,
     keystore_path: Option<PathBuf>,
     backend: TempoRpcBackend,
-    chain_id: u64,
     receipt_timeout: Duration,
-    poll_interval: Duration,
 }
 
 impl TempoSession {
@@ -137,65 +129,30 @@ impl TempoSession {
         signer: PrivateKeySigner,
         keystore_path: Option<PathBuf>,
         rpc: TempoRpcClient,
-        chain_id: u64,
         receipt_timeout: Duration,
-        poll_interval: Duration,
     ) -> Self {
         Self {
             signer,
             keystore_path,
             backend: TempoRpcBackend::Client(rpc),
-            chain_id,
             receipt_timeout,
-            poll_interval,
         }
     }
 
-    /// Create a new session with an in-process mock adapter.
+    /// Create a new session with an in-process mock adapter for testing.
+    #[cfg(test)]
     pub fn from_mock(
         signer: PrivateKeySigner,
         keystore_path: Option<PathBuf>,
         mock: Arc<MockTempoRpc>,
-        chain_id: u64,
         receipt_timeout: Duration,
-        poll_interval: Duration,
     ) -> Self {
         Self {
             signer,
             keystore_path,
             backend: TempoRpcBackend::Mock(mock),
-            chain_id,
             receipt_timeout,
-            poll_interval,
         }
-    }
-
-    /// Resolve RPC endpoint and create a session against the live network.
-    pub async fn resolve_and_connect(
-        signer: PrivateKeySigner,
-        keystore_path: Option<PathBuf>,
-        ctx: &Ctx,
-        override_url: Option<&str>,
-        target_chain_id: Option<i64>,
-        cli_receipt_timeout: Option<Duration>,
-    ) -> Result<Self, CmdError> {
-        let (rpc_url, http) = resolve_rpc_endpoint(ctx, override_url, target_chain_id).await?;
-        let rpc = TempoRpcClient::new(http, rpc_url);
-        let chain_id = rpc
-            .chain_id()
-            .await
-            .map_err(|e| CmdError::Server(format!("tempo rpc eth_chainId: {e}")))?;
-        let default_timeout = default_receipt_timeout_for_chain_id(chain_id);
-        let receipt_timeout =
-            resolve_duration(cli_receipt_timeout, ctx.receipt_timeout, default_timeout);
-        Ok(Self::new(
-            signer,
-            keystore_path,
-            rpc,
-            chain_id,
-            receipt_timeout,
-            RECEIPT_POLL_INTERVAL,
-        ))
     }
 
     pub fn signer(&self) -> &PrivateKeySigner {
@@ -206,36 +163,6 @@ impl TempoSession {
         self.signer.address()
     }
 
-    pub fn chain_id(&self) -> u64 {
-        self.chain_id
-    }
-
-    pub fn keystore_path(&self) -> Option<&Path> {
-        self.keystore_path.as_deref()
-    }
-
-    pub fn receipt_timeout(&self) -> Duration {
-        self.receipt_timeout
-    }
-
-    pub fn poll_interval(&self) -> Duration {
-        self.poll_interval
-    }
-
-    pub fn rpc_client(&self) -> Option<&TempoRpcClient> {
-        match &self.backend {
-            TempoRpcBackend::Client(c) => Some(c),
-            TempoRpcBackend::Mock(_) => None,
-        }
-    }
-
-    pub fn mock_adapter(&self) -> Option<&Arc<MockTempoRpc>> {
-        match &self.backend {
-            TempoRpcBackend::Mock(m) => Some(m),
-            TempoRpcBackend::Client(_) => None,
-        }
-    }
-
     /// Acquire the exclusive wallet lock for the keystore path, if configured.
     pub fn acquire_lock(&self) -> Result<Option<WalletGuard>, CmdError> {
         if let Some(ref path) = self.keystore_path {
@@ -243,11 +170,6 @@ impl TempoSession {
         } else {
             Ok(None)
         }
-    }
-
-    /// Read-only call without explicit sender.
-    pub async fn eth_call(&self, to: Address, calldata: &Bytes) -> Result<Vec<u8>, CmdError> {
-        self.eth_call_from(self.address(), to, calldata).await
     }
 
     /// Read-only call impersonating an explicit sender (TIP-20 privacy compliance).
@@ -262,6 +184,7 @@ impl TempoSession {
                 .eth_call_from(from, to, calldata)
                 .await
                 .map_err(|e| CmdError::Server(format!("eth_call: {e}"))),
+            #[cfg(test)]
             TempoRpcBackend::Mock(mock) => {
                 if let Ok(call) = IERC20::balanceOfCall::abi_decode(calldata) {
                     let bal = mock
@@ -283,30 +206,7 @@ impl TempoSession {
                         .unwrap_or(U256::ZERO);
                     return Ok(allow.to_be_bytes::<32>().to_vec());
                 }
-                if let Some(res) = mock.calls.lock().unwrap().get(&(to, calldata.clone())) {
-                    return Ok(res.clone());
-                }
                 Ok(vec![0u8; 32])
-            }
-        }
-    }
-
-    /// Raw JSON-RPC method invocation.
-    pub async fn raw_call(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, CmdError> {
-        match &self.backend {
-            TempoRpcBackend::Client(client) => client
-                .raw_call(method, params)
-                .await
-                .map_err(|e| CmdError::Server(format!("{method}: {e}"))),
-            TempoRpcBackend::Mock(mock) => {
-                if let Some(val) = mock.raw_responses.lock().unwrap().get(method) {
-                    return Ok(val.clone());
-                }
-                Ok(serde_json::json!("0x0"))
             }
         }
     }
@@ -319,7 +219,7 @@ impl TempoSession {
     ) -> Result<U256, CmdError> {
         let calldata: Bytes = IERC20::balanceOfCall { account }.abi_encode().into();
         let raw = self.eth_call_from(account, token, &calldata).await?;
-        decode_u256(&raw, "balanceOf")
+        decode_u256(&raw).map_err(CmdError::Decode)
     }
 
     /// Query ERC-20 allowance for (owner, spender).
@@ -331,13 +231,15 @@ impl TempoSession {
     ) -> Result<U256, CmdError> {
         let calldata: Bytes = IERC20::allowanceCall { owner, spender }.abi_encode().into();
         let raw = self.eth_call_from(owner, token, &calldata).await?;
-        decode_u256(&raw, "allowance")
+        decode_u256(&raw).map_err(CmdError::Decode)
     }
 
     /// Send a mutating transaction under the exclusive wallet lock without waiting for receipt.
     pub async fn send_transaction(&self, to: Address, calldata: Bytes) -> Result<TxHash, CmdError> {
         let _guard = self.acquire_lock()?;
-        self.broadcast_internal(to, calldata).await
+        self.broadcast_internal(to, calldata)
+            .await
+            .map_err(|e| CmdError::Server(format!("tempo rpc: {e}")))
     }
 
     /// Send a mutating transaction under the exclusive wallet lock and wait for receipt.
@@ -408,13 +310,14 @@ impl TempoSession {
         Ok(Some(approve_hash))
     }
 
-    async fn broadcast_internal(&self, to: Address, calldata: Bytes) -> Result<TxHash, CmdError> {
+    async fn broadcast_internal(&self, to: Address, calldata: Bytes) -> Result<TxHash, String> {
         match &self.backend {
             TempoRpcBackend::Client(client) => {
                 sign_and_broadcast_tx(client, &self.signer, to, calldata)
                     .await
-                    .map_err(|e| CmdError::Server(format!("{e}")))
+                    .map_err(|e| e.to_string())
             }
+            #[cfg(test)]
             TempoRpcBackend::Mock(mock) => {
                 let active = mock.active_broadcasts.fetch_add(1, Ordering::SeqCst) + 1;
                 mock.max_concurrent_broadcasts
@@ -434,7 +337,10 @@ impl TempoSession {
                     .lock()
                     .unwrap()
                     .push((to, calldata.clone()));
-                let hash = alloy_primitives::keccak256(&calldata);
+                let nonce = mock.nonce.fetch_add(1, Ordering::SeqCst);
+                let mut data = calldata.to_vec();
+                data.extend_from_slice(&nonce.to_be_bytes());
+                let hash = alloy_primitives::keccak256(&data);
 
                 mock.active_broadcasts.fetch_sub(1, Ordering::SeqCst);
                 Ok(TxHash::from(hash))
@@ -442,12 +348,13 @@ impl TempoSession {
         }
     }
 
-    async fn wait_for_receipt_internal(&self, tx_hash: TxHash) -> Result<bool, CmdError> {
+    async fn wait_for_receipt_internal(&self, tx_hash: TxHash) -> Result<bool, String> {
         match &self.backend {
             TempoRpcBackend::Client(client) => client
-                .wait_for_receipt(tx_hash, self.receipt_timeout, self.poll_interval)
+                .wait_for_receipt(tx_hash, self.receipt_timeout, RECEIPT_POLL_INTERVAL)
                 .await
-                .map_err(|e| CmdError::Server(format!("{e}"))),
+                .map_err(|e| e.to_string()),
+            #[cfg(test)]
             TempoRpcBackend::Mock(mock) => {
                 let ok = mock
                     .receipts
@@ -455,88 +362,11 @@ impl TempoSession {
                     .unwrap()
                     .get(&tx_hash)
                     .copied()
-                    .unwrap_or_else(|| mock.default_receipt_status.load(Ordering::Relaxed));
+                    .unwrap_or(true);
                 Ok(ok)
             }
         }
     }
-}
-
-/// Helper function to decode standard 32-byte BE encoded U256 return values.
-fn decode_u256(bytes: &[u8], label: &str) -> Result<U256, CmdError> {
-    if bytes.len() < 32 {
-        return Err(CmdError::Decode(format!(
-            "{label} returned {} bytes, expected >=32",
-            bytes.len()
-        )));
-    }
-    Ok(U256::from_be_slice(&bytes[..32]))
-}
-
-/// Resolve the RPC URL and reqwest client from either an override or `/config/network`.
-pub async fn resolve_rpc_endpoint(
-    ctx: &Ctx,
-    override_url: Option<&str>,
-    target_chain_id: Option<i64>,
-) -> Result<(String, reqwest::Client), CmdError> {
-    if let Some(url) = override_url {
-        let network = match target_chain_id {
-            Some(id) => network_policy_for_chain_id(id as u64),
-            None => ctx.environment.network(),
-        };
-        validate_override_rpc_url(url, network, ctx.allow_custom_endpoints)?;
-        let http = if is_proxy_rpc_url(url, ctx.base_url()) {
-            ctx.client()?.http_client()
-        } else {
-            reqwest::Client::new()
-        };
-        return Ok((url.to_string(), http));
-    }
-
-    let client = ctx.client()?;
-    let cfg = client.fetch_network_config().await.map_err(|e| match e {
-        taskfast_client::Error::Auth(_) | taskfast_client::Error::Validation { .. } => {
-            CmdError::Server(format!("fetch network config from {}: {e}", ctx.base_url()))
-        }
-        other => CmdError::from(other),
-    })?;
-
-    let rpc_url = if let Some(target_id) = target_chain_id {
-        let (_name, entry) = cfg.entry_by_chain_id(target_id).map_err(|e| {
-            CmdError::Server(format!(
-                "deployment at {} does not advertise chain_id={target_id}: {e}",
-                ctx.base_url()
-            ))
-        })?;
-        if !is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
-            return Err(CmdError::Server(format!(
-                "deployment at {} returned rpc_url {:?} for chain_id {target_id}, which is not on the same host. \
-                 Refusing to route RPC traffic off-host.",
-                ctx.base_url(),
-                entry.rpc_url,
-            )));
-        }
-        entry.rpc_url.clone()
-    } else {
-        let name = ctx.environment.network().as_str();
-        let entry = cfg.entry(name).map_err(|e| {
-            CmdError::Server(format!(
-                "deployment at {} does not advertise network `{name}`: {e}",
-                ctx.base_url()
-            ))
-        })?;
-        if !is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
-            return Err(CmdError::Server(format!(
-                "deployment at {} returned rpc_url {:?} for network `{name}`, which is not on \
-                 the same host. Refusing to route RPC traffic off-host.",
-                ctx.base_url(),
-                entry.rpc_url,
-            )));
-        }
-        entry.rpc_url.clone()
-    };
-
-    Ok((rpc_url, client.http_client()))
 }
 
 #[cfg(test)]
@@ -556,14 +386,7 @@ mod tests {
         mock.set_balance(token, signer.address(), U256::from(5000));
         mock.set_allowance(token, signer.address(), spender, U256::from(1000));
 
-        let session = TempoSession::from_mock(
-            signer,
-            None,
-            mock,
-            42427,
-            Duration::from_secs(10),
-            Duration::from_millis(50),
-        );
+        let session = TempoSession::from_mock(signer, None, mock, Duration::from_secs(10));
 
         let bal = session
             .erc20_balance_of(token, session.address())
@@ -615,9 +438,7 @@ mod tests {
                 signer,
                 Some(keystore_file.clone()),
                 mock.clone(),
-                42427,
                 Duration::from_secs(5),
-                Duration::from_millis(10),
             );
 
             let handle = std::thread::spawn(move || {

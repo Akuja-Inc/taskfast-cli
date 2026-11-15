@@ -18,8 +18,7 @@
 //!
 //! `payload_to_sign` (despite its historical name) is **not** an ECDSA signing
 //! payload — it's the encoded ERC-20 `transfer` calldata. We wrap it in a
-//! replay-safe legacy tx and sign the transaction hash via
-//! [`taskfast_agent::tempo_rpc::sign_and_broadcast_erc20_transfer`].
+//! replay-safe legacy tx and broadcast via [`crate::tempo_session::TempoSession::send_transaction`].
 
 use std::path::PathBuf;
 
@@ -251,12 +250,12 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
 
     // Load signer only after prepare succeeds — avoids prompting the user for
     // a keystore password on a request that never leaves local validation.
-    let keystore_ref = super::wallet_args::resolve_keystore_ref(
+    let keystore_path = super::wallet_args::resolve_keystore_path(
         args.keystore.as_deref(),
         ctx.keystore_path.as_deref(),
     );
     let signer = super::wallet_args::load_signer_and_validate(
-        keystore_ref.as_deref(),
+        keystore_path.as_deref(),
         args.wallet_password_file.as_deref(),
         Some(&pre.wallet_address),
         "submission fee",
@@ -309,17 +308,11 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         prep.token_address, chain_id, rpc_url
     );
 
-    let keystore_path = super::wallet_args::resolve_keystore_path(
-        args.keystore.as_deref(),
-        ctx.keystore_path.as_deref(),
-    );
     let session = crate::tempo_session::TempoSession::new(
         signer,
         keystore_path,
         rpc,
-        chain_id,
         std::time::Duration::from_mins(1),
-        crate::tempo_session::RECEIPT_POLL_INTERVAL,
     );
 
     let tx_hash = session

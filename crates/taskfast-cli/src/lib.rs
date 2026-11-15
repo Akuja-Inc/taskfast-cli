@@ -21,7 +21,6 @@ pub mod wallet_lock;
 pub use config::Config;
 pub use envelope::{Envelope, ErrorPayload};
 pub use exit::ExitCode;
-pub use tempo_session::TempoSession;
 
 /// Re-exported from `main.rs` so tests can construct a [`cmd::Ctx`] with a
 /// named [`Environment`] without depending on the binary entry point.

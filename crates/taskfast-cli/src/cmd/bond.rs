@@ -222,18 +222,16 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
         .transpose()?;
 
     // 5. Load signer + preflight the wallet address.
-    let keystore_ref = super::wallet_args::resolve_keystore_ref(
+    let keystore_path = super::wallet_args::resolve_keystore_path(
         args.keystore.as_deref(),
         ctx.keystore_path.as_deref(),
     );
-    let expected_wallet = super::wallet_args::resolve_expected_wallet_address(
-        args.wallet_address.as_deref(),
-        ctx.wallet_address.as_deref(),
-    );
     let signer = super::wallet_args::load_signer_and_validate(
-        keystore_ref.as_deref(),
+        keystore_path.as_deref(),
         args.wallet_password_file.as_deref(),
-        expected_wallet,
+        args.wallet_address
+            .as_deref()
+            .or(ctx.wallet_address.as_deref()),
         "bond post",
     )?;
 
@@ -312,10 +310,6 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
         ));
     }
 
-    let keystore_path = super::wallet_args::resolve_keystore_path(
-        args.keystore.as_deref(),
-        ctx.keystore_path.as_deref(),
-    );
     let http = ctx.rpc_http_client(&client, &rpc_url);
     let rpc = TempoRpcClient::new(http, rpc_url.clone());
     let receipt_timeout = resolve_duration(
@@ -323,14 +317,8 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
         ctx.receipt_timeout,
         default_receipt_timeout(chain_id),
     );
-    let session = crate::tempo_session::TempoSession::new(
-        signer,
-        keystore_path,
-        rpc,
-        chain_id as u64,
-        receipt_timeout,
-        crate::tempo_session::RECEIPT_POLL_INTERVAL,
-    );
+    let session =
+        crate::tempo_session::TempoSession::new(signer, keystore_path, rpc, receipt_timeout);
 
     // Balance preflight always runs — independent of --skip-allowance-check,
     // which governs only the allowance + approve path — so an underfunded

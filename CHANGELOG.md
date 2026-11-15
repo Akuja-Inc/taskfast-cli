@@ -53,7 +53,7 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 ### Changed
 
 - **Deepen Tempo wallet signing and RPC broadcast session behind unified interface (gh#214).**
-  Introduced `TempoSession` in `taskfast-cli` which encapsulates keystore path resolution, password unlocking, address validation, RPC connection, automatic wallet locking, and receipt polling. Migrated `escrow`, `bond`, `escalate`, `settle`, `cast`, and `post` to the unified session, eliminating duplicate ERC-20 preflight logic (`balanceOf`, `allowance`, `approve`). Added an in-process `MockTempoRpc` backend for hermetic testing. Unified `resolve_wallet_password` in `init` with `wallet_args::resolve_password_with_inline` to enforce `Zeroizing<String>` memory safety and reject interior newlines.
+  Introduced `TempoSession` in `taskfast-cli` which encapsulates keystore path resolution, password unlocking, address validation, RPC connection, automatic wallet locking, and receipt polling. Migrated `escrow`, `bond`, `escalate`, `cast`, and `post` to the unified session, eliminating duplicate ERC-20 preflight logic (`balanceOf`, `allowance`, `approve`). Migrated `settle` keystore loading and preflight address validation to `wallet_args::load_signer_and_validate`. Added an in-process `MockTempoRpc` backend for hermetic testing. Unified `resolve_wallet_password` in `init` with `wallet_args::resolve_password_with_inline` to enforce `Zeroizing<String>` memory safety and reject interior newlines.
 
 - **`task retry-fee <id>` is now a redirect and makes no request.** Since
   2026-11-01 the server refuses a retry without the poster's fresh voucher, and

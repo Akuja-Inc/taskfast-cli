@@ -31,7 +31,10 @@ use clap::Parser;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{CmdError, CmdResult, Ctx};
+use super::{
+    is_proxy_rpc_url, network_policy_for_chain_id, validate_override_rpc_url, CmdError, CmdResult,
+    Ctx,
+};
 use crate::envelope::Envelope;
 
 use taskfast_agent::chain::{compute_escrow_id, EscrowIdParams, TaskEscrow};
@@ -218,18 +221,16 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         .transpose()?;
 
     // 6. Load signer + preflight address equality.
-    let keystore_ref = super::wallet_args::resolve_keystore_ref(
+    let keystore_path = super::wallet_args::resolve_keystore_path(
         args.keystore.as_deref(),
         ctx.keystore_path.as_deref(),
     );
-    let expected_wallet = super::wallet_args::resolve_expected_wallet_address(
-        args.wallet_address.as_deref(),
-        ctx.wallet_address.as_deref(),
-    );
     let signer = super::wallet_args::load_signer_and_validate(
-        keystore_ref.as_deref(),
+        keystore_path.as_deref(),
         args.wallet_password_file.as_deref(),
-        expected_wallet,
+        args.wallet_address
+            .as_deref()
+            .or(ctx.wallet_address.as_deref()),
         "escrow approval",
     )?;
 
@@ -294,12 +295,39 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     // server-returned escrow params). The proxy URL is sanity-checked to
     // live under the authenticated api_base — catches a misconfigured (or
     // malicious) deployment returning an off-host upstream.
-    let (rpc_url, http) = crate::tempo_session::resolve_rpc_endpoint(
-        ctx,
-        args.rpc_url.as_deref(),
-        Some(params.chain_id),
-    )
-    .await?;
+    let (rpc_url, _via_proxy) = if let Some(ref url) = args.rpc_url {
+        validate_override_rpc_url(
+            url,
+            network_policy_for_chain_id(chain_id_u64),
+            ctx.allow_custom_endpoints,
+        )?;
+        (url.clone(), false)
+    } else {
+        let cfg = client.fetch_network_config().await.map_err(|e| {
+            CmdError::Server(format!("fetch network config from {}: {e}", ctx.base_url()))
+        })?;
+        let (_name, entry) = cfg.entry_by_chain_id(params.chain_id).map_err(|e| {
+            CmdError::Server(format!(
+                "deployment at {} does not advertise chain_id={}: {e}",
+                ctx.base_url(),
+                params.chain_id
+            ))
+        })?;
+        // Same-host guard as post::resolve_proxy_rpc_url — the proxy may be mounted
+        // at any path on api_base (`/rpc/…` or `/api/rpc/…`); only the host
+        // must match so the API key never leaves the approved deployment.
+        if !is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
+            return Err(CmdError::Server(format!(
+                "deployment at {} returned rpc_url {:?} for chain_id={}, \
+                 which is not on the same host. Refusing to route RPC \
+                 traffic off-host.",
+                ctx.base_url(),
+                entry.rpc_url,
+                params.chain_id,
+            )));
+        }
+        (entry.rpc_url.clone(), true)
+    };
 
     if ctx.dry_run {
         return Ok(Envelope::success(
@@ -325,22 +353,13 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         ));
     }
 
-    let keystore_path = super::wallet_args::resolve_keystore_path(
-        args.keystore.as_deref(),
-        ctx.keystore_path.as_deref(),
-    );
+    let http = ctx.rpc_http_client(&client, &rpc_url);
     let rpc = TempoRpcClient::new(http, rpc_url);
     let default_timeout = crate::tempo_session::default_receipt_timeout_for_chain_id(chain_id_u64);
     let receipt_timeout =
         super::resolve_duration(args.receipt_timeout, ctx.receipt_timeout, default_timeout);
-    let session = crate::tempo_session::TempoSession::new(
-        signer,
-        keystore_path,
-        rpc,
-        chain_id_u64,
-        receipt_timeout,
-        crate::tempo_session::RECEIPT_POLL_INTERVAL,
-    );
+    let session =
+        crate::tempo_session::TempoSession::new(signer, keystore_path, rpc, receipt_timeout);
 
     // 10. Live RPC: allowance preflight + optional approve.
     //     TaskEscrow.open calls transferFrom for `deposit + platformFeeAmount` in a

@@ -58,19 +58,7 @@ use taskfast_agent::chain::{
     disputed_at_calldata, get_escrow_calldata, timeout_resolve_calldata, ESCROW_STATE_DISPUTED,
 };
 use taskfast_agent::tempo_rpc::TempoRpcClient;
-use taskfast_chains::tempo::TEMPO_MAINNET_CHAIN_ID;
 use taskfast_client::map_api_error;
-
-const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-/// Same client-operational tuning as `escrow sign`: 3min mainnet, 1min otherwise.
-fn default_receipt_timeout(chain_id: u64) -> Duration {
-    if chain_id == TEMPO_MAINNET_CHAIN_ID {
-        Duration::from_mins(3)
-    } else {
-        Duration::from_mins(1)
-    }
-}
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
@@ -266,18 +254,16 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     })?;
 
     // 2. Signer + guards 4 and 1.
-    let keystore_ref = super::wallet_args::resolve_keystore_ref(
+    let keystore_path = super::wallet_args::resolve_keystore_path(
         args.keystore.as_deref(),
         ctx.keystore_path.as_deref(),
     );
-    let expected_wallet = super::wallet_args::resolve_expected_wallet_address(
-        args.wallet_address.as_deref(),
-        ctx.wallet_address.as_deref(),
-    );
     let signer = super::wallet_args::load_signer_and_validate(
-        keystore_ref.as_deref(),
+        keystore_path.as_deref(),
         args.wallet_password_file.as_deref(),
-        expected_wallet,
+        args.wallet_address
+            .as_deref()
+            .or(ctx.wallet_address.as_deref()),
         "escrow dispute",
     )?;
     let mut warnings: Vec<SecurityWarning> = Vec::new();
@@ -395,23 +381,13 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             ),
         });
     }
-    let keystore_path = super::wallet_args::resolve_keystore_path(
-        args.keystore.as_deref(),
-        ctx.keystore_path.as_deref(),
-    );
     let receipt_timeout = super::resolve_duration(
         args.receipt_timeout,
         ctx.receipt_timeout,
-        default_receipt_timeout(chain_id_u64),
+        crate::tempo_session::default_receipt_timeout_for_chain_id(chain_id_u64),
     );
-    let session = crate::tempo_session::TempoSession::new(
-        signer,
-        keystore_path,
-        rpc,
-        node_chain,
-        receipt_timeout,
-        RECEIPT_POLL_INTERVAL,
-    );
+    let session =
+        crate::tempo_session::TempoSession::new(signer, keystore_path, rpc, receipt_timeout);
     let tx = session
         .send_transaction_and_wait(
             contract,
@@ -487,18 +463,16 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
 
     // 2. Signer + wallet-address preflight. Any wallet may send this call, so
     //    there is no "must be the worker" guard.
-    let keystore_ref = super::wallet_args::resolve_keystore_ref(
+    let keystore_path = super::wallet_args::resolve_keystore_path(
         args.keystore.as_deref(),
         ctx.keystore_path.as_deref(),
     );
-    let expected_wallet = super::wallet_args::resolve_expected_wallet_address(
-        args.wallet_address.as_deref(),
-        ctx.wallet_address.as_deref(),
-    );
     let signer = super::wallet_args::load_signer_and_validate(
-        keystore_ref.as_deref(),
+        keystore_path.as_deref(),
         args.wallet_password_file.as_deref(),
-        expected_wallet,
+        args.wallet_address
+            .as_deref()
+            .or(ctx.wallet_address.as_deref()),
         "escrow timeout-resolve",
     )?;
 
@@ -636,23 +610,13 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
     }
 
     // 5. Send.
-    let keystore_path = super::wallet_args::resolve_keystore_path(
-        args.keystore.as_deref(),
-        ctx.keystore_path.as_deref(),
-    );
     let receipt_timeout = super::resolve_duration(
         args.receipt_timeout,
         ctx.receipt_timeout,
-        default_receipt_timeout(chain_id_u64),
+        crate::tempo_session::default_receipt_timeout_for_chain_id(chain_id_u64),
     );
-    let session = crate::tempo_session::TempoSession::new(
-        signer,
-        keystore_path,
-        rpc,
-        chain_id_u64,
-        receipt_timeout,
-        RECEIPT_POLL_INTERVAL,
-    );
+    let session =
+        crate::tempo_session::TempoSession::new(signer, keystore_path, rpc, receipt_timeout);
     let tx = session
         .send_transaction_and_wait(
             contract,

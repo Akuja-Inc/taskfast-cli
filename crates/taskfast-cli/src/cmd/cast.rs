@@ -165,18 +165,16 @@ async fn send(ctx: &Ctx, args: SendArgs) -> CmdResult {
 
     // Load signer + preflight the wallet address before any network I/O —
     // same order as `bond post`, so `--dry-run` still validates the keystore.
-    let keystore_ref = super::wallet_args::resolve_keystore_ref(
+    let keystore_path = super::wallet_args::resolve_keystore_path(
         args.keystore.as_deref(),
         ctx.keystore_path.as_deref(),
     );
-    let expected_wallet = super::wallet_args::resolve_expected_wallet_address(
-        args.wallet_address.as_deref(),
-        ctx.wallet_address.as_deref(),
-    );
     let signer = super::wallet_args::load_signer_and_validate(
-        keystore_ref.as_deref(),
+        keystore_path.as_deref(),
         args.wallet_password_file.as_deref(),
-        expected_wallet,
+        args.wallet_address
+            .as_deref()
+            .or(ctx.wallet_address.as_deref()),
         "cast send transaction",
     )?;
 
@@ -195,10 +193,6 @@ async fn send(ctx: &Ctx, args: SendArgs) -> CmdResult {
         ));
     }
 
-    let keystore_path = super::wallet_args::resolve_keystore_path(
-        args.keystore.as_deref(),
-        ctx.keystore_path.as_deref(),
-    );
     let (rpc_url, http) = resolve_rpc(ctx, args.rpc_url.as_deref()).await?;
     let rpc = TempoRpcClient::new(http, rpc_url);
 
@@ -207,14 +201,8 @@ async fn send(ctx: &Ctx, args: SendArgs) -> CmdResult {
     let receipt_timeout =
         resolve_duration(args.receipt_timeout, ctx.receipt_timeout, default_timeout);
 
-    let session = crate::tempo_session::TempoSession::new(
-        signer,
-        keystore_path,
-        rpc,
-        0,
-        receipt_timeout,
-        crate::tempo_session::RECEIPT_POLL_INTERVAL,
-    );
+    let session =
+        crate::tempo_session::TempoSession::new(signer, keystore_path, rpc, receipt_timeout);
 
     let tx_hash = session
         .send_transaction_and_wait(to, calldata, "", None)

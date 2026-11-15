@@ -31,32 +31,16 @@ use super::CmdError;
 /// per process. Streaming subcommands could otherwise spam stderr.
 static PWD_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
-/// Resolve the keystore reference string from either CLI args or Ctx config.
-pub fn resolve_keystore_ref(
-    cli_keystore: Option<&str>,
-    ctx_keystore: Option<&Path>,
-) -> Option<String> {
-    cli_keystore
-        .map(str::to_string)
-        .or_else(|| ctx_keystore.and_then(|p| p.to_str().map(str::to_string)))
-}
-
 /// Resolve the clean PathBuf for the keystore, stripping any `file:` prefix.
 pub fn resolve_keystore_path(
     cli_keystore: Option<&str>,
     ctx_keystore: Option<&Path>,
 ) -> Option<PathBuf> {
-    let raw = resolve_keystore_ref(cli_keystore, ctx_keystore)?;
+    let raw = cli_keystore
+        .map(str::to_string)
+        .or_else(|| ctx_keystore.and_then(|p| p.to_str().map(str::to_string)))?;
     let path_str = raw.strip_prefix("file:").unwrap_or(&raw);
     Some(PathBuf::from(path_str))
-}
-
-/// Pick the expected wallet address: explicit CLI arg takes precedence over Ctx config.
-pub fn resolve_expected_wallet_address<'a>(
-    explicit: Option<&'a str>,
-    ctx: Option<&'a str>,
-) -> Option<&'a str> {
-    explicit.or(ctx)
 }
 
 /// Validate that the decrypted signer address matches an expected address string, if given.
@@ -78,39 +62,43 @@ pub fn validate_signer_address(
     Ok(())
 }
 
-/// Decrypt the keystore at `keystore_ref` and validate against the expected address.
+/// Decrypt the keystore at `keystore_path` and validate against the expected address.
 pub fn load_signer_and_validate(
-    keystore_ref: Option<&str>,
+    keystore_path: Option<&Path>,
     password_file: Option<&Path>,
     expected_address: Option<&str>,
     purpose: &str,
 ) -> Result<PrivateKeySigner, CmdError> {
-    let signer = load_signer(keystore_ref, password_file, purpose)?;
+    let signer = load_signer(keystore_path, password_file, purpose)?;
     validate_signer_address(signer.address(), expected_address)?;
     Ok(signer)
 }
 
-/// Decrypt the keystore at `keystore_ref` using the resolved password.
+/// Decrypt the keystore at `keystore_path` using the resolved password.
 ///
 /// `purpose` is interpolated into the "missing --keystore" usage error so the
 /// operator sees *which* flow demanded a signer (e.g. "submission fee",
 /// "settlement approval", "escrow approval").
 pub fn load_signer(
-    keystore_ref: Option<&str>,
+    keystore_path: Option<&Path>,
     password_file: Option<&Path>,
     purpose: &str,
 ) -> Result<PrivateKeySigner, CmdError> {
-    let raw = keystore_ref.ok_or_else(|| {
+    let path = keystore_path.ok_or_else(|| {
         CmdError::Usage(format!(
             "--keystore (or TEMPO_KEY_SOURCE) is required to sign the {purpose}"
         ))
     })?;
-    let path_str = raw.strip_prefix("file:").unwrap_or(raw);
     let password = resolve_password(password_file)?;
-    let path = PathBuf::from(path_str);
     // `&*password` narrows `Zeroizing<String>` → `&str` only at the
     // keystore boundary; the buffer zeroizes on drop at end of scope.
-    keystore::load(&KeySource::File { path }, &password).map_err(CmdError::from)
+    keystore::load(
+        &KeySource::File {
+            path: path.to_path_buf(),
+        },
+        &password,
+    )
+    .map_err(CmdError::from)
 }
 
 /// Resolve the keystore password with an optional interactive/prompted inline password.
@@ -122,6 +110,19 @@ pub fn load_signer(
 pub fn resolve_password_with_inline(
     inline_password: Option<&str>,
     password_file: Option<&Path>,
+) -> Result<Zeroizing<String>, CmdError> {
+    resolve_password_with_inline_and_missing_hint(
+        inline_password,
+        password_file,
+        "TASKFAST_WALLET_PASSWORD or --wallet-password-file required to unlock keystore",
+    )
+}
+
+/// Resolve password with inline precedence, using a custom missing-password message on failure.
+pub fn resolve_password_with_inline_and_missing_hint(
+    inline_password: Option<&str>,
+    password_file: Option<&Path>,
+    missing_msg: &str,
 ) -> Result<Zeroizing<String>, CmdError> {
     if let Some(pw) = inline_password {
         let trimmed = pw.trim_end_matches(['\n', '\r']);
@@ -135,31 +136,18 @@ pub fn resolve_password_with_inline(
             return Ok(Zeroizing::new(trimmed.to_string()));
         }
     }
-    resolve_password(password_file)
-}
-
-/// Resolve the keystore password: env var wins over file. Trims trailing
-/// `\r`/`\n` but rejects a file that is otherwise empty.
-///
-/// Wraps the secret in [`Zeroizing`] so the backing allocation is scrubbed
-/// on drop — reduces the in-memory window of the plaintext password within
-/// *our* address space. The scrypt derivation inside
-/// `alloy_signer_local::decrypt_keystore` copies the bytes into its own
-/// buffer we cannot control; this fix shrinks the CLI's copy scope.
-pub fn resolve_password(password_file: Option<&Path>) -> Result<Zeroizing<String>, CmdError> {
     if let Ok(pw) = std::env::var("TASKFAST_WALLET_PASSWORD") {
         if !pw.is_empty() {
             warn_pwd_env_once();
             return Ok(Zeroizing::new(pw));
         }
     }
-    let path = password_file.ok_or_else(|| {
-        CmdError::Usage(
-            "TASKFAST_WALLET_PASSWORD or --wallet-password-file required to unlock keystore".into(),
-        )
-    })?;
+    let path = password_file.ok_or_else(|| CmdError::Usage(missing_msg.into()))?;
     let raw = Zeroizing::new(std::fs::read_to_string(path).map_err(|e| {
-        CmdError::Usage(format!("read wallet password file {}: {e}", path.display()))
+        CmdError::Usage(format!(
+            "cannot read wallet password file {}: {e}",
+            path.display()
+        ))
     })?);
     let trimmed = raw.trim_end_matches(['\n', '\r']);
     if trimmed.is_empty() {
@@ -179,6 +167,12 @@ pub fn resolve_password(password_file: Option<&Path>) -> Result<Zeroizing<String
         )));
     }
     Ok(Zeroizing::new(trimmed.to_string()))
+}
+
+/// Resolve the keystore password: env var wins over file. Trims trailing
+/// `\r`/`\n` but rejects a file that is otherwise empty.
+pub fn resolve_password(password_file: Option<&Path>) -> Result<Zeroizing<String>, CmdError> {
+    resolve_password_with_inline(None, password_file)
 }
 
 /// Print the `TASKFAST_WALLET_PASSWORD` deprecation nudge to stderr once
@@ -316,11 +310,11 @@ mod tests {
     #[test]
     fn resolve_keystore_helpers() {
         assert_eq!(
-            resolve_keystore_ref(Some("file:/tmp/key.json"), None),
-            Some("file:/tmp/key.json".into())
+            resolve_keystore_path(Some("file:/tmp/key.json"), None),
+            Some(PathBuf::from("/tmp/key.json"))
         );
         assert_eq!(
-            resolve_keystore_path(Some("file:/tmp/key.json"), None),
+            resolve_keystore_path(Some("/tmp/key.json"), None),
             Some(PathBuf::from("/tmp/key.json"))
         );
         assert_eq!(
