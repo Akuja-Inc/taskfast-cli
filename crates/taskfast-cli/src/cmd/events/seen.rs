@@ -113,11 +113,8 @@ mod tests {
     use super::*;
 
     fn ctx_in(dir: &std::path::Path) -> Ctx {
-        let path = dir.join("config.json");
-        let store = StateStore::from_config_path(&path);
         Ctx {
-            config_path: path,
-            state_store: store,
+            config_path: dir.join("config.json"),
             quiet: true,
             ..Default::default()
         }

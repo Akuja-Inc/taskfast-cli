@@ -112,7 +112,12 @@ impl CursorState {
         let store = if env_disabled || sentinel {
             None
         } else {
-            Some(ctx.state_store())
+            let s = ctx.state_store();
+            if s.is_ephemeral() {
+                None
+            } else {
+                Some(s)
+            }
         };
 
         let request_cursor = match cursor_arg {
@@ -156,10 +161,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn ctx_with_config(path: PathBuf) -> Ctx {
-        let store = crate::state_store::StateStore::from_config_path(&path);
         Ctx {
             config_path: path,
-            state_store: store,
             ..Default::default()
         }
     }
@@ -181,11 +184,19 @@ mod tests {
     }
 
     #[test]
-    fn explicit_cursor_still_sent_when_dev_null() {
+    fn explicit_cursor_still_sent_when_persistence_unavailable() {
         let ctx = ctx_with_config(PathBuf::from("/dev/null"));
         let s = CursorState::resolve(Some("abc"), &ctx);
         assert_eq!(s.effective_cursor(), Some("abc"));
-        assert!(s.persistence_enabled());
+        assert!(!s.persistence_enabled());
+    }
+
+    #[test]
+    fn dev_null_config_disables_persistence() {
+        let ctx = ctx_with_config(PathBuf::from("/dev/null"));
+        let s = CursorState::resolve(None, &ctx);
+        assert_eq!(s.effective_cursor(), None);
+        assert!(!s.persistence_enabled());
     }
 
     #[test]
@@ -194,6 +205,7 @@ mod tests {
         let cfg = dir.path().join("config.json");
         let ctx = ctx_with_config(cfg);
         let s = CursorState::resolve(None, &ctx);
+        assert!(s.persistence_enabled());
         s.persist(Some("xyz")).unwrap();
         let s2 = CursorState::resolve(None, &ctx);
         assert_eq!(s2.effective_cursor(), Some("xyz"));

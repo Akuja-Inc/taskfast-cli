@@ -20,7 +20,7 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   Enforces atomic file creation with mode `0600` on Unix directly from creation, eliminating
   the momentary umask exposure window in `webhook register`. Automatically creates the `.taskfast/`
   directory with mode `0700` and provisions `.gitignore`. Decouples `events::seen` from `events::poll`
-  path internals, and provides an in-memory ephemeral adapter when `config_path` is `/dev/null`.
+  path internals.
 
 - **`escrow sign` accepts params without the approval-deadline fields (refs
   taskfast#2044).** `poster_approval_deadline` and `poster_approval_min_lifetime`

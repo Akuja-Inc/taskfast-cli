@@ -58,7 +58,7 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// Keys removed at schema v2. Loading a file that still carries any of
 /// these triggers [`ConfigError::LegacyFields`] so a stale config never
 /// silently misroutes traffic post-migration.
-pub const LEGACY_REMOVED_KEYS: &[&str] = &["api_base", "network"];
+const LEGACY_REMOVED_KEYS: &[&str] = &["api_base", "network"];
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -144,12 +144,6 @@ fn is_zero(v: &u32) -> bool {
     *v == 0
 }
 
-/// Drop a `.gitignore` of `*` into the config dir so its plaintext secrets
-/// (`api_key`, keystore path, webhook secret) can't be committed by accident.
-pub fn ensure_dir_gitignore(dir: &Path) {
-    crate::state_store::ensure_dir_gitignore(dir);
-}
-
 impl Config {
     /// Parse the JSON at `path`. Missing file → `Config::default()`
     /// (callers treat absence the same as an empty config). Newer
@@ -161,13 +155,81 @@ impl Config {
     /// (currently `api_base` and `network`). Stale values would otherwise
     /// silently outrank the `Environment`-derived defaults.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        crate::state_store::StateStore::from_config_path(path).load_config()
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(source) => {
+                return Err(ConfigError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        // Peek raw JSON before strict deserialization so the migration error
+        // wins over a generic parse error and so removed-key detection does
+        // not depend on `Config` carrying the field.
+        let raw: serde_json::Value =
+            serde_json::from_str(&src).map_err(|source| ConfigError::Parse {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if let Some(obj) = raw.as_object() {
+            let legacy: Vec<String> = LEGACY_REMOVED_KEYS
+                .iter()
+                .filter(|k| obj.contains_key(**k))
+                .map(|k| (*k).to_string())
+                .collect();
+            if !legacy.is_empty() {
+                return Err(ConfigError::LegacyFields {
+                    path: path.to_path_buf(),
+                    fields: legacy,
+                });
+            }
+        }
+        let cfg: Config = serde_json::from_value(raw).map_err(|source| ConfigError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if cfg.schema_version > CURRENT_SCHEMA_VERSION {
+            tracing::warn!(
+                file = %path.display(),
+                file_version = cfg.schema_version,
+                current_version = CURRENT_SCHEMA_VERSION,
+                "config schema_version is newer than this CLI — loading recognised fields only"
+            );
+        }
+        Ok(cfg)
     }
 
     /// Atomic write: JSON-serialize, chmod `0600` on unix from creation, rename into place.
     /// Creates the parent directory if it doesn't exist and tightens to `0700`.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
-        crate::state_store::StateStore::from_config_path(path).save_config(self)
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                crate::state_store::StateStore::ensure_dir_path(parent).map_err(|source| {
+                    ConfigError::Io {
+                        path: parent.to_path_buf(),
+                        source,
+                    }
+                })?;
+            }
+        }
+        let mut to_write = self.clone();
+        if to_write.schema_version == 0 {
+            to_write.schema_version = CURRENT_SCHEMA_VERSION;
+        }
+        let body = serde_json::to_vec_pretty(&to_write).map_err(|source| ConfigError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+        crate::state_store::StateStore::atomic_write_file(path, &body).map_err(|source| {
+            ConfigError::Io {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+        Ok(())
     }
 
     /// Default file path, rooted in the caller's current working
