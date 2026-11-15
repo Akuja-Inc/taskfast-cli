@@ -32,17 +32,8 @@ use super::{
     is_proxy_rpc_url, resolve_duration, validate_override_rpc_url, CmdError, CmdResult, Ctx,
 };
 use crate::envelope::Envelope;
-use crate::Network;
 
-use taskfast_agent::tempo_rpc::{sign_and_broadcast_tx, TempoRpcClient};
-
-/// Receipt polling for `cast send` — network-aware defaults matching
-/// `escrow sign` / `bond post` (3min mainnet, 1min testnet), resolved from
-/// the env's compile-time network rather than a config fetch so the
-/// `--rpc-url` override path needs no API round-trip.
-const DEFAULT_RECEIPT_TIMEOUT_MAINNET: Duration = Duration::from_mins(3);
-const DEFAULT_RECEIPT_TIMEOUT_TESTNET: Duration = Duration::from_mins(1);
-const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+use taskfast_agent::tempo_rpc::TempoRpcClient;
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
@@ -174,31 +165,18 @@ async fn send(ctx: &Ctx, args: SendArgs) -> CmdResult {
 
     // Load signer + preflight the wallet address before any network I/O —
     // same order as `bond post`, so `--dry-run` still validates the keystore.
-    let keystore_ref = args.keystore.as_deref().map(str::to_string).or_else(|| {
-        ctx.keystore_path
-            .as_deref()
-            .and_then(|p| p.to_str().map(str::to_string))
-    });
-    let signer = super::wallet_args::load_signer(
-        keystore_ref.as_deref(),
+    let keystore_path = super::wallet_args::resolve_keystore_path(
+        args.keystore.as_deref(),
+        ctx.keystore_path.as_deref(),
+    );
+    let signer = super::wallet_args::load_signer_and_validate(
+        keystore_path.as_deref(),
         args.wallet_password_file.as_deref(),
+        args.wallet_address
+            .as_deref()
+            .or(ctx.wallet_address.as_deref()),
         "cast send transaction",
     )?;
-    let wallet_address_for_check = args
-        .wallet_address
-        .as_deref()
-        .or(ctx.wallet_address.as_deref());
-    if let Some(expected) = wallet_address_for_check {
-        let expected_addr: Address = expected.parse().map_err(|e| {
-            CmdError::Usage(format!("--wallet-address is not a valid EVM address: {e}"))
-        })?;
-        if signer.address() != expected_addr {
-            return Err(CmdError::Usage(format!(
-                "keystore address {:#x} does not match --wallet-address {expected}",
-                signer.address(),
-            )));
-        }
-    }
 
     if ctx.dry_run {
         validate_dry_run_override(ctx, args.rpc_url.as_deref())?;
@@ -218,25 +196,17 @@ async fn send(ctx: &Ctx, args: SendArgs) -> CmdResult {
     let (rpc_url, http) = resolve_rpc(ctx, args.rpc_url.as_deref()).await?;
     let rpc = TempoRpcClient::new(http, rpc_url);
 
-    let default_timeout = match ctx.environment.network() {
-        Network::Mainnet => DEFAULT_RECEIPT_TIMEOUT_MAINNET,
-        Network::Testnet => DEFAULT_RECEIPT_TIMEOUT_TESTNET,
-    };
+    let default_timeout =
+        crate::tempo_session::default_receipt_timeout_for_network(ctx.environment.network());
     let receipt_timeout =
         resolve_duration(args.receipt_timeout, ctx.receipt_timeout, default_timeout);
 
-    let tx_hash = sign_and_broadcast_tx(&rpc, &signer, to, calldata)
-        .await
-        .map_err(|e| CmdError::Server(format!("broadcast failed: {e}")))?;
-    let ok = rpc
-        .wait_for_receipt(tx_hash, receipt_timeout, RECEIPT_POLL_INTERVAL)
-        .await
-        .map_err(|e| CmdError::Server(format!("receipt: {e}")))?;
-    if !ok {
-        return Err(CmdError::Server(format!(
-            "tx {tx_hash:#x} reverted on-chain"
-        )));
-    }
+    let session =
+        crate::tempo_session::TempoSession::new(signer, keystore_path, rpc, receipt_timeout);
+
+    let tx_hash = session
+        .send_transaction_and_wait(to, calldata, "", None)
+        .await?;
 
     Ok(Envelope::success(
         ctx.environment,
@@ -245,7 +215,7 @@ async fn send(ctx: &Ctx, args: SendArgs) -> CmdResult {
             "action": "sent",
             "to": format!("{to:#x}"),
             "sig": args.sig,
-            "from": format!("{:#x}", signer.address()),
+            "from": format!("{:#x}", session.address()),
             "tx_hash": format!("{tx_hash:#x}"),
         }),
     ))

@@ -3,7 +3,7 @@
 //!
 //! Two wiremock servers: one for the TaskFast API (draft prepare + submit),
 //! one for the Tempo JSON-RPC. The happy path wires them together through
-//! the real `sign_and_broadcast_erc20_transfer` path so any regression in
+//! the real `TempoSession::send_transaction` path so any regression in
 //! tempo_rpc (nonce tag, RLP encoding) surfaces here too.
 
 use alloy_signer_local::PrivateKeySigner;

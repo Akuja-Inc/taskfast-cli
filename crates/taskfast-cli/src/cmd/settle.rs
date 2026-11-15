@@ -183,39 +183,21 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     })?;
     let deadline = U256::from(deadline_unix);
 
-    // 6. Load keystore. Bead spec calls for the signature to appear in the
-    //    dry-run envelope, so we sign even in dry-run and never short-circuit
-    //    before keystore resolution.
-    let keystore_ref = args.keystore.as_deref().map(str::to_string).or_else(|| {
-        ctx.keystore_path
-            .as_deref()
-            .and_then(|p| p.to_str().map(str::to_string))
-    });
-    let signer = super::wallet_args::load_signer(
-        keystore_ref.as_deref(),
+    // 6. Load keystore and validate --wallet-address preflight.
+    //    Bead spec calls for the signature to appear in the dry-run envelope,
+    //    so we sign even in dry-run and never short-circuit before keystore resolution.
+    let keystore_path = super::wallet_args::resolve_keystore_path(
+        args.keystore.as_deref(),
+        ctx.keystore_path.as_deref(),
+    );
+    let signer = super::wallet_args::load_signer_and_validate(
+        keystore_path.as_deref(),
         args.wallet_password_file.as_deref(),
+        args.wallet_address
+            .as_deref()
+            .or(ctx.wallet_address.as_deref()),
         "settlement approval",
     )?;
-
-    // 7. Optional preflight: keystore must match --wallet-address if given.
-    //    Without this, a mismatch surfaces as a server 422 after the full
-    //    round-trip (including the get_task + readiness calls above).
-    let wallet_address_for_check = args
-        .wallet_address
-        .as_deref()
-        .or(ctx.wallet_address.as_deref());
-    if let Some(expected) = wallet_address_for_check {
-        let expected_addr: Address = expected.parse().map_err(|e| {
-            CmdError::Usage(format!("--wallet-address is not a valid EVM address: {e}"))
-        })?;
-        if signer.address() != expected_addr {
-            return Err(CmdError::Usage(format!(
-                "keystore address {:#x} does not match --wallet-address {}",
-                signer.address(),
-                expected
-            )));
-        }
-    }
 
     // 8. Sign the DistributionApproval. `sign_distribution` returns the
     //    132-char 0x-prefixed `r||s||v` shape the server's verifier expects.

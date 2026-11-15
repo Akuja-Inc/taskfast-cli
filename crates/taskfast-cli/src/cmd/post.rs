@@ -18,8 +18,7 @@
 //!
 //! `payload_to_sign` (despite its historical name) is **not** an ECDSA signing
 //! payload — it's the encoded ERC-20 `transfer` calldata. We wrap it in a
-//! replay-safe legacy tx and sign the transaction hash via
-//! [`taskfast_agent::tempo_rpc::sign_and_broadcast_erc20_transfer`].
+//! replay-safe legacy tx and broadcast via [`crate::tempo_session::TempoSession::send_transaction`].
 
 use std::path::PathBuf;
 
@@ -31,7 +30,7 @@ use uuid::Uuid;
 use super::{is_proxy_rpc_url, validate_override_rpc_url, CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
-use taskfast_agent::tempo_rpc::{sign_and_broadcast_erc20_transfer, TempoRpcClient};
+use taskfast_agent::tempo_rpc::TempoRpcClient;
 use taskfast_chains::tempo::{is_allowed_fee_token, is_known_network};
 use taskfast_client::api::types::{
     CompletionCriterionInput, TaskDraftPrepareRequest, TaskDraftPrepareRequestAssignmentType,
@@ -251,30 +250,16 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
 
     // Load signer only after prepare succeeds — avoids prompting the user for
     // a keystore password on a request that never leaves local validation.
-    let keystore_ref = args.keystore.as_deref().map(str::to_string).or_else(|| {
-        ctx.keystore_path
-            .as_deref()
-            .and_then(|p| p.to_str().map(str::to_string))
-    });
-    let signer = super::wallet_args::load_signer(
-        keystore_ref.as_deref(),
+    let keystore_path = super::wallet_args::resolve_keystore_path(
+        args.keystore.as_deref(),
+        ctx.keystore_path.as_deref(),
+    );
+    let signer = super::wallet_args::load_signer_and_validate(
+        keystore_path.as_deref(),
         args.wallet_password_file.as_deref(),
+        Some(&pre.wallet_address),
         "submission fee",
     )?;
-    // Sanity: the wallet address in the draft must match what we're signing
-    // with. A mismatch means the server recorded a charge on a wallet we
-    // don't control, which would poll forever.
-    let parsed_wallet_address = pre
-        .wallet_address
-        .parse::<Address>()
-        .map_err(|_| CmdError::Usage(format!("invalid wallet address: {}", pre.wallet_address)))?;
-    if signer.address() != parsed_wallet_address {
-        return Err(CmdError::Usage(format!(
-            "keystore address {:#x} does not match --wallet-address {}",
-            signer.address(),
-            pre.wallet_address
-        )));
-    }
 
     // Pick the http client by URL, not by resolution branch: any URL
     // landing on `{api_base}/rpc/` is the authenticated proxy and
@@ -323,24 +308,16 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         prep.token_address, chain_id, rpc_url
     );
 
-    // F9: serialize nonce-consuming sign+broadcast per wallet. `_guard`
-    // holds the exclusive file lock from here until function return,
-    // which scope-covers both eth_getTransactionCount (inside
-    // sign_and_broadcast_erc20_transfer) and eth_sendRawTransaction.
-    // Locked on the keystore path (stripping the optional `file:` prefix
-    // that `taskfast init` writes) so two processes sharing a keystore
-    // can't race, while distinct wallets proceed in parallel.
-    let _guard = if let Some(ref raw) = keystore_ref {
-        let path_str = raw.strip_prefix("file:").unwrap_or(raw);
-        Some(crate::wallet_lock::acquire(std::path::Path::new(path_str))?)
-    } else {
-        None
-    };
+    let session = crate::tempo_session::TempoSession::new(
+        signer,
+        keystore_path,
+        rpc,
+        std::time::Duration::from_mins(1),
+    );
 
-    let tx_hash =
-        sign_and_broadcast_erc20_transfer(&rpc, &signer, token_address, Bytes::from(calldata))
-            .await
-            .map_err(|e| CmdError::Server(format!("tempo rpc: {e}")))?;
+    let tx_hash = session
+        .send_transaction(token_address, Bytes::from(calldata))
+        .await?;
     let tx_hash_hex = format!("{tx_hash:#x}");
 
     // Phase 2 — submit voucher. The field is named `signature` for historical

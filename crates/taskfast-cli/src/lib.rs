@@ -14,6 +14,7 @@ pub mod cmd;
 pub mod config;
 pub mod envelope;
 pub mod exit;
+pub mod tempo_session;
 pub mod trace;
 pub mod wallet_lock;
 
