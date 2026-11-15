@@ -9,6 +9,8 @@
 //! bootstrap-layer invariant that can't fall through to the client's error
 //! machinery — it gates a successful 201 response.
 
+#![allow(deprecated)]
+
 use taskfast_agent::bootstrap::{
     create_agent_headless, get_readiness, register_wallet, validate_auth, WalletRegistration,
 };

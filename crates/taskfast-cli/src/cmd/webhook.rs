@@ -109,6 +109,65 @@ pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
     }
 }
 
+/// Result of multi-step webhook provisioning (PUT /webhooks, secret persistence, PUT /subscriptions).
+#[derive(Debug, Clone)]
+pub struct WebhookProvisionOutcome {
+    pub url: String,
+    pub secret_returned: bool,
+    pub secret_persisted: bool,
+    pub secret_file: Option<PathBuf>,
+    pub subscribed: Option<Vec<String>>,
+}
+
+/// Orchestrate the multi-step webhook provisioning flow:
+/// 1. Configure the webhook endpoint via `PUT /agents/me/webhooks`.
+/// 2. Persist the returned secret (if any and if path provided) via `persist_secret` with mode 0600.
+/// 3. Replace subscriptions via `PUT /agents/me/webhooks/subscriptions` if non-empty events provided.
+pub async fn provision_webhook(
+    client: &taskfast_client::TaskFastClient,
+    url: &str,
+    secret_file: Option<&std::path::Path>,
+    events: &[String],
+) -> Result<WebhookProvisionOutcome, CmdError> {
+    let body = WebhookConfigRequest {
+        url: url.to_string(),
+        secret: None,
+        // Per spec, `events` here is informational — the server tracks
+        // subscriptions independently via the /subscriptions endpoint.
+        // Left empty on PUT so re-registering the URL doesn't clobber
+        // a carefully-curated subscription list.
+        events: None,
+    };
+    let cfg = webhooks::configure_webhook(client, &body)
+        .await
+        .map_err(CmdError::from)?;
+
+    let secret_persisted = match (cfg.secret.as_deref(), secret_file) {
+        (Some(secret), Some(path)) => {
+            persist_secret(path, secret)?;
+            true
+        }
+        _ => false,
+    };
+
+    let subscribed = if events.is_empty() {
+        None
+    } else {
+        let subs = webhooks::update_subscriptions(client, events.to_vec())
+            .await
+            .map_err(CmdError::from)?;
+        Some(subs.subscribed_event_types)
+    };
+
+    Ok(WebhookProvisionOutcome {
+        url: cfg.url,
+        secret_returned: cfg.secret.is_some(),
+        secret_persisted,
+        secret_file: secret_file.map(std::path::Path::to_path_buf),
+        subscribed,
+    })
+}
+
 async fn register(ctx: &Ctx, args: RegisterArgs) -> CmdResult {
     if args.url.trim().is_empty() {
         return Err(CmdError::Usage("--url must not be empty".into()));
@@ -128,53 +187,27 @@ async fn register(ctx: &Ctx, args: RegisterArgs) -> CmdResult {
     }
 
     let client = ctx.client()?;
-    let body = WebhookConfigRequest {
-        url: args.url.clone(),
-        secret: None,
-        // Per spec, `events` here is informational — the server tracks
-        // subscriptions independently via the /subscriptions endpoint.
-        // Left empty on PUT so re-registering the URL doesn't clobber
-        // a carefully-curated subscription list.
-        events: None,
-    };
-    let cfg = webhooks::configure_webhook(&client, &body)
-        .await
-        .map_err(CmdError::from)?;
-
-    let secret_persisted = match (cfg.secret.as_deref(), args.secret_file.as_ref()) {
-        (Some(secret), Some(path)) => {
-            persist_secret(path, secret)?;
-            true
-        }
-        _ => false,
-    };
-
-    // Optional one-shot subscription. Silent no-op when --event not
-    // supplied so `register` stays single-purpose.
-    let subscription = if args.events.is_empty() {
-        None
-    } else {
-        let subs = webhooks::update_subscriptions(&client, args.events.clone())
-            .await
-            .map_err(CmdError::from)?;
-        Some(json!({
-            "subscribed": subs.subscribed_event_types,
-            "available": subs.available_event_types,
-        }))
-    };
+    let outcome = provision_webhook(
+        &client,
+        &args.url,
+        args.secret_file.as_deref(),
+        &args.events,
+    )
+    .await?;
 
     let mut data = json!({
         "action": "registered",
-        "url": cfg.url,
-        "events": cfg.events,
-        "secret_returned": cfg.secret.is_some(),
-        "secret_persisted": secret_persisted,
+        "url": outcome.url,
+        "secret_returned": outcome.secret_returned,
+        "secret_persisted": outcome.secret_persisted,
     });
-    if let Some(path) = args.secret_file.as_ref() {
+    if let Some(path) = outcome.secret_file.as_ref() {
         data["secret_file"] = json!(path.display().to_string());
     }
-    if let Some(s) = subscription {
-        data["subscription"] = s;
+    if let Some(subscribed) = outcome.subscribed {
+        data["subscription"] = json!({
+            "subscribed": subscribed,
+        });
     }
     Ok(Envelope::success(ctx.environment, ctx.dry_run, data))
 }

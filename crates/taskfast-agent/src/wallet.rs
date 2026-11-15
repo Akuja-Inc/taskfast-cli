@@ -27,6 +27,18 @@ use taskfast_client::api::types::{
 use taskfast_client::{map_api_error, Error, Result, TaskFastClient};
 use tokio::time::{sleep, Instant};
 
+/// Outcome of `POST /agents/me/wallet`. Idempotent re-registration surfaces
+/// as [`WalletRegistration::AlreadyConfigured`] so callers can treat
+/// it as success without branching on a typed `Error`.
+#[derive(Debug)]
+pub enum WalletRegistration {
+    /// 200 happy path — full wallet envelope returned by the server.
+    Configured(WalletSetupResponse),
+    /// 409 `wallet_already_configured` — server has no body to return; caller
+    /// already has a wallet on file.
+    AlreadyConfigured,
+}
+
 /// Generate a fresh secp256k1 signer via `alloy_signer_local`.
 ///
 /// The returned [`PrivateKeySigner`] owns the only copy of the private key;
@@ -40,10 +52,12 @@ pub fn generate_signer() -> PrivateKeySigner {
 /// The address string is validated against the 0x+40-hex pattern *before*
 /// the HTTP call via the generated newtype, so a bad address fails locally
 /// as [`Error::Validation`] rather than surfacing as a 422 after a round-trip.
-pub async fn register_wallet(
-    client: &TaskFastClient,
-    address: &str,
-) -> Result<WalletSetupResponse> {
+///
+/// 200 returns [`WalletRegistration::Configured`]. 409 `wallet_already_configured`
+/// is promoted to [`WalletRegistration::AlreadyConfigured`] so callers can
+/// treat re-registration as success without reparsing `Error::Validation`.
+/// Every other failure propagates through `map_api_error` unchanged.
+pub async fn register_wallet(client: &TaskFastClient, address: &str) -> Result<WalletRegistration> {
     let validated =
         WalletSetupRequestTempoWalletAddress::try_from(address).map_err(|e| Error::Validation {
             code: "invalid_wallet_address".into(),
@@ -53,8 +67,13 @@ pub async fn register_wallet(
         tempo_wallet_address: validated,
     };
     match client.inner().register_agent_wallet(&body).await {
-        Ok(v) => Ok(v.into_inner()),
-        Err(e) => Err(map_api_error(e).await),
+        Ok(v) => Ok(WalletRegistration::Configured(v.into_inner())),
+        Err(e) => match map_api_error(e).await {
+            Error::Validation { code, .. } if code == "wallet_already_configured" => {
+                Ok(WalletRegistration::AlreadyConfigured)
+            }
+            other => Err(other),
+        },
     }
 }
 

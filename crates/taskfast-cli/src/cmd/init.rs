@@ -69,11 +69,8 @@ use taskfast_agent::bootstrap::{create_agent_headless, get_readiness, validate_a
 use taskfast_agent::faucet::{request_testnet_funds, FaucetDrop};
 use taskfast_agent::keystore;
 use taskfast_agent::wallet;
-use taskfast_agent::webhooks;
-use taskfast_client::api::types::{AgentCreateRequest, AgentReadiness, WebhookConfigRequest};
+use taskfast_client::api::types::{AgentCreateRequest, AgentReadiness};
 use taskfast_client::TaskFastClient;
-
-use super::webhook::persist_secret;
 
 /// Wallet status string emitted by the server when the agent hasn't
 /// registered one yet. `AgentReadinessChecks.wallet.status == "complete"`
@@ -660,12 +657,18 @@ async fn provision_wallet(
         if dry_run {
             return Ok(WalletOutcome::Skipped);
         }
-        wallet::register_wallet(client, addr)
+        return match wallet::register_wallet(client, addr)
             .await
-            .map_err(CmdError::from)?;
-        return Ok(WalletOutcome::ByoRegistered {
-            address: addr.to_string(),
-        });
+            .map_err(CmdError::from)?
+        {
+            wallet::WalletRegistration::Configured(_) => Ok(WalletOutcome::ByoRegistered {
+                address: addr.to_string(),
+            }),
+            wallet::WalletRegistration::AlreadyConfigured => Err(CmdError::Validation {
+                code: "wallet_already_configured".into(),
+                message: "agent already has a tempo wallet configured".into(),
+            }),
+        };
     }
     if !args.generate_wallet {
         return Err(CmdError::Usage(
@@ -684,13 +687,23 @@ async fn provision_wallet(
 
     let password = resolve_wallet_password(args)?;
     let keystore_path = persist_keystore(&signer, args, &password)?;
-    wallet::register_wallet(client, &address)
-        .await
-        .map_err(CmdError::from)?;
-    Ok(WalletOutcome::Generated {
-        address,
-        keystore_path,
-    })
+    match wallet::register_wallet(client, &address).await {
+        Ok(wallet::WalletRegistration::Configured(_)) => Ok(WalletOutcome::Generated {
+            address,
+            keystore_path,
+        }),
+        Ok(wallet::WalletRegistration::AlreadyConfigured) => {
+            let _ = std::fs::remove_file(&keystore_path);
+            Err(CmdError::Validation {
+                code: "wallet_already_configured".into(),
+                message: "agent already has a tempo wallet configured".into(),
+            })
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&keystore_path);
+            Err(CmdError::from(e))
+        }
+    }
 }
 
 fn resolve_wallet_password(args: &Args) -> Result<zeroize::Zeroizing<String>, CmdError> {
@@ -937,48 +950,24 @@ async fn maybe_configure_webhook(
             secret_file: args.webhook_secret_file.clone(),
         };
     }
-    let body = WebhookConfigRequest {
-        url: url.to_string(),
-        secret: None,
-        events: None,
-    };
-    let cfg = match webhooks::configure_webhook(client, &body).await {
-        Ok(c) => c,
-        Err(e) => {
-            return WebhookOutcome::Failed {
-                error: e.to_string(),
-            };
-        }
-    };
-    let secret_persisted = match (cfg.secret.as_deref(), args.webhook_secret_file.as_ref()) {
-        (Some(secret), Some(path)) => match persist_secret(path, secret) {
-            Ok(()) => true,
-            Err(e) => {
-                return WebhookOutcome::Failed {
-                    error: e.to_string(),
-                };
-            }
+    match crate::cmd::webhook::provision_webhook(
+        client,
+        url,
+        args.webhook_secret_file.as_deref(),
+        &events,
+    )
+    .await
+    {
+        Ok(outcome) => WebhookOutcome::Registered {
+            url: outcome.url,
+            secret_returned: outcome.secret_returned,
+            secret_persisted: outcome.secret_persisted,
+            secret_file: outcome.secret_file,
+            subscribed: outcome.subscribed,
         },
-        _ => false,
-    };
-    let subscribed = if events.is_empty() {
-        None
-    } else {
-        match webhooks::update_subscriptions(client, events).await {
-            Ok(subs) => Some(subs.subscribed_event_types),
-            Err(e) => {
-                return WebhookOutcome::Failed {
-                    error: e.to_string(),
-                };
-            }
-        }
-    };
-    WebhookOutcome::Registered {
-        url: cfg.url,
-        secret_returned: cfg.secret.is_some(),
-        secret_persisted,
-        secret_file: args.webhook_secret_file.clone(),
-        subscribed,
+        Err(e) => WebhookOutcome::Failed {
+            error: e.to_string(),
+        },
     }
 }
 

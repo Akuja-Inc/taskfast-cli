@@ -146,6 +146,148 @@ async fn byow_happy_path_registers_wallet_and_writes_env_file() {
 }
 
 #[tokio::test]
+async fn byow_409_already_configured_returns_validation_error() {
+    let server = MockServer::start().await;
+    mount_profile_active(&server).await;
+    mount_readiness(&server, "missing", false).await;
+
+    Mock::given(method("POST"))
+        .and(path("/agents/me/wallet"))
+        .and(body_partial_json(json!({
+            "tempo_wallet_address": BYOW_ADDRESS,
+        })))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "wallet_already_configured",
+            "message": "agent already has a tempo wallet configured",
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let cfg_path = config_path_in(tmp.path());
+    let mut args = base_args();
+    args.wallet_address = Some(BYOW_ADDRESS.to_string());
+
+    let err = run(
+        &ctx_for(&server, Some("test-key"), cfg_path.clone(), false),
+        args,
+    )
+    .await
+    .expect_err("409 wallet_already_configured with explicit address must error");
+
+    match err {
+        CmdError::Validation { code, .. } => {
+            assert_eq!(code, "wallet_already_configured");
+        }
+        other => panic!("expected Validation error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn generate_wallet_409_already_configured_returns_validation_error_and_cleans_up() {
+    let server = MockServer::start().await;
+    mount_profile_active(&server).await;
+    mount_readiness(&server, "missing", false).await;
+
+    Mock::given(method("POST"))
+        .and(path("/agents/me/wallet"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "wallet_already_configured",
+            "message": "agent already has a tempo wallet configured",
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let cfg_path = config_path_in(tmp.path());
+    let pw_path = tmp.path().join("pw");
+    fs::write(&pw_path, "s3kret\n").unwrap();
+    let keystore_path = tmp.path().join("wallet.json");
+
+    let mut args = base_args();
+    args.generate_wallet = true;
+    args.wallet_password_file = Some(pw_path);
+    args.keystore_path = Some(keystore_path.clone());
+
+    let err = run(
+        &ctx_for(&server, Some("test-key"), cfg_path.clone(), false),
+        args,
+    )
+    .await
+    .expect_err("409 wallet_already_configured with generate_wallet must error");
+
+    match err {
+        CmdError::Validation { code, .. } => {
+            assert_eq!(code, "wallet_already_configured");
+        }
+        other => panic!("expected Validation error, got {other:?}"),
+    }
+    assert!(
+        !keystore_path.exists(),
+        "keystore must be cleaned up on failed registration"
+    );
+}
+
+#[tokio::test]
+async fn init_provisions_webhook_and_subscriptions_end_to_end() {
+    let server = MockServer::start().await;
+    mount_profile_active(&server).await;
+    mount_readiness(&server, "complete", false).await;
+
+    Mock::given(method("PUT"))
+        .and(path("/agents/me/webhooks"))
+        .and(body_partial_json(json!({
+            "url": "https://example.com/init-hook",
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "created_at": "2026-04-13T00:00:00Z",
+            "updated_at": "2026-04-13T00:00:00Z",
+            "url": "https://example.com/init-hook",
+            "events": ["task_assigned"],
+            "secret": "whsec_first_time_only",
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("PUT"))
+        .and(path("/agents/me/webhooks/subscriptions"))
+        .and(body_partial_json(json!({
+            "subscribed_event_types": ["task_assigned"],
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "available_event_types": ["task_assigned", "bid_accepted"],
+            "subscribed_event_types": ["task_assigned"],
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let secret_file = tmp.path().join("hook.secret");
+    let mut args = base_args();
+    args.skip_wallet = true;
+    args.webhook_url = Some("https://example.com/init-hook".into());
+    args.webhook_secret_file = Some(secret_file.clone());
+    args.webhook_events = vec!["task_assigned".into()];
+
+    let envelope = run(
+        &ctx_for(&server, Some("test-key"), config_path_in(tmp.path()), false),
+        args,
+    )
+    .await
+    .expect("init with webhook provisioning must succeed");
+
+    let v = envelope_value(&envelope);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["webhook"]["status"], "registered");
+    assert_eq!(v["data"]["webhook"]["secret_returned"], true);
+    assert_eq!(v["data"]["webhook"]["secret_persisted"], true);
+    assert_eq!(v["data"]["webhook"]["subscribed"], json!(["task_assigned"]));
+
+    let secret_contents = std::fs::read_to_string(&secret_file).unwrap();
+    assert_eq!(secret_contents, "whsec_first_time_only");
+}
+
+#[tokio::test]
 async fn skips_wallet_when_server_already_has_one() {
     let server = MockServer::start().await;
     mount_profile_active(&server).await;

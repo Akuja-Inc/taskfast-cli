@@ -16,22 +16,9 @@
 //! only credential the caller will ever see.
 
 use taskfast_client::api::types::{
-    AgentCreateRequest, AgentCreateResponse, AgentProfile, AgentReadiness, WalletSetupRequest,
-    WalletSetupResponse,
+    AgentCreateRequest, AgentCreateResponse, AgentProfile, AgentReadiness,
 };
 use taskfast_client::{map_api_error, Error, Result, TaskFastClient};
-
-/// Outcome of `POST /agents/me/wallet`. Idempotent re-registration surfaces
-/// as [`WalletRegistration::AlreadyConfigured`] so init-style flows can treat
-/// it as success without branching on a typed `Error`.
-#[derive(Debug)]
-pub enum WalletRegistration {
-    /// 200 happy path — full wallet envelope returned by the server.
-    Configured(WalletSetupResponse),
-    /// 409 `wallet_already_configured` — server has no body to return; caller
-    /// already has a wallet on file.
-    AlreadyConfigured,
-}
 
 /// `GET /agents/me` — confirms the API key resolves to an active agent.
 ///
@@ -66,28 +53,6 @@ pub async fn create_agent_headless(
     }
 }
 
-/// `POST /agents/me/wallet` — bind a Tempo wallet address to the agent.
-///
-/// 200 returns the full envelope. 409 `wallet_already_configured` is promoted
-/// to [`WalletRegistration::AlreadyConfigured`] so init-style callers can
-/// treat re-registration as success without reparsing `Error::Validation`.
-/// Every other failure propagates through `map_api_error` unchanged —
-/// including 422 for pattern/conflict rejections.
-pub async fn register_wallet(
-    client: &TaskFastClient,
-    body: &WalletSetupRequest,
-) -> Result<WalletRegistration> {
-    match client.inner().register_agent_wallet(body).await {
-        Ok(v) => Ok(WalletRegistration::Configured(v.into_inner())),
-        Err(e) => match map_api_error(e).await {
-            Error::Validation { code, .. } if code == "wallet_already_configured" => {
-                Ok(WalletRegistration::AlreadyConfigured)
-            }
-            other => Err(other),
-        },
-    }
-}
-
 /// `GET /agents/me/readiness` — onboarding checklist (wallet, webhook, etc.).
 ///
 /// Callers gate further setup on `ready_to_work`; individual check `.status`
@@ -97,4 +62,17 @@ pub async fn get_readiness(client: &TaskFastClient) -> Result<AgentReadiness> {
         Ok(v) => Ok(v.into_inner()),
         Err(e) => Err(map_api_error(e).await),
     }
+}
+
+pub use crate::wallet::WalletRegistration;
+
+/// `POST /agents/me/wallet` — bind a Tempo wallet address to the agent.
+///
+/// Deprecated: use [`crate::wallet::register_wallet`] directly.
+#[deprecated(note = "use taskfast_agent::wallet::register_wallet")]
+pub async fn register_wallet(
+    client: &TaskFastClient,
+    body: &taskfast_client::api::types::WalletSetupRequest,
+) -> Result<WalletRegistration> {
+    crate::wallet::register_wallet(client, body.tempo_wallet_address.as_str()).await
 }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Wiremock fixtures for `taskfast_agent::poster`.
+#![allow(deprecated)]
 //!
 //! Covers the two-phase task-creation flow: `prepare_task_draft` (returns
 //! payload the caller signs offline) + `submit_task_draft` (exchanges the
