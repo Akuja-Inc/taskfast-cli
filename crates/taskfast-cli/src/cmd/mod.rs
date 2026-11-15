@@ -72,6 +72,8 @@ pub struct Ctx {
     /// `TASKFAST_CONFIG`). Subcommands that persist state (init,
     /// `config set`, etc.) write here; tests construct this directly.
     pub config_path: PathBuf,
+    /// Unified state store for `.taskfast/` local files.
+    pub state_store: crate::state_store::StateStore,
     /// Poster wallet address from config — fallback when no flag/env set
     /// on `post`/`settle`/`escrow sign`. Persisted by `taskfast init`.
     pub wallet_address: Option<String>,
@@ -109,6 +111,7 @@ impl Default for Ctx {
             environment: DEFAULT_ENVIRONMENT,
             api_base: None,
             config_path: PathBuf::from("/dev/null"),
+            state_store: crate::state_store::StateStore::ephemeral(),
             wallet_address: None,
             keystore_path: None,
             confirm_above_budget: None,
@@ -122,6 +125,19 @@ impl Default for Ctx {
 }
 
 impl Ctx {
+    /// Return the unified state store rooted at `config_path`.
+    pub fn state_store(&self) -> crate::state_store::StateStore {
+        match self.state_store.config_path() {
+            Some(p) if p == self.config_path => self.state_store.clone(),
+            _ if self.config_path == std::path::Path::new("/dev/null")
+                && self.state_store.is_ephemeral() =>
+            {
+                self.state_store.clone()
+            }
+            _ => crate::state_store::StateStore::from_config_path(&self.config_path),
+        }
+    }
+
     /// Build a [`Ctx`] by layering CLI flags (including clap's
     /// env-var folding) over the on-disk [`Config`]. Precedence:
     ///
@@ -151,11 +167,14 @@ impl Ctx {
         // gates that override against the well-known set + opt-in flag.
         let api_base = cli_api_base;
         enforce_endpoint_guard(environment, api_base.as_deref(), cli_allow_custom_endpoints)?;
+        let config_path = cli_config_path.unwrap_or_else(Config::default_path);
+        let state_store = crate::state_store::StateStore::from_config_path(&config_path);
         Ok(Self {
             api_key: cli_api_key.or_else(|| cfg.api_key.clone()),
             environment,
             api_base,
-            config_path: cli_config_path.unwrap_or_else(Config::default_path),
+            config_path,
+            state_store,
             wallet_address: cfg.wallet_address.clone(),
             keystore_path: cfg.keystore_path.clone(),
             confirm_above_budget: cfg.confirm_above_budget.clone(),

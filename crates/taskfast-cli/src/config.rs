@@ -35,8 +35,6 @@
 //! (atomic temp + rename) and the containing `.taskfast/` directory is
 //! intended to be git-ignored.
 
-use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -60,7 +58,7 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// Keys removed at schema v2. Loading a file that still carries any of
 /// these triggers [`ConfigError::LegacyFields`] so a stale config never
 /// silently misroutes traffic post-migration.
-const LEGACY_REMOVED_KEYS: &[&str] = &["api_base", "network"];
+pub const LEGACY_REMOVED_KEYS: &[&str] = &["api_base", "network"];
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -148,37 +146,8 @@ fn is_zero(v: &u32) -> bool {
 
 /// Drop a `.gitignore` of `*` into the config dir so its plaintext secrets
 /// (`api_key`, keystore path, webhook secret) can't be committed by accident.
-/// `create_new` makes this idempotent and non-destructive: an existing
-/// `.gitignore` (user-customized) is left untouched. Best-effort — any other
-/// I/O error is logged, not propagated, so it never fails the config write.
-///
-/// Scoped to the conventional `.taskfast` secrets dir only: a caller who
-/// overrides `--config ./config.json` (or `TASKFAST_CONFIG`) must not have a
-/// `.gitignore` of `*` dropped into an arbitrary directory — into the repo
-/// root that would ignore the entire working tree.
-fn ensure_dir_gitignore(dir: &Path) {
-    let expected = Path::new(DEFAULT_CONFIG_PATH)
-        .parent()
-        .and_then(Path::file_name);
-    if dir.file_name() != expected {
-        return;
-    }
-    let gitignore = dir.join(".gitignore");
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&gitignore)
-    {
-        Ok(mut f) => {
-            if let Err(e) = f.write_all(b"*\n") {
-                tracing::warn!(path = %gitignore.display(), error = %e, "could not write .taskfast/.gitignore");
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => {
-            tracing::warn!(path = %gitignore.display(), error = %e, "could not create .taskfast/.gitignore");
-        }
-    }
+pub fn ensure_dir_gitignore(dir: &Path) {
+    crate::state_store::ensure_dir_gitignore(dir);
 }
 
 impl Config {
@@ -192,139 +161,13 @@ impl Config {
     /// (currently `api_base` and `network`). Stale values would otherwise
     /// silently outrank the `Environment`-derived defaults.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let src = match fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(source) => {
-                return Err(ConfigError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                });
-            }
-        };
-        // Peek raw JSON before strict deserialization so the migration error
-        // wins over a generic parse error and so removed-key detection does
-        // not depend on `Config` carrying the field.
-        let raw: serde_json::Value =
-            serde_json::from_str(&src).map_err(|source| ConfigError::Parse {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        if let Some(obj) = raw.as_object() {
-            let legacy: Vec<String> = LEGACY_REMOVED_KEYS
-                .iter()
-                .filter(|k| obj.contains_key(**k))
-                .map(|k| (*k).to_string())
-                .collect();
-            if !legacy.is_empty() {
-                return Err(ConfigError::LegacyFields {
-                    path: path.to_path_buf(),
-                    fields: legacy,
-                });
-            }
-        }
-        let cfg: Config = serde_json::from_value(raw).map_err(|source| ConfigError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        if cfg.schema_version > CURRENT_SCHEMA_VERSION {
-            tracing::warn!(
-                file = %path.display(),
-                file_version = cfg.schema_version,
-                current_version = CURRENT_SCHEMA_VERSION,
-                "config schema_version is newer than this CLI — loading recognised fields only"
-            );
-        }
-        Ok(cfg)
+        crate::state_store::StateStore::from_config_path(path).load_config()
     }
 
-    /// Atomic(ish) write: JSON-serialize to a sibling `.tmp`, chmod
-    /// `0600` on unix, rename into place. Creates the parent directory
-    /// if it doesn't exist.
+    /// Atomic write: JSON-serialize, chmod `0600` on unix from creation, rename into place.
+    /// Creates the parent directory if it doesn't exist and tightens to `0700`.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-                // F4: tighten the `.taskfast/` dir to 0700. `create_dir_all`
-                // honors umask (typically 022 → 0755), leaving the keystore
-                // + webhook secret + API key config readable by anyone on
-                // the host. 0700 scopes them to the owning UID. Idempotent
-                // on subsequent saves.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let perms = fs::Permissions::from_mode(0o700);
-                    fs::set_permissions(parent, perms).map_err(|source| ConfigError::Io {
-                        path: parent.to_path_buf(),
-                        source,
-                    })?;
-                }
-                // Git-ignore the whole config dir so the plaintext `api_key`
-                // can't be committed by accident from inside a repo (gh#78).
-                // Best-effort: a failure here must not fail the config write.
-                ensure_dir_gitignore(parent);
-            }
-        }
-        let mut to_write = self.clone();
-        if to_write.schema_version == 0 {
-            to_write.schema_version = CURRENT_SCHEMA_VERSION;
-        }
-        let body = serde_json::to_vec_pretty(&to_write).map_err(|source| ConfigError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })?;
-
-        let tmp = path.with_extension("json.tmp");
-        {
-            // Create the temp at 0600 from the start (not umask-default then
-            // chmod) so the api_key is never momentarily world-readable
-            // before the rename. gh#78.
-            #[cfg(unix)]
-            let create = {
-                use std::os::unix::fs::OpenOptionsExt;
-                fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&tmp)
-            };
-            #[cfg(not(unix))]
-            let create = fs::File::create(&tmp);
-            let mut f = create.map_err(|source| ConfigError::Io {
-                path: tmp.clone(),
-                source,
-            })?;
-            f.write_all(&body).map_err(|source| ConfigError::Io {
-                path: tmp.clone(),
-                source,
-            })?;
-            f.write_all(b"\n").map_err(|source| ConfigError::Io {
-                path: tmp.clone(),
-                source,
-            })?;
-            f.flush().map_err(|source| ConfigError::Io {
-                path: tmp.clone(),
-                source,
-            })?;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = fs::Permissions::from_mode(0o600);
-            fs::set_permissions(&tmp, perms).map_err(|source| ConfigError::Io {
-                path: tmp.clone(),
-                source,
-            })?;
-        }
-        fs::rename(&tmp, path).map_err(|source| ConfigError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Ok(())
+        crate::state_store::StateStore::from_config_path(path).save_config(self)
     }
 
     /// Default file path, rooted in the caller's current working
@@ -366,6 +209,7 @@ impl<'de> Deserialize<'de> for Environment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
 
     fn sample() -> Config {

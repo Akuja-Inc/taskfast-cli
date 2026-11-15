@@ -10,18 +10,14 @@
 //! whatever is in memory (at-least-once beats losing an event).
 
 use std::collections::{HashSet, VecDeque};
-use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
 
-use super::poll::cursor_path;
 use crate::cmd::Ctx;
+use crate::state_store::{StateAsset, StateStore};
 
-const FILENAME: &str = "events.seen";
 const CAP: usize = 10_000;
 
 pub struct SeenIds {
-    path: Option<PathBuf>,
+    store: StateStore,
     order: VecDeque<String>,
     set: HashSet<String>,
     /// Lines currently in the file; compact once it exceeds `2 * CAP`.
@@ -32,25 +28,27 @@ pub struct SeenIds {
 
 impl SeenIds {
     pub fn load(ctx: &Ctx) -> Self {
-        let path = cursor_path(ctx).map(|p| p.with_file_name(FILENAME));
+        let store = ctx.state_store();
         let mut s = Self {
-            path,
+            store: store.clone(),
             order: VecDeque::new(),
             set: HashSet::new(),
             file_lines: 0,
             quiet: ctx.quiet,
             warned: false,
         };
-        if let Some(p) = s.path.clone() {
-            match fs::read_to_string(&p) {
-                Ok(raw) => {
-                    for id in raw.lines().filter(|l| !l.is_empty()) {
-                        s.remember(id);
-                        s.file_lines += 1;
-                    }
+        match store.load_seen_lines() {
+            Ok(lines) => {
+                for id in lines {
+                    s.remember(&id);
+                    s.file_lines += 1;
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => s.warn(&format!("read {}: {e}", p.display())),
+            }
+            Err(e) => {
+                let display = store
+                    .path_for(StateAsset::EventsSeen)
+                    .map_or_else(|| "in-memory".to_string(), |p| p.display().to_string());
+                s.warn(&format!("read {display}: {e}"));
             }
         }
         s
@@ -79,29 +77,25 @@ impl SeenIds {
     }
 
     fn persist(&mut self, id: &str) {
-        let Some(path) = self.path.clone() else {
-            return;
-        };
-        let res = (|| {
-            if let Some(dir) = path.parent() {
-                fs::create_dir_all(dir)?;
-            }
-            if self.file_lines >= 2 * CAP {
-                let body: String = self.order.iter().flat_map(|i| [i.as_str(), "\n"]).collect();
-                fs::write(&path, body)?;
+        let res = if self.file_lines >= 2 * CAP {
+            let res = self.store.rewrite_seen_lines(&self.order);
+            if res.is_ok() {
                 self.file_lines = self.order.len();
-            } else {
-                let mut f = fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)?;
-                writeln!(f, "{id}")?;
+            }
+            res
+        } else {
+            let res = self.store.append_seen_line(id);
+            if res.is_ok() {
                 self.file_lines += 1;
             }
-            Ok::<_, std::io::Error>(())
-        })();
+            res
+        };
         if let Err(e) = res {
-            self.warn(&format!("write {}: {e}", path.display()));
+            let display = self
+                .store
+                .path_for(StateAsset::EventsSeen)
+                .map_or_else(|| "in-memory".to_string(), |p| p.display().to_string());
+            self.warn(&format!("write {display}: {e}"));
         }
     }
 
@@ -119,8 +113,11 @@ mod tests {
     use super::*;
 
     fn ctx_in(dir: &std::path::Path) -> Ctx {
+        let path = dir.join("config.json");
+        let store = StateStore::from_config_path(&path);
         Ctx {
-            config_path: dir.join("config.json"),
+            config_path: path,
+            state_store: store,
             quiet: true,
             ..Default::default()
         }
@@ -156,7 +153,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ctx_in(dir.path());
         // A directory where the file should be makes read and write fail.
-        fs::create_dir(dir.path().join(FILENAME)).unwrap();
+        std::fs::create_dir(dir.path().join(StateAsset::EventsSeen.filename())).unwrap();
         let mut s = SeenIds::load(&ctx);
         assert!(s.warned || ctx.quiet);
         assert!(s.first_time("e1"));

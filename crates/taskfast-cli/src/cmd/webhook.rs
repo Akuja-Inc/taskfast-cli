@@ -14,7 +14,6 @@
 //! existing secret file untouched — never silently truncate a
 //! persisted secret the caller may still rely on.
 
-use std::fs;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -293,27 +292,13 @@ async fn delete(ctx: &Ctx) -> CmdResult {
     ))
 }
 
-/// Persist the webhook signing secret atomically with 0600 perms on unix.
+/// Persist the webhook signing secret atomically with 0600 perms on unix from file creation.
 ///
-/// Writes to a sibling `.tmp`, chmods it 0600 *before* the rename, then
-/// renames into place. The destination path therefore never exists with
-/// mode 0644 — a concurrent reader observes either the old contents (or
-/// ENOENT) or the new contents at 0600, never a half-written file at
-/// looser perms. Mirrors [`crate::config::Config::save`].
+/// Delegates to [`crate::state_store::StateStore::atomic_write_file`], eliminating any umask
+/// window before permissions tightening.
 pub(crate) fn persist_secret(path: &std::path::Path, secret: &str) -> Result<(), CmdError> {
-    let tmp = path.with_extension("secret.tmp");
-    fs::write(&tmp, secret)
-        .map_err(|e| CmdError::Usage(format!("write {}: {e}", tmp.display())))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&tmp, perms)
-            .map_err(|e| CmdError::Usage(format!("chmod {}: {e}", tmp.display())))?;
-    }
-    fs::rename(&tmp, path)
-        .map_err(|e| CmdError::Usage(format!("rename into {}: {e}", path.display())))?;
-    Ok(())
+    crate::state_store::StateStore::atomic_write_file(path, secret.as_bytes())
+        .map_err(|e| CmdError::Usage(format!("write secret {}: {e}", path.display())))
 }
 
 #[cfg(test)]
