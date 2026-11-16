@@ -770,6 +770,9 @@ pub(super) fn content_type_for_ext(ext: &str) -> &'static str {
         "xml" => "application/xml",
         "pdf" => "application/pdf",
         "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
@@ -943,5 +946,21 @@ mod tests {
         assert_eq!(content_type_for_ext("mp4"), "video/mp4");
         assert_eq!(content_type_for_ext("webm"), "video/webm");
         assert_eq!(content_type_for_ext("mov"), "video/quicktime");
+    }
+
+    #[test]
+    fn content_type_maps_office_document_extensions() {
+        // gh#199 regression guard: the server allow-list accepts Word (.docx)
+        // and Excel (.xls, .xlsx) documents, so these extensions must not fall
+        // through to application/octet-stream and trigger 415.
+        assert_eq!(
+            content_type_for_ext("docx"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        );
+        assert_eq!(content_type_for_ext("xls"), "application/vnd.ms-excel");
+        assert_eq!(
+            content_type_for_ext("xlsx"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
     }
 }
