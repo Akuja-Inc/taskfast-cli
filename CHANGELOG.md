@@ -22,6 +22,10 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Added
 
+- **Map Office document extensions to MIME types for artifact uploads (Closes #199).**
+  `docx` maps to `application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `xls` to `application/vnd.ms-excel`, and `xlsx` to `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` in `content_type_for_ext`.
+  Artifact uploads with these extensions no longer default to `application/octet-stream` and trigger 415 from the server allowlist.
+
 - **`taskfast fee retry <task_id>` signs and sends replacement fee payment with wallet (Closes #209).**
   `--submission-fee-voucher` is now optional. Passing it keeps the existing pass-through behavior.
   When omitted, the command reads replacement payment parameters from `GET /tasks/{task_id}/retry-fee`. It verifies that calldata matches the recipient, amount, and memo. It checks the chain ID and fee token allowlists. It signs and broadcasts the transfer using the poster keystore wallet under the per-wallet lock, then submits the transaction hash to `POST /tasks/{task_id}/retry-fee`.
