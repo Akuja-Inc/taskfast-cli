@@ -54,11 +54,11 @@ When the listing-fee transfer can't confirm at post time, the task lands at `blo
 - `next_action` / `next_action_command`: `retry_submission_fee` and the retry call, present only once the charge has actually **failed** — never while a transfer is in flight
 
 ```bash
-taskfast task get <id>        # watch submission_fee_status
-taskfast fee retry <id> --submission-fee-voucher 0x...  # retry the fee charge (poster only)
+taskfast task get <id>   # watch submission_fee_status
+taskfast fee retry <id>  # retry the fee charge with poster wallet (or --submission-fee-voucher 0x...)
 ```
 
-`task retry-fee` no longer sends a request: since 2026-11-01 the server requires the poster's freshly signed fee transfer (or the hash of one already broadcast) and the original voucher cannot be reused, so use `taskfast fee retry <id> --submission-fee-voucher <0x...>`. `fee retry` passes the voucher through unchanged and wraps `POST /tasks/{id}/retry-fee`. It returns `task_id`, `status` (`blocked_on_submission_fee_debt` while the fresh transfer confirms, `pending_evaluation` when it charged inline), and a human-readable `message`. 409 `retry_not_needed` means a transfer is still confirming — wait and re-check; 409 `retry_in_progress` means another retry already holds the task.
+`task retry-fee` no longer sends a request: since 2026-11-01 the server requires the poster's freshly signed fee transfer (or the hash of one already broadcast) and the original voucher cannot be reused. Use `taskfast fee retry <id>` (poster only) to sign and broadcast the replacement fee payment using your local keystore wallet (accepting `--wallet-address`, `--keystore`, `--wallet-password-file`, and `--rpc-url`). Passing `--submission-fee-voucher <0x...>` is optional and keeps pass-through behavior. `--dry-run` displays payment parameters without broadcasting. If a broadcast succeeds but server submission fails, the broadcast transaction hash is saved in `.taskfast/` and re-running `taskfast fee retry <id>` reuses it rather than paying twice. `fee retry` wraps `GET /tasks/{id}/retry-fee` and `POST /tasks/{id}/retry-fee`. It returns `task_id`, `status` (`blocked_on_submission_fee_debt` while the fresh transfer confirms, `pending_evaluation` when it charged inline), and a human-readable `message`. 409 `retry_not_needed` means a transfer is still confirming: wait and re-check; 409 `retry_in_progress` means another retry already holds the task.
 
 ## Worker flow
 

@@ -22,6 +22,13 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Added
 
+- **`taskfast fee retry <task_id>` signs and sends replacement fee payment with wallet (Closes #209).**
+  `--submission-fee-voucher` is now optional. Passing it keeps the existing pass-through behavior.
+  When omitted, the command reads replacement payment parameters from `GET /tasks/{task_id}/retry-fee`. It verifies that calldata matches the recipient, amount, and memo. It checks the chain ID and fee token allowlists. It signs and broadcasts the transfer using the poster keystore wallet under the per-wallet lock, then submits the transaction hash to `POST /tasks/{task_id}/retry-fee`.
+  Adds `--wallet-address`, `--keystore`, `--wallet-password-file`, and `--rpc-url` flags to `fee retry`.
+  If the on-chain transfer succeeds but server submission fails, the broadcast transaction hash is persisted to `StateStore`. Re-running `taskfast fee retry <task_id>` reuses the broadcast transaction hash rather than paying twice.
+  `--dry-run` displays `token_address`, `recipient`, `amount`, and `memo_hash` without signing or broadcasting.
+
 - **Deepen lifecycle event intake with unified `EventIntake` module (Closes #217).**
   Consolidates event intake across polling and streaming transports into `EventIntake` in `taskfast-cli::cmd::events::intake`.
   Encapsulates bounded `SeenIds` ring-buffer deduplication, coordinated cursor progression and seen-id commitment after successful batch processing via `StateStore`, and tolerant per-item JSON decoding.

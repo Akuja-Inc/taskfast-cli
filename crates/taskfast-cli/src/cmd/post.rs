@@ -27,17 +27,16 @@ use clap::Parser;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{is_proxy_rpc_url, validate_override_rpc_url, CmdError, CmdResult, Ctx};
+use super::wallet_args::{decode_0x_bytes, resolve_proxy_rpc_url, sign_and_send_submission_fee};
+use super::{validate_override_rpc_url, CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
-use taskfast_agent::tempo_rpc::TempoRpcClient;
-use taskfast_chains::tempo::{is_allowed_fee_token, is_known_network};
 use taskfast_client::api::types::{
     CompletionCriterionInput, TaskDraftPrepareRequest, TaskDraftPrepareRequestAssignmentType,
     TaskDraftPrepareRequestPickupDeadlineHours, TaskDraftSubmitRequest,
     TaskDraftSubmitRequestSignature,
 };
-use taskfast_client::{map_api_error, TaskFastClient};
+use taskfast_client::map_api_error;
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -239,12 +238,6 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         Err(e) => return Err(map_api_error(e).await.into()),
     };
 
-    let token_address: Address = prep.token_address.parse().map_err(|e| {
-        CmdError::Server(format!(
-            "server returned invalid token_address `{}`: {e}",
-            prep.token_address
-        ))
-    })?;
     let calldata = decode_0x_bytes(&prep.payload_to_sign)
         .map_err(|e| CmdError::Server(format!("server returned invalid payload_to_sign: {e}")))?;
 
@@ -261,63 +254,16 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         "submission fee",
     )?;
 
-    // Pick the http client by URL, not by resolution branch: any URL
-    // landing on `{api_base}/rpc/` is the authenticated proxy and
-    // needs `X-API-Key` (set as a default header on `client.http_client()`).
-    // A `--rpc-url`/`TEMPO_RPC_URL` override that points at the proxy
-    // hit this same path; the prior `via_proxy` flag missed that case
-    // and dropped the header, returning 401 "missing API key".
-    let http = ctx.rpc_http_client(&client, &rpc_url);
-    let rpc = TempoRpcClient::new(http, rpc_url.clone());
-
-    // F1: consult the chain's own `eth_chainId` (not anything the server
-    // claims) and refuse to sign a `transfer` against a token that isn't
-    // on the PathUSD allowlist for that chain. A compromised TaskFast API
-    // returning an attacker `token_address` is the fund-drain vector here.
-    let chain_id = rpc
-        .chain_id()
-        .await
-        .map_err(|e| CmdError::Server(format!("tempo rpc eth_chainId: {e}")))?;
-    if !ctx.allow_custom_endpoints && !is_known_network(chain_id) {
-        return Err(CmdError::Validation {
-            code: "unknown_chain".into(),
-            message: format!(
-                "RPC reports chain_id={chain_id} which is not a known Tempo or \
-                 local-dev network; refusing to sign. Pass --allow-custom-endpoints \
-                 to override."
-            ),
-        });
-    }
-    if !is_allowed_fee_token(chain_id, &prep.token_address) {
-        return Err(CmdError::Validation {
-            code: "fee_token_not_allowed".into(),
-            message: format!(
-                "server returned token_address {} which is not on the PathUSD \
-                 allowlist for chain_id={chain_id}. Refusing to sign — this would \
-                 redirect your fee transfer to an arbitrary ERC-20 contract.",
-                prep.token_address
-            ),
-        });
-    }
-
-    // Audit line — always emitted to stderr so a CI log captures the exact
-    // recipient+token+chain we committed funds to. Not a prompt: CLI stays
-    // non-interactive.
-    eprintln!(
-        "taskfast: signing submission-fee transfer — token={} chain_id={} rpc={}",
-        prep.token_address, chain_id, rpc_url
-    );
-
-    let session = crate::tempo_session::TempoSession::new(
-        signer,
+    let tx_hash = sign_and_send_submission_fee(
+        ctx,
+        &client,
+        &rpc_url,
         keystore_path,
-        rpc,
-        std::time::Duration::from_mins(1),
-    );
-
-    let tx_hash = session
-        .send_transaction(token_address, Bytes::from(calldata))
-        .await?;
+        signer,
+        &prep.token_address,
+        Bytes::from(calldata),
+    )
+    .await?;
     let tx_hash_hex = format!("{tx_hash:#x}");
 
     // Phase 2 — submit voucher. The field is named `signature` for historical
@@ -523,81 +469,6 @@ fn preflight(ctx: &Ctx, args: &Args) -> Result<Preflight, CmdError> {
     })
 }
 
-/// Resolve the deployment's proxied RPC endpoint for a post invocation that
-/// did not supply `--rpc-url` (the override path is handled in [`preflight`]).
-///
-/// The deployment's `/config/network` entry for the selected network points
-/// the CLI at `{api_base}/rpc/{network}`, which the server proxies to its
-/// own Tempo upstream (Alchemy by default). The caller should carry the
-/// authenticated reqwest::Client through to `TempoRpcClient`.
-async fn resolve_proxy_rpc_url(client: &TaskFastClient, ctx: &Ctx) -> Result<String, CmdError> {
-    let cfg = client.fetch_network_config().await.map_err(|e| match e {
-        taskfast_client::Error::Auth(_) | taskfast_client::Error::Validation { .. } => {
-            CmdError::Server(format!("fetch network config from {}: {e}", ctx.base_url()))
-        }
-        other => CmdError::from(other),
-    })?;
-    // Runtime invariant — issue #62 (server-side): the env's deployment must
-    // advertise exactly its one network, and nothing else.
-    //
-    // Today's deployments still advertise multiple networks per response;
-    // until #62 lands, a `len != 1` mismatch logs a warn and continues.
-    // Set TASKFAST_STRICT_ENV_NETWORK=1 to fail-closed.
-    // `--allow-custom-endpoints` and `Environment::Local` bypass entirely
-    // (matches `enforce_endpoint_guard`).
-    let name = ctx.environment.network().as_str();
-    if !ctx.allow_custom_endpoints
-        && ctx.environment != crate::Environment::Local
-        && cfg.networks.len() != 1
-    {
-        let advertised: Vec<&str> = cfg.networks.keys().map(String::as_str).collect();
-        let strict = std::env::var("TASKFAST_STRICT_ENV_NETWORK")
-            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-        if strict {
-            return Err(CmdError::Server(format!(
-                "deployment at {} advertises networks {advertised:?}; env {} requires \
-                 exactly [{name}]. Server-side fix tracked in issue #62. Unset \
-                 TASKFAST_STRICT_ENV_NETWORK or pass --allow-custom-endpoints to bypass.",
-                ctx.base_url(),
-                ctx.environment.as_str(),
-            )));
-        }
-        tracing::warn!(
-            api_base = %ctx.base_url(),
-            env = ctx.environment.as_str(),
-            expected = name,
-            advertised = ?advertised,
-            "deployment advertises additional networks; server-side fix tracked in #62. \
-             Set TASKFAST_STRICT_ENV_NETWORK=1 to fail-closed."
-        );
-    }
-    let entry = cfg.entry(name).map_err(|e| {
-        CmdError::Server(format!(
-            "deployment at {} does not advertise network `{name}`: {e}",
-            ctx.base_url()
-        ))
-    })?;
-    // F2-equivalent guard, minus the static allowlist: the old
-    // WELL_KNOWN_TEMPO_RPCS check trusted exactly two hardcoded URLs. The
-    // replacement says "the proxy must live on the same host as the api_base
-    // the endpoint-guard already approved" — the path it's mounted at
-    // (`/rpc/…` or `/api/rpc/…`) is the server's choice. Catches (a) a
-    // misconfigured deployment returning an upstream URL instead of its own
-    // proxy, and (b) a compromised backend trying to steer RPC traffic
-    // off-host — minus a full MITM on api_base itself (which has its own
-    // F5/F6 defenses).
-    if !is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
-        return Err(CmdError::Server(format!(
-            "deployment at {} returned rpc_url {:?} for network `{name}`, \
-             which is not on the same host. Refusing to route RPC traffic \
-             off-host.",
-            ctx.base_url(),
-            entry.rpc_url,
-        )));
-    }
-    Ok(entry.rpc_url.clone())
-}
-
 /// Merge file-sourced and inline `--criterion` payloads into one validated
 /// list of `CompletionCriterionInput`. File entries are prepended so a
 /// shared base file can be augmented with one-off overrides on the command
@@ -639,11 +510,6 @@ fn parse_iso_opt(
             .map(|d| Some(d.with_timezone(&chrono::Utc)))
             .map_err(|e| CmdError::Usage(format!("{flag} not a valid RFC3339 timestamp: {e}"))),
     }
-}
-
-fn decode_0x_bytes(s: &str) -> Result<Vec<u8>, String> {
-    let stripped = s.strip_prefix("0x").unwrap_or(s);
-    hex::decode(stripped).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
