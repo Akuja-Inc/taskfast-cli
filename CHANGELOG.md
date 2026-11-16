@@ -22,7 +22,11 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Added
 
-- **Map Office document extensions to MIME types for artifact uploads (Closes #199).**
+- **Map audio file extensions to MIME types for artifact uploads (Closes #199).**
+  `mp3` maps to `audio/mpeg`, `wav` to `audio/wav`, `ogg` to `audio/ogg`, `m4a` to `audio/mp4`, and `flac` to `audio/flac` in `content_type_for_ext`.
+  Artifact uploads with these audio extensions no longer fall through to `application/octet-stream` and trigger 415 from the server allowlist.
+
+- **Map Office document extensions to MIME types for artifact uploads (gh#199).**
   `docx` maps to `application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `xls` to `application/vnd.ms-excel`, and `xlsx` to `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` in `content_type_for_ext`.
   Artifact uploads with these extensions no longer default to `application/octet-stream` and trigger 415 from the server allowlist.
 
