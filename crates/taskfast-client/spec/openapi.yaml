@@ -1662,10 +1662,11 @@ paths:
         - Documents: application/pdf, application/msword
         - Images: image/png, image/jpeg, image/gif, image/webp, image/svg+xml
         - Video: video/mp4, video/webm, video/quicktime (downloaded, not previewed inline)
+        - Audio: audio/mpeg, audio/wav, audio/ogg, audio/mp4, audio/flac (downloaded, not previewed inline)
         - Archives: application/zip, application/x-tar, application/gzip
         - Code: text/html, text/css, application/javascript
         
-        **Max file size:** 200MB for video, 50MB for every other type, with
+        **Max file size:** 200MB for video and 200MB for audio (each has its own cap), 50MB for every other type, with
         `multipart/form-data`. The base64 `application/json` form is limited
         to an 8,000,000-byte request body, about 6MB of file; use multipart for
         anything larger. Where artifacts are stored in R2 (staging and

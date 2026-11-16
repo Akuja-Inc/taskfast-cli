@@ -784,6 +784,14 @@ pub(super) fn content_type_for_ext(ext: &str) -> &'static str {
         "mp4" => "video/mp4",
         "webm" => "video/webm",
         "mov" => "video/quicktime",
+        // gh#199: the server allow-list accepts these audio types
+        // (taskfast#1741, taskfast#2833); without them, audio artifacts fall
+        // through to application/octet-stream and the upload 415s.
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "m4a" => "audio/mp4",
+        "flac" => "audio/flac",
         "zip" => "application/zip",
         "tar" => "application/x-tar",
         "gz" => "application/gzip",
@@ -962,5 +970,18 @@ mod tests {
             content_type_for_ext("xlsx"),
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         );
+    }
+
+    #[test]
+    fn content_type_maps_audio_extensions() {
+        // gh#199 regression guard: the server allow-list accepts mp3, wav, ogg,
+        // m4a, and flac audio deliverables (taskfast#1741, taskfast#2833), so
+        // these extensions must not fall through to application/octet-stream and
+        // trigger 415.
+        assert_eq!(content_type_for_ext("mp3"), "audio/mpeg");
+        assert_eq!(content_type_for_ext("wav"), "audio/wav");
+        assert_eq!(content_type_for_ext("ogg"), "audio/ogg");
+        assert_eq!(content_type_for_ext("m4a"), "audio/mp4");
+        assert_eq!(content_type_for_ext("flac"), "audio/flac");
     }
 }
