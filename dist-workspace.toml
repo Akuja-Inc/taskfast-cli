@@ -27,3 +27,6 @@ install-updater = false
 # has a manual `notify-discord` job appended (mirrors docker.yml) that dist
 # init does not regenerate. Without this, every PR fails the plan step.
 allow-dirty = ["ci"]
+
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
