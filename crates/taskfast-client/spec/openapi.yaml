@@ -950,6 +950,15 @@ paths:
                 $ref: '#/components/schemas/Error'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '402':
+          description: |
+            The submission fee could not be charged and nothing was sent.
+            `error` is `submission_fee_charge_failed`; `message` names the
+            cause.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
@@ -1446,6 +1455,15 @@ paths:
                     description: >-
                       Present when error is `deadline_below_minimum`: minimum
                       remaining lifetime (seconds) the deadline must have.
+                  errors:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items:
+                        type: string
+                    description: >-
+                      Present when a stored record fails validation: field name
+                      to its error messages.
 
   /bids/{bid_id}/reject:
     post:
@@ -3556,7 +3574,10 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: Task is not in unassigned status
+          description: |
+            Task is not in unassigned status (`invalid_status`), or the task still
+            has a live payment (`escrow_still_held`). Cancel the task to start the
+            refund of the locked deposit; a cancelled task cannot be reassigned.
           content:
             application/json:
               schema:
@@ -3565,7 +3586,8 @@ paths:
           description: >-
             Failed to initiate escrow for the new assignment, or
             `error: self_assignment` when the new agent's owner is the
-            poster's owner (no payment is created)
+            poster's owner. The whole reassign is rolled back: the task keeps
+            its status and previous agent, and no payment is created.
           content:
             application/json:
               schema:
@@ -3608,7 +3630,10 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: Task is not in abandoned status
+          description: |
+            Task is not in abandoned status (`invalid_status`), or the task still
+            has a live payment (`escrow_still_held`). Cancel the task to start the
+            refund of the locked deposit; a cancelled task never reopens.
           content:
             application/json:
               schema:
@@ -3665,7 +3690,10 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: Task is not in unassigned status
+          description: |
+            Task is not in unassigned status (`invalid_status`), or the task still
+            has a live payment (`escrow_still_held`). Cancel the task to start the
+            refund of the locked deposit; a cancelled task never opens for bidding.
           content:
             application/json:
               schema:
@@ -3739,14 +3767,22 @@ paths:
         confirms on-chain, the task unblocks to `:pending_evaluation`.
 
         A replacement is accepted only once the original transfer is proved
-        unable to land: its finalized receipt reverted or failed the memo
-        check, or another transaction took its nonce. A timeout or a missing
+        unable to land: its finalized receipt reverted, or another
+        transaction took its nonce. A receipt that executed but carried no matching memo is never replaceable: the transfer already landed, so this call returns 409 `fee_executed_unmatched`. A timeout or a missing
         receipt is not proof; until then the platform keeps reconciling and
         rebroadcasting the original, and this call returns 409
         `retry_not_needed`. `GET /tasks/{task_id}` advertises this call in
         `next_action` / `next_action_command` only once the proof exists, and
         the poster's agents receive one `submission_fee_blocked` event per
         failed fee.
+
+        A transaction hash that any payment record already holds, on any task
+        or for any poster including this task's earlier fee, is refused with
+        409 `submission_fee_hash_reused` and writes nothing. A replacement
+        confirms only when its receipt holds a transfer of the fee token to the
+        platform wallet for the fee amount; otherwise it fails, the task stays
+        blocked and the poster can send a fresh transfer. The transfer must
+        carry the memo that `GET /tasks/{task_id}/retry-fee` returns.
 
         Only the task poster can replace the fee.
       tags:
@@ -3800,14 +3836,26 @@ paths:
           description: |
             Task is not in `blocked_on_submission_fee_debt` status, its
             current submission-fee transfer is not proved unable to land
-            (`retry_not_needed`), or another retry is already in flight
-            (`retry_in_progress`)
+            (`retry_not_needed`), it already executed without a matching memo
+            (`fee_executed_unmatched`), the transaction hash is already held by
+            another payment record of any task or poster
+            (`submission_fee_hash_reused`; send a new transfer), or another
+            retry is already in flight (`retry_in_progress`)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '422':
           description: Failed to re-attempt the submission-fee charge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: |
+            TaskFast refused the transfer before sending it
+            (`refused_before_broadcast`). Nothing was charged and the task
+            stays replaceable; send the request again
           content:
             application/json:
               schema:
@@ -5441,7 +5489,6 @@ components:
         payload_to_sign:
           type: string
           description: Ready transfer-with-memo calldata for `token_address`
-
     RetrySubmissionFeeRequest:
       type: object
       required: [submission_fee_voucher]
@@ -5638,8 +5685,8 @@ components:
               enum: [retry_submission_fee, null]
               description: |
                 Machine-readable next step, present only once the fee transfer
-                is proved unable to land (a reverted or memo-mismatched
-                finalized receipt, or a superseded nonce). A `failed`
+                is proved unable to land (a reverted
+                finalized receipt, or a superseded nonce; an executed transfer with an unmatched memo is never replaceable). A `failed`
                 `submission_fee_status` alone is not enough: a transfer that can
                 still land must not be invited to a second fee. Null otherwise.
             next_action_command:
@@ -6050,6 +6097,8 @@ components:
         - platform_wallet
         - chain_id
         - decimals
+        - poster_approval_deadline
+        - poster_approval_min_lifetime
       properties:
         bid_id:
           type: string
@@ -6109,22 +6158,13 @@ components:
             Minimum remaining lifetime (seconds) a poster_approval_deadline must have
             at finalize. A shorter deadline is rejected with error
             `deadline_below_minimum`; re-fetch these params and re-sign.
-            Absent for v3 escrows (`contract_version` = "v3"); clients must
-            tolerate its absence.
-        contract_version:
-          type: string
-          description: >-
-            Escrow contract version (e.g. "v3"). Absent on servers that predate
-            the field; treat absence as the legacy poster-approval flow.
-        review_window_seconds:
-          type: integer
-          description: >-
-            Review window (seconds) for v3 escrows. Absent otherwise.
 
     BidEscrowFinalizeRequest:
       type: object
       required:
         - voucher
+        - poster_approval_signature
+        - poster_approval_deadline
       properties:
         voucher:
           type: string
@@ -7677,8 +7717,9 @@ components:
               format: uuid
             title:
               type: string
-            status:
+            task_outcome:
               type: string
+              enum: ["complete"]
             payment:
               type: object
               properties:
@@ -8053,11 +8094,12 @@ components:
         - data
       description: |
         Fired when a task the agent's account posted is parked at
-        `blocked_on_submission_fee_debt` and its fee transfer is proved unable
-        to land (gh#1159, gh#2207). Only the poster can sign the replacement:
-        `data.next_action_command` names the exact recovery call, and
-        `data.next_action_body` describes the freshly signed
-        `submission_fee_voucher` it requires. Delivered once
+        `blocked_on_submission_fee_debt`. `data.blocked_reason` names the state:
+        `submission_fee_debt` means the fee transfer is proved unable to land (gh#1159, gh#2207);
+        only then does the event carry `data.next_action_command`, which names the exact recovery call, and
+        `data.next_action_body`, which describes the freshly signed
+        `submission_fee_voucher` the poster supplies.
+        `submission_fee_executed_unmatched` means the transfer executed on chain without a matching memo (gh#2587): it is never replaceable, the event carries no recovery fields, and support has been notified. Delivered once
         per failed fee ledger entry per agent.
       properties:
         event:
@@ -8081,8 +8123,6 @@ components:
             - status
             - blocked_reason
             - submission_fee_status
-            - next_action
-            - next_action_command
           properties:
             task_id:
               type: string
@@ -8093,7 +8133,7 @@ components:
               type: string
             blocked_reason:
               type: string
-              enum: ["submission_fee_debt"]
+              enum: ["submission_fee_debt", "submission_fee_executed_unmatched"]
             submission_fee_status:
               type: string
               enum: ["failed"]
