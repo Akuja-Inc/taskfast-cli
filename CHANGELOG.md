@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.22.0] - 2026-11-16
+
 ### Changed
 
 - **Unify agent wallet registration and webhook provisioning orchestration (Closes #216).**
