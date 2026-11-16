@@ -65,10 +65,13 @@ fn retry_wallet(
 }
 
 fn sample_calldata() -> String {
-    let mut buf = vec![0xa9u8, 0x05, 0x9c, 0xbb];
-    buf.extend([0u8; 32]);
-    buf.extend([0u8; 32]);
-    format!("0x{}", hex::encode(buf))
+    use alloy_sol_types::SolCall;
+    let call = taskfast_cli::cmd::fee::transferWithMemoCall {
+        to: RECIPIENT.parse().unwrap(),
+        amount: alloy_primitives::U256::from(250000),
+        memo_hash: MEMO_HASH.parse().unwrap(),
+    };
+    format!("0x{}", hex::encode(call.abi_encode()))
 }
 
 struct TestWallet {
@@ -240,20 +243,57 @@ async fn fee_retry_signs_and_broadcasts_when_voucher_omitted() {
     assert_eq!(v["data"]["task_id"], TASK_ID);
     assert_eq!(v["data"]["status"], "pending_evaluation");
     assert_eq!(v["data"]["submission_fee_voucher"], tx_hash_hex);
+
+    // Inspect the broadcast transaction sent to eth_sendRawTransaction
+    let raw_tx_requests = rpc_server
+        .received_requests()
+        .await
+        .expect("received requests")
+        .into_iter()
+        .filter(|req| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            body.get("method").and_then(|m| m.as_str()) == Some("eth_sendRawTransaction")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(raw_tx_requests.len(), 1);
+    let rpc_body: serde_json::Value =
+        serde_json::from_slice(&raw_tx_requests[0].body).expect("parse jsonrpc");
+    let raw_hex = rpc_body["params"][0].as_str().expect("raw tx hex");
+    let raw_bytes = hex::decode(raw_hex.strip_prefix("0x").unwrap_or(raw_hex)).expect("decode hex");
+
+    use alloy_consensus::Transaction;
+    use alloy_consensus::TxEnvelope;
+    use alloy_eips::eip2718::Decodable2718;
+
+    let envelope = TxEnvelope::decode_2718(&mut raw_bytes.as_slice()).expect("decode 2718 tx");
+    assert_eq!(
+        envelope.to(),
+        Some(TOKEN_ADDR.parse::<alloy_primitives::Address>().unwrap()),
+        "target of transaction must be allowlisted fee token, NOT recipient"
+    );
+    let expected_calldata = hex::decode(sample_calldata().strip_prefix("0x").unwrap()).unwrap();
+    assert_eq!(
+        envelope.input().as_ref(),
+        expected_calldata.as_slice(),
+        "calldata must match payload_to_sign exactly"
+    );
+    assert_eq!(envelope.chain_id(), Some(42431));
 }
 
 #[tokio::test]
-async fn fee_retry_sends_nothing_unless_task_shows_retry_submission_fee() {
+async fn fee_retry_sends_nothing_when_server_reports_retry_not_needed() {
     let api_server = MockServer::start().await;
     let rpc_server = MockServer::start().await;
     let wallet = create_test_wallet();
 
-    mock_task_status(
-        &api_server,
-        None,
-        Some("Task created. Submission fee transaction is pending on-chain confirmation."),
-    )
-    .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "retry_not_needed",
+            "message": "Task is not awaiting fee retry",
+        })))
+        .mount(&api_server)
+        .await;
 
     let cmd = retry_wallet(
         &wallet.keystore_path,
@@ -269,7 +309,7 @@ async fn fee_retry_sends_nothing_unless_task_shows_retry_submission_fee() {
         CmdError::Validation { code, message } => {
             assert_eq!(code, "retry_not_needed");
             assert!(
-                message.contains("pending on-chain confirmation"),
+                message.contains("Task is not awaiting fee retry"),
                 "expected server reason, got {message}"
             );
         }
@@ -278,7 +318,7 @@ async fn fee_retry_sends_nothing_unless_task_shows_retry_submission_fee() {
 
     assert!(
         rpc_server.received_requests().await.unwrap().is_empty(),
-        "zero node requests must be made when next_action is not retry_submission_fee"
+        "zero node requests must be made when server returns retry_not_needed"
     );
 }
 
@@ -401,23 +441,24 @@ async fn fee_retry_dry_run_prints_payment_data_without_chain_or_submit() {
     let v = envelope_value(&env);
     assert_eq!(v["dry_run"], true);
     assert_eq!(v["data"]["task_id"], TASK_ID);
-    assert_eq!(v["data"]["token"], TOKEN_ADDR);
+    assert_eq!(v["data"]["token_address"], TOKEN_ADDR);
+    assert!(v["data"].get("token").is_none());
     assert_eq!(v["data"]["recipient"], RECIPIENT);
     assert_eq!(v["data"]["amount"], AMOUNT);
     assert_eq!(v["data"]["memo_text"], MEMO_TEXT);
     assert_eq!(v["data"]["memo_hash"], MEMO_HASH);
+    assert!(v["data"].get("memo").is_none());
 
     assert!(rpc_server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn fee_retry_server_500_after_broadcast_shows_tx_hash_and_exact_retry_command() {
+async fn fee_retry_server_500_after_broadcast_returns_typed_server_error() {
     let api_server = MockServer::start().await;
     let rpc_server = MockServer::start().await;
     let wallet = create_test_wallet();
     let tx_hash_hex = format!("0x{}", "cc".repeat(32));
 
-    mock_task_status(&api_server, Some("retry_submission_fee"), None).await;
     mock_payment_data(&api_server, TOKEN_ADDR).await;
     mount_rpc_mocks(&rpc_server, 42431, &tx_hash_hex).await;
 
@@ -442,17 +483,195 @@ async fn fee_retry_server_500_after_broadcast_shows_tx_hash_and_exact_retry_comm
     let err = run(&ctx, cmd)
         .await
         .expect_err("500 after broadcast must error");
-    let err_str = err.to_string();
-    assert!(
-        err_str.contains(&tx_hash_hex),
-        "error message must contain tx hash: {err_str}"
+    match err {
+        CmdError::Server(msg) => {
+            assert!(msg.contains("database exploded"));
+        }
+        other => panic!("expected Server error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn fee_retry_post_broadcast_server_409_preserves_error_code() {
+    let api_server = MockServer::start().await;
+    let rpc_server = MockServer::start().await;
+    let wallet = create_test_wallet();
+    let tx_hash_hex = format!("0x{}", "ee".repeat(32));
+
+    mock_payment_data(&api_server, TOKEN_ADDR).await;
+    mount_rpc_mocks(&rpc_server, 42431, &tx_hash_hex).await;
+
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "retry_in_progress",
+            "message": "another retry holds the task",
+        })))
+        .mount(&api_server)
+        .await;
+
+    let cmd = retry_wallet(
+        &wallet.keystore_path,
+        &wallet.password_path,
+        &wallet.address,
+        Some(rpc_server.uri()),
     );
-    let expected_cmd =
-        format!("taskfast fee retry {TASK_ID} --submission-fee-voucher {tx_hash_hex}");
-    assert!(
-        err_str.contains(&expected_cmd),
-        "error message must contain exact command `{expected_cmd}`: {err_str}"
+    let mut ctx = ctx_for(&api_server);
+    ctx.allow_custom_endpoints = true;
+
+    let err = run(&ctx, cmd).await.expect_err("409 must fail");
+    match err {
+        CmdError::Validation { code, message } => {
+            assert_eq!(code, "retry_in_progress");
+            assert!(message.contains("another retry holds the task"));
+        }
+        other => panic!("expected Validation retry_in_progress, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn fee_retry_reuses_pending_broadcast_tx_on_server_failure() {
+    let api_server = MockServer::start().await;
+    let rpc_server = MockServer::start().await;
+    let wallet = create_test_wallet();
+    let tx_hash_hex = format!("0x{}", "dd".repeat(32));
+
+    mock_payment_data(&api_server, TOKEN_ADDR).await;
+    mount_rpc_mocks(&rpc_server, 42431, &tx_hash_hex).await;
+
+    // First attempt: POST /retry-fee returns 500
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "error": "internal_server_error",
+            "message": "database exploded",
+        })))
+        .up_to_n_times(1)
+        .mount(&api_server)
+        .await;
+
+    let tmp_config = tempfile::tempdir().expect("tempdir");
+    let config_path = tmp_config.path().join("config.json");
+
+    let cmd = retry_wallet(
+        &wallet.keystore_path,
+        &wallet.password_path,
+        &wallet.address,
+        Some(rpc_server.uri()),
     );
+    let mut ctx = ctx_for(&api_server);
+    ctx.config_path = config_path.clone();
+    ctx.allow_custom_endpoints = true;
+
+    let err = run(&ctx, cmd).await.expect_err("first run must fail");
+    assert!(matches!(err, CmdError::Server(msg) if msg.contains("database exploded")));
+
+    // Verify exactly 1 broadcast occurred on RPC node
+    let initial_broadcasts = rpc_server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|req| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            body.get("method").and_then(|m| m.as_str()) == Some("eth_sendRawTransaction")
+        })
+        .count();
+    assert_eq!(initial_broadcasts, 1);
+
+    // Second attempt: server returns 200
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .and(body_json(json!({ "submission_fee_voucher": tx_hash_hex })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "task_id": TASK_ID,
+            "status": "pending_evaluation",
+            "message": "Submission fee charge re-attempted",
+        })))
+        .mount(&api_server)
+        .await;
+
+    let cmd2 = retry_wallet(
+        &wallet.keystore_path,
+        &wallet.password_path,
+        &wallet.address,
+        Some(rpc_server.uri()),
+    );
+    let env = run(&ctx, cmd2)
+        .await
+        .expect("second run must reuse tx and succeed");
+    let v = envelope_value(&env);
+    assert_eq!(v["data"]["task_id"], TASK_ID);
+    assert_eq!(v["data"]["submission_fee_voucher"], tx_hash_hex);
+
+    // Verify zero additional broadcasts were sent to RPC node!
+    let total_broadcasts = rpc_server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|req| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            body.get("method").and_then(|m| m.as_str()) == Some("eth_sendRawTransaction")
+        })
+        .count();
+    assert_eq!(total_broadcasts, 1, "no second broadcast allowed!");
+
+    // Verify pending tx was cleared on success
+    let store = ctx.state_store();
+    let task_uuid = uuid::Uuid::parse_str(TASK_ID).unwrap();
+    assert_eq!(store.get_pending_fee_retry(&task_uuid), None);
+}
+
+#[tokio::test]
+async fn fee_retry_guards_calldata_recipient_mismatch() {
+    let api_server = MockServer::start().await;
+    let rpc_server = MockServer::start().await;
+    let wallet = create_test_wallet();
+
+    use alloy_sol_types::SolCall;
+    let attacker_recipient = "0x8888888888888888888888888888888888888888";
+    let bad_call = taskfast_cli::cmd::fee::transferWithMemoCall {
+        to: attacker_recipient.parse().unwrap(),
+        amount: alloy_primitives::U256::from(250000),
+        memo_hash: MEMO_HASH.parse().unwrap(),
+    };
+    let bad_calldata = format!("0x{}", hex::encode(bad_call.abi_encode()));
+
+    Mock::given(method("GET"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "token_address": TOKEN_ADDR,
+            "recipient": RECIPIENT,
+            "amount": AMOUNT,
+            "memo_text": MEMO_TEXT,
+            "memo_hash": MEMO_HASH,
+            "payload_to_sign": bad_calldata,
+        })))
+        .mount(&api_server)
+        .await;
+
+    let cmd = retry_wallet(
+        &wallet.keystore_path,
+        &wallet.password_path,
+        &wallet.address,
+        Some(rpc_server.uri()),
+    );
+    let mut ctx = ctx_for(&api_server);
+    ctx.allow_custom_endpoints = true;
+
+    let err = run(&ctx, cmd)
+        .await
+        .expect_err("calldata mismatch must fail");
+    match err {
+        CmdError::Validation { code, message } => {
+            assert_eq!(code, "calldata_mismatch");
+            assert!(message.contains("recipient"), "{message}");
+        }
+        other => panic!("expected calldata_mismatch, got {other:?}"),
+    }
+
+    assert!(rpc_server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]

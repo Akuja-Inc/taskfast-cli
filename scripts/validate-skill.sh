@@ -61,8 +61,9 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
 info "running 'npx skills add ${ROOT} -l' in ${tmp}"
-if ! (cd "${tmp}" && npx -y -p skills add-skill add "${ROOT}" -l 2>&1 | tee out.log) \
-    | grep -q "${EXPECTED_NAME}"; then
+if ! (cd "${tmp}" && npx -y -p skills add-skill add "${ROOT}" -l > out.log 2>&1) \
+    || ! grep -q "${EXPECTED_NAME}" "${tmp}/out.log"; then
+  [[ -f "${tmp}/out.log" ]] && cat "${tmp}/out.log" >&2
   fail "skills installer did not surface '${EXPECTED_NAME}'"
 fi
 

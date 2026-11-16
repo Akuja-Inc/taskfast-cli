@@ -192,6 +192,135 @@ fn warn_pwd_env_once() {
     );
 }
 
+/// Decode a `0x`-prefixed or bare hex string into raw bytes.
+pub fn decode_0x_bytes(s: &str) -> Result<Vec<u8>, String> {
+    let stripped = s.strip_prefix("0x").unwrap_or(s);
+    hex::decode(stripped).map_err(|e| e.to_string())
+}
+
+/// Resolve the authenticated Tempo RPC URL for the deployment.
+///
+/// Discovers `tempo_rpc_url` from `GET /config/network`. For managed environments,
+/// this points to the authenticated proxy at `{api_base}/rpc/{network}`.
+pub async fn resolve_proxy_rpc_url(
+    client: &taskfast_client::TaskFastClient,
+    ctx: &super::Ctx,
+) -> Result<String, CmdError> {
+    let cfg = client.fetch_network_config().await.map_err(|e| match e {
+        taskfast_client::Error::Auth(_) | taskfast_client::Error::Validation { .. } => {
+            CmdError::Server(format!("fetch network config from {}: {e}", ctx.base_url()))
+        }
+        other => CmdError::from(other),
+    })?;
+    let name = ctx.environment.network().as_str();
+    if !ctx.allow_custom_endpoints
+        && ctx.environment != crate::Environment::Local
+        && cfg.networks.len() != 1
+    {
+        let advertised: Vec<&str> = cfg.networks.keys().map(String::as_str).collect();
+        let strict = std::env::var("TASKFAST_STRICT_ENV_NETWORK")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        if strict {
+            return Err(CmdError::Server(format!(
+                "deployment at {} advertises networks {advertised:?}; env {} requires \
+                 exactly [{name}]. Server-side fix tracked in issue #62. Unset \
+                 TASKFAST_STRICT_ENV_NETWORK or pass --allow-custom-endpoints to bypass.",
+                ctx.base_url(),
+                ctx.environment.as_str(),
+            )));
+        }
+        tracing::warn!(
+            api_base = %ctx.base_url(),
+            env = ctx.environment.as_str(),
+            expected = name,
+            advertised = ?advertised,
+            "deployment advertises additional networks; server-side fix tracked in #62. \
+             Set TASKFAST_STRICT_ENV_NETWORK=1 to fail-closed."
+        );
+    }
+    let entry = cfg.entry(name).map_err(|e| {
+        CmdError::Server(format!(
+            "deployment at {} does not advertise network `{name}`: {e}",
+            ctx.base_url()
+        ))
+    })?;
+    if !super::is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
+        return Err(CmdError::Server(format!(
+            "deployment at {} returned rpc_url {:?} for network `{name}`, \
+             which is not on the same host. Refusing to route RPC traffic \
+             off-host.",
+            ctx.base_url(),
+            entry.rpc_url,
+        )));
+    }
+    Ok(entry.rpc_url.clone())
+}
+
+/// Sign and broadcast an ERC-20 submission-fee transfer under the per-wallet lock.
+///
+/// Refuses to sign if the chain ID is not a known Tempo or local-dev network
+/// (unless `--allow-custom-endpoints` is active), or if the token is not on the
+/// PathUSD allowlist for that chain.
+pub async fn sign_and_send_submission_fee(
+    ctx: &super::Ctx,
+    client: &taskfast_client::TaskFastClient,
+    rpc_url: &str,
+    keystore_path: Option<PathBuf>,
+    signer: PrivateKeySigner,
+    token_address_str: &str,
+    calldata: alloy_primitives::Bytes,
+) -> Result<alloy_primitives::B256, CmdError> {
+    let token_address: Address = token_address_str.parse().map_err(|e| {
+        CmdError::Server(format!(
+            "server returned invalid token_address `{token_address_str}`: {e}"
+        ))
+    })?;
+
+    let http = ctx.rpc_http_client(client, rpc_url);
+    let rpc = taskfast_agent::tempo_rpc::TempoRpcClient::new(http, rpc_url.to_string());
+
+    let chain_id = rpc
+        .chain_id()
+        .await
+        .map_err(|e| CmdError::Server(format!("tempo rpc eth_chainId: {e}")))?;
+    if !ctx.allow_custom_endpoints && !taskfast_chains::tempo::is_known_network(chain_id) {
+        return Err(CmdError::Validation {
+            code: "unknown_chain".into(),
+            message: format!(
+                "RPC reports chain_id={chain_id} which is not a known Tempo or \
+                 local-dev network; refusing to sign. Pass --allow-custom-endpoints \
+                 to override."
+            ),
+        });
+    }
+
+    if !taskfast_chains::tempo::is_allowed_fee_token(chain_id, token_address_str) {
+        return Err(CmdError::Validation {
+            code: "fee_token_not_allowed".into(),
+            message: format!(
+                "server returned token_address {token_address_str} which is not on the PathUSD \
+                 allowlist for chain_id={chain_id}. Refusing to sign — this would \
+                 redirect your fee transfer to an arbitrary ERC-20 contract."
+            ),
+        });
+    }
+
+    eprintln!(
+        "taskfast: signing submission-fee transfer — token={} chain_id={} rpc={}",
+        token_address_str, chain_id, rpc_url
+    );
+
+    let session = crate::tempo_session::TempoSession::new(
+        signer,
+        keystore_path,
+        rpc,
+        std::time::Duration::from_mins(1),
+    );
+
+    let tx_hash = session.send_transaction(token_address, calldata).await?;
+    Ok(tx_hash)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

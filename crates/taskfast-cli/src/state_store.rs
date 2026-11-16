@@ -21,6 +21,8 @@ pub enum StateAsset {
     EventsCursor,
     /// Deduplication cache for received event IDs (`events.seen`).
     EventsSeen,
+    /// Pending submission fee retry transaction hashes (`fee_retries.json`).
+    FeeRetries,
 }
 
 impl StateAsset {
@@ -30,6 +32,7 @@ impl StateAsset {
             Self::Config => "config.json",
             Self::EventsCursor => "events.cursor",
             Self::EventsSeen => "events.seen",
+            Self::FeeRetries => "fee_retries.json",
         }
     }
 }
@@ -246,6 +249,52 @@ impl StateStore {
         }
         Self::atomic_write_file(&path, body.as_bytes())
     }
+
+    /// Read any pending fee retry transaction hash for `task_id`.
+    pub fn get_pending_fee_retry(&self, task_id: &uuid::Uuid) -> Option<String> {
+        let path = self.path_for(StateAsset::FeeRetries)?;
+        let raw = fs::read_to_string(path).ok()?;
+        let map: std::collections::HashMap<String, String> = serde_json::from_str(&raw).ok()?;
+        map.get(&task_id.to_string()).cloned()
+    }
+
+    /// Record a pending fee retry transaction hash for `task_id`.
+    pub fn record_pending_fee_retry(&self, task_id: &uuid::Uuid, tx_hash: &str) -> io::Result<()> {
+        let Some(path) = self.path_for(StateAsset::FeeRetries) else {
+            return Ok(());
+        };
+        let mut map: std::collections::HashMap<String, String> = if path.exists() {
+            fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
+        };
+        map.insert(task_id.to_string(), tx_hash.to_string());
+        let body = serde_json::to_vec_pretty(&map)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        Self::atomic_write_file(&path, &body)
+    }
+
+    /// Clear any pending fee retry transaction hash for `task_id`.
+    pub fn clear_pending_fee_retry(&self, task_id: &uuid::Uuid) -> io::Result<()> {
+        let Some(path) = self.path_for(StateAsset::FeeRetries) else {
+            return Ok(());
+        };
+        if !path.exists() {
+            return Ok(());
+        }
+        let raw = fs::read_to_string(&path)?;
+        let mut map: std::collections::HashMap<String, String> =
+            serde_json::from_str(&raw).unwrap_or_default();
+        if map.remove(&task_id.to_string()).is_some() {
+            let body = serde_json::to_vec_pretty(&map)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            Self::atomic_write_file(&path, &body)?;
+        }
+        Ok(())
+    }
 }
 
 fn ensure_dir_gitignore(dir: &Path) {
@@ -351,5 +400,25 @@ mod tests {
         queue.push_back("evt_3".to_string());
         store.rewrite_seen_lines(&queue).unwrap();
         assert_eq!(store.load_seen_lines().unwrap(), vec!["evt_3"]);
+    }
+
+    #[test]
+    fn pending_fee_retry_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let store = StateStore::from_config_path(&config_path);
+        let task_id = uuid::Uuid::new_v4();
+
+        assert_eq!(store.get_pending_fee_retry(&task_id), None);
+        store
+            .record_pending_fee_retry(&task_id, "0xabcdef123456")
+            .unwrap();
+        assert_eq!(
+            store.get_pending_fee_retry(&task_id),
+            Some("0xabcdef123456".into())
+        );
+
+        store.clear_pending_fee_retry(&task_id).unwrap();
+        assert_eq!(store.get_pending_fee_retry(&task_id), None);
     }
 }

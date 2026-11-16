@@ -55,6 +55,8 @@ humantime = "2.4.0"
 rust_decimal = { workspace = true }
 
 [dev-dependencies]
+alloy-consensus = { workspace = true }
+alloy-eips = { workspace = true }
 wiremock = "0.6.5"
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "net", "process", "io-util"] }
 tempfile = "3.27.0"
