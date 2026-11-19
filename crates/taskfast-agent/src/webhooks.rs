@@ -24,8 +24,8 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
+use jiff::Timestamp;
 use sha2::Sha256;
 use taskfast_client::api::types::{
     WebhookConfig, WebhookConfigRequest, WebhookSubscriptions, WebhookSubscriptionsUpdate,
@@ -107,7 +107,7 @@ pub async fn update_subscriptions(
 #[derive(Debug, Clone, Copy)]
 pub struct VerifyOptions {
     pub max_skew: Duration,
-    pub now: Option<DateTime<Utc>>,
+    pub now: Option<Timestamp>,
 }
 
 impl Default for VerifyOptions {
@@ -154,11 +154,11 @@ pub fn verify_signature(
         return Err(SignatureError::EmptySecret);
     }
 
-    let parsed_ts = DateTime::parse_from_rfc3339(timestamp)
-        .map_err(|_| SignatureError::InvalidTimestamp(timestamp.to_string()))?
-        .with_timezone(&Utc);
-    let now = opts.now.unwrap_or_else(Utc::now);
-    let skew_secs = (now - parsed_ts).num_seconds().abs();
+    let parsed_ts: Timestamp = timestamp
+        .parse()
+        .map_err(|_| SignatureError::InvalidTimestamp(timestamp.to_string()))?;
+    let now = opts.now.unwrap_or_else(Timestamp::now);
+    let skew_secs = (now.as_second() - parsed_ts.as_second()).abs();
     let max_secs = opts.max_skew.as_secs() as i64;
     if skew_secs > max_secs {
         return Err(SignatureError::TimestampSkewed {
@@ -201,13 +201,11 @@ mod tests {
     const BODY: &str =
         r#"{"event":"test","timestamp":"2026-03-23T12:00:00Z","data":{"message":"ok"}}"#;
 
-    fn fixed_now() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-03-23T12:01:00Z")
-            .unwrap()
-            .with_timezone(&Utc)
+    fn fixed_now() -> Timestamp {
+        "2026-03-23T12:01:00Z".parse().unwrap()
     }
 
-    fn opts_at(now: DateTime<Utc>) -> VerifyOptions {
+    fn opts_at(now: Timestamp) -> VerifyOptions {
         VerifyOptions {
             max_skew: DEFAULT_MAX_SKEW,
             now: Some(now),
@@ -268,9 +266,7 @@ mod tests {
     fn stale_timestamp_is_rejected_even_with_valid_signature() {
         let sig = sign_payload(SECRET, TS, BODY);
         // 6 minutes after the signed timestamp — past 5-min window.
-        let late = DateTime::parse_from_rfc3339("2026-03-23T12:06:01Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let late: Timestamp = "2026-03-23T12:06:01Z".parse().unwrap();
         let err = verify_signature(SECRET, TS, BODY, &sig, opts_at(late)).unwrap_err();
         assert!(matches!(err, SignatureError::TimestampSkewed { .. }));
     }
@@ -311,9 +307,7 @@ mod tests {
     fn future_timestamp_beyond_window_is_rejected() {
         let sig = sign_payload(SECRET, TS, BODY);
         // Signed "in the future" relative to now; absolute skew > 5 min.
-        let past_now = DateTime::parse_from_rfc3339("2026-03-23T11:50:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let past_now: Timestamp = "2026-03-23T11:50:00Z".parse().unwrap();
         let err = verify_signature(SECRET, TS, BODY, &sig, opts_at(past_now)).unwrap_err();
         assert!(matches!(err, SignatureError::TimestampSkewed { .. }));
     }

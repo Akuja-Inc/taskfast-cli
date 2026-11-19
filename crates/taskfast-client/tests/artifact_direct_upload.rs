@@ -61,8 +61,8 @@ fn artifact_json() -> serde_json::Value {
     })
 }
 
-fn far_future() -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now() + chrono::Duration::minutes(15)
+fn far_future() -> jiff::Timestamp {
+    jiff::Timestamp::now() + jiff::SignedDuration::from_mins(15)
 }
 
 #[tokio::test]
@@ -385,7 +385,7 @@ async fn complete_stops_retrying_at_expiry() {
         .mount(&server)
         .await;
     let err = client(&server)
-        .complete_artifact_upload(&task_id(), &UPLOAD.parse().unwrap(), chrono::Utc::now())
+        .complete_artifact_upload(&task_id(), &UPLOAD.parse().unwrap(), jiff::Timestamp::now())
         .await
         .expect_err("expired");
     assert!(matches!(err, Error::Server(_)), "{err:?}");

@@ -133,11 +133,8 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
             })?;
             // `timestamp()` is i64; clamp to u64 for the uint256. A negative
             // server-side deadline is nonsensical; treat as decode.
-            u64::try_from(dt.timestamp()).map_err(|_| {
-                CmdError::Decode(format!(
-                    "task settlement_deadline is before epoch: {}",
-                    dt.to_rfc3339()
-                ))
+            u64::try_from(dt.as_second()).map_err(|_| {
+                CmdError::Decode(format!("task settlement_deadline is before epoch: {dt}"))
             })?
         }
     };

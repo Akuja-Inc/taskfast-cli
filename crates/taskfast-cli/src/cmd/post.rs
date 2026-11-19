@@ -288,7 +288,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
 /// [`preflight`] so the runtime path never re-validates (gh#144).
 struct Preflight {
     wallet_address: String,
-    execution_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    execution_deadline: Option<jiff::Timestamp>,
     completion_criteria: Vec<CompletionCriterionInput>,
     pickup_hours: TaskDraftPrepareRequestPickupDeadlineHours,
     /// User-supplied `--rpc-url` / `TEMPO_RPC_URL`, already through the
@@ -448,14 +448,12 @@ fn resolve_criteria(
     Ok(out)
 }
 
-fn parse_iso_opt(
-    s: Option<&str>,
-    flag: &str,
-) -> Result<Option<chrono::DateTime<chrono::Utc>>, CmdError> {
+fn parse_iso_opt(s: Option<&str>, flag: &str) -> Result<Option<jiff::Timestamp>, CmdError> {
     match s {
         None => Ok(None),
-        Some(raw) => chrono::DateTime::parse_from_rfc3339(raw)
-            .map(|d| Some(d.with_timezone(&chrono::Utc)))
+        Some(raw) => raw
+            .parse::<jiff::Timestamp>()
+            .map(Some)
             .map_err(|e| CmdError::Usage(format!("{flag} not a valid RFC3339 timestamp: {e}"))),
     }
 }
@@ -502,6 +500,23 @@ mod tests {
     fn validate_override_allows_plain_http_on_testnet() {
         validate_override_rpc_url("http://my-testnet.example", Network::Testnet, true)
             .expect("testnet does not enforce HTTPS");
+    }
+
+    #[test]
+    fn parse_iso_accepts_rfc3339_deadline() {
+        let got = parse_iso_opt(Some("2026-03-01T12:00:00Z"), "--execution-deadline").unwrap();
+        assert_eq!(
+            got.map(|d| d.to_string()),
+            Some("2026-03-01T12:00:00Z".into())
+        );
+    }
+
+    #[test]
+    fn parse_iso_rejects_non_rfc3339_and_passes_none_through() {
+        assert!(parse_iso_opt(Some("tomorrow"), "--execution-deadline").is_err());
+        assert!(parse_iso_opt(None, "--execution-deadline")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

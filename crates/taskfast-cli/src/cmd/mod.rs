@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use jiff::SignedDuration;
+
 use rust_decimal::Decimal;
 use thiserror::Error;
 
@@ -452,6 +454,20 @@ fn check_network_invariant(
     Ok(())
 }
 
+/// Parse a human-readable duration (`3min`, `90s`, `1h`). jiff replaces
+/// humantime (unmaintained, RUSTSEC-2026-0542) and understands both the
+/// friendly format humantime served and ISO 8601 (`PT90S`). Returns std
+/// `Duration` because every timeout consumer (reqwest, tokio) speaks it.
+pub fn parse_duration(s: &str) -> Result<Duration, String> {
+    let sd: SignedDuration = s
+        .parse()
+        .map_err(|e| format!("invalid duration {s:?}: {e}"))?;
+    if sd.is_negative() {
+        return Err(format!("duration must not be negative: {s:?}"));
+    }
+    Ok(sd.unsigned_abs())
+}
+
 /// Parse a human-readable duration string from the config file,
 /// wrapping a malformed value in [`CmdError::Usage`] that names the
 /// field. Startup-time parsing lets a bad `receipt_timeout: "7xyz"`
@@ -462,9 +478,9 @@ fn parse_duration_cfg(
 ) -> Result<Option<Duration>, CmdError> {
     match raw {
         None => Ok(None),
-        Some(s) => humantime::parse_duration(s).map(Some).map_err(|e| {
-            CmdError::Usage(format!("config `{field}` is not a duration: {s:?} ({e})"))
-        }),
+        Some(s) => parse_duration(s)
+            .map(Some)
+            .map_err(|e| CmdError::Usage(format!("config `{field}` is not a duration: {e}"))),
     }
 }
 
@@ -874,6 +890,32 @@ mod tests {
     fn resolve_duration_falls_back_to_default() {
         let out = resolve_duration(None, None, Duration::from_secs(30));
         assert_eq!(out, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn parse_duration_accepts_documented_flag_forms() {
+        // Forms the help text documents (`3min`, `90s`), the forms gh#235
+        // pins (`30s`, `5m`, `1h`), and a combined form humantime accepted.
+        for (input, expected) in [
+            ("3min", 180),
+            ("90s", 90),
+            ("30s", 30),
+            ("5m", 300),
+            ("1h", 3600),
+            ("1h30m", 5400),
+        ] {
+            assert_eq!(
+                parse_duration(input),
+                Ok(Duration::from_secs(expected)),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_duration_rejects_garbage_and_negatives() {
+        assert!(parse_duration("7xyz").is_err());
+        assert!(parse_duration("-5s").is_err());
     }
 
     fn ctx_with_threshold(threshold: Option<&str>) -> Ctx {
