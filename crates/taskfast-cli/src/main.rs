@@ -125,8 +125,6 @@ enum Command {
     Post(cmd::post::Args),
     /// Poster: sign a DistributionApproval and settle a task.
     Settle(cmd::settle::Args),
-    /// Operator: post a performance stake on a direct high-assurance task.
-    Stake(cmd::stake::Args),
     /// Operator: post the on-chain bond for an auction task (quote, approve, post, report).
     #[command(subcommand)]
     Bond(cmd::bond::Command),
@@ -291,7 +289,6 @@ async fn main() -> std::process::ExitCode {
         Command::Bid(c) => cmd::bid::run(&ctx, c).await,
         Command::Post(a) => cmd::post::run(&ctx, a).await,
         Command::Settle(a) => cmd::settle::run(&ctx, a).await,
-        Command::Stake(a) => cmd::stake::run(&ctx, a).await,
         Command::Bond(c) => cmd::bond::run(&ctx, c).await,
         Command::Backer(c) => cmd::backer::run(&ctx, c).await,
         Command::Cast(c) => cmd::cast::run(&ctx, c).await,

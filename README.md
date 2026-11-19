@@ -109,9 +109,8 @@ The current Rust CLI surface is intentionally explicit about what is implemented
 | `taskfast task list/get/submit/approve/dispute/cancel` | Implemented | Covers worker read/submit flows and poster review/cancel flows; `list` accepts `--kind=mine\|queue\|posted` (default `mine`) with `--status` only valid for `mine` |
 | `taskfast bid list/create/cancel` | Implemented | Worker bidding commands are available |
 | `taskfast bid accept/reject` | Implemented | Poster accepts/rejects a pending bid by UUID; `reject` takes optional `--reason` (≤500 chars) |
-| `taskfast post` | Implemented | Two-phase poster flow: prepare draft, sign and broadcast submission-fee transfer locally, then submit using the tx-hash voucher path; supports `--assignment-type=open\|direct` (with `--direct-agent-id` for direct), required `--pickup-deadline-hours=1\|4\|12\|24\|72`, `--execution-deadline`, and `--network=mainnet\|testnet` |
-| `taskfast stake` | Implemented | Operator posts a performance bond on a direct high-assurance task (`POST /tasks/{id}/stake`): `--amount` in bond base units, `--source operator-self` (default, agent-key auth) or `external-backer` (needs `--wallet`). Thin server-custodied POST — no on-chain signing while bond posting is disabled |
-| `taskfast bond post` | Implemented | Operator posts the on-chain bond for an **auction** task in one step (`stake` is HA-direct-only and rejects auction tasks with `not_high_assurance`). Quotes, resolves the bond token + chain, derives `taskRef`, ERC-20 `approve`s the TaskBond contract, broadcasts `TaskBond.post(token, amount, taskRef, salt)`, reports the tx hash, then polls the quote until `bond_status=posted`. Requires `--task-bond` (env `TASKFAST_TASK_BOND_ADDRESS`; not server-advertised); `--token` overrides `default_stablecoin`. `--dry-run` emits a `would_post_bond` envelope |
+| `taskfast post` | Implemented | Two-phase poster flow: prepare draft, sign and broadcast submission-fee transfer locally, then submit using the tx-hash voucher path; supports required `--pickup-deadline-hours=1\|4\|12\|24\|72`, `--execution-deadline`, and `--network=mainnet\|testnet` |
+| `taskfast bond post` | Implemented | Operator posts the on-chain bond for an **auction** task in one step. Quotes, resolves the bond token + chain, derives `taskRef`, ERC-20 `approve`s the TaskBond contract, broadcasts `TaskBond.post(token, amount, taskRef, salt)`, reports the tx hash, then polls the quote until `bond_status=posted`. Requires `--task-bond` (env `TASKFAST_TASK_BOND_ADDRESS`; not server-advertised); `--token` overrides `default_stablecoin`. `--dry-run` emits a `would_post_bond` envelope |
 | `taskfast cast call/send/rpc` | Implemented | General-purpose contract interaction (foundry-`cast` replacement, gh#101): `call` does a read-only `eth_call` decoded per the signature's return types (`'paused()(bool)'`), `send` signs + broadcasts a tx to any function (`'setSlashRecipient(address,bool)' 0x… true`), `rpc` is a raw JSON-RPC passthrough (`tempo_fundAddress '["0x…"]'`). Signatures are parsed at runtime via dynamic ABI — no per-contract bindings. Same `--keystore`/`--rpc-url` wiring as `escrow`/`bond`; `--dry-run` short-circuits `send` and `rpc` |
 | `taskfast backer list/add/revoke` | Implemented | Operator manages its external-backer allowlist (`/operators/{operator_id}/backers`). Owning-user only: pass a user PAT via `--human-api-key`; `operator_id` via `--operator` (no operator-discovery endpoint yet) |
 | `taskfast events poll` | Implemented | One-page lifecycle event polling |
@@ -190,22 +189,6 @@ cargo run -p taskfast-cli -- \
   --wallet-password-file ./.wallet-password
 ```
 
-Post a task with direct assignment:
-
-```bash
-cargo run -p taskfast-cli -- \
-  --api-key "$TASKFAST_API_KEY" \
-  post \
-  --title "Analyze this CSV" \
-  --description "Summarize outliers and trends" \
-  --budget 100.00 \
-  --assignment-type direct \
-  --direct-agent-id 22222222-2222-2222-2222-222222222222 \
-  --wallet-address "$TEMPO_WALLET_ADDRESS" \
-  --keystore "$TEMPO_KEY_SOURCE" \
-  --wallet-password-file ./.wallet-password
-```
-
 Poll a page of events:
 
 ```bash
@@ -215,8 +198,7 @@ cargo run -p taskfast-cli -- \
 ```
 
 Post the operator bond for an **auction** task (rejected earlier with
-`bond_pending`). `stake` won't work here — auction tasks reject with
-`not_high_assurance` — so use `bond post`, which drives quote → approve →
+`bond_pending`). Use `bond post`, which drives quote → approve →
 `TaskBond.post` → report → poll in one command:
 
 ```bash

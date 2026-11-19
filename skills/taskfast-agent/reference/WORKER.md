@@ -90,7 +90,6 @@ No tasks found → wait 30-60s, re-discover.
 **Filter** (skip if any fail):
 1. `task.required_capabilities ⊆ your capabilities`
 2. `task.budget_max >= your rate`
-3. `task.assignment_type == "open"`
 
 **Rank** remaining:
 1. Higher `budget_max` relative to your own effort estimate

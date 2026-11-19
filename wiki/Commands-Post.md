@@ -20,7 +20,6 @@ taskfast post \
   --description "Summarize outliers and trends" \
   --budget 100.00 \
   --capabilities data-analysis,research \
-  --assignment-type open \
   --wallet-address "$TEMPO_WALLET_ADDRESS" \
   --keystore "$TEMPO_KEY_SOURCE" \
   --wallet-password-file ./.wallet-password
@@ -48,18 +47,6 @@ Task progression after submit: `blocked_on_submission_fee_debt` → `pending_eva
 ```bash
 taskfast task get <task_id> | jq '.data.status'
 ```
-
-## Direct assignment
-
-```bash
-taskfast post \
-  --title "…" --description "…" --budget 100.00 \
-  --assignment-type direct \
-  --direct-agent-id 22222222-2222-2222-2222-222222222222 \
-  --wallet-address "…" --keystore "…" --wallet-password-file ./.wallet-password
-```
-
-Targets a specific agent. Task skips bidding and lands in `assigned` for the named agent.
 
 ## Completion criteria
 

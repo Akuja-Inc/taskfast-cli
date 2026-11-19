@@ -34,7 +34,7 @@ use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_client::api::types::{
-    CompletionSubmission, DisputeRequest, ListMyTasksStatusItem, ReassignTaskBody, TaskEditRequest,
+    CompletionSubmission, DisputeRequest, ListMyTasksStatusItem, TaskEditRequest,
 };
 use taskfast_client::map_api_error;
 use taskfast_client::TaskFastClient;
@@ -65,27 +65,15 @@ pub enum Command {
     Abort(IdOnlyArgs),
     /// Poster: list bids received on a task (paginated).
     Bids(BidsArgs),
-    /// Poster: reassign a direct-assigned task to a different agent.
-    Reassign(ReassignArgs),
     /// Poster: reopen an `abandoned` task for rebidding (returns to `open`).
     Reopen(IdOnlyArgs),
-    /// Poster: convert a direct-assigned task into an open bid auction.
+    /// Poster: return an `unassigned` task (refused or timed out) to open bidding.
     Open(IdOnlyArgs),
     /// Superseded: prints a redirect to `taskfast fee retry` (the server now
     /// requires the poster's freshly signed fee transfer). Makes no request.
     RetryFee(IdOnlyArgs),
     /// Poster: edit task metadata (title/description/budget/windows).
     Edit(EditArgs),
-}
-
-#[derive(Debug, Parser)]
-pub struct ReassignArgs {
-    /// Task UUID.
-    pub id: String,
-
-    /// New assignee UUID.
-    #[arg(long)]
-    pub agent_id: String,
 }
 
 #[derive(Debug, Parser)]
@@ -253,7 +241,6 @@ pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
         Command::Concede(args) => concede(ctx, args).await,
         Command::Abort(args) => abort(ctx, args).await,
         Command::Bids(args) => bids(ctx, args).await,
-        Command::Reassign(args) => reassign(ctx, args).await,
         Command::Reopen(args) => reopen(ctx, args).await,
         Command::Open(args) => open(ctx, args).await,
         Command::RetryFee(args) => retry_fee(&args),
@@ -590,35 +577,6 @@ async fn abort(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
         ctx.environment,
         ctx.dry_run,
         json!({ "abort": resp }),
-    ))
-}
-
-async fn reassign(ctx: &Ctx, args: ReassignArgs) -> CmdResult {
-    let task_id = Uuid::parse_str(&args.id)
-        .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
-    let agent_id = Uuid::parse_str(&args.agent_id)
-        .map_err(|e| CmdError::Usage(format!("--agent-id must be a UUID: {e}")))?;
-    if ctx.dry_run {
-        return Ok(Envelope::success(
-            ctx.environment,
-            ctx.dry_run,
-            json!({
-                "action": "would_reassign",
-                "task_id": task_id.to_string(),
-                "agent_id": agent_id.to_string(),
-            }),
-        ));
-    }
-    let client = ctx.client()?;
-    let body = ReassignTaskBody { agent_id };
-    let resp = match client.inner().reassign_task(&task_id, &body).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
-    Ok(Envelope::success(
-        ctx.environment,
-        ctx.dry_run,
-        json!({ "reassign": resp }),
     ))
 }
 

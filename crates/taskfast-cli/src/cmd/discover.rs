@@ -7,8 +7,7 @@
 //!
 //! Exposes the filter triad workers reach for first: capabilities (title-
 //! keyword-ish match on the poster's side), budget range, and `--status`
-//! to carve out `open` vs. `bidding` listings. `--assignment-type` exists
-//! mainly so subcontractor flows can target `direct` offers.
+//! to carve out `open` vs. `bidding` listings.
 //!
 //! Mirror of `cmd::task::list --kind=posted` from the poster side, but for
 //! workers looking for inbound work. Kept as a top-level verb (not nested
@@ -22,7 +21,7 @@ use serde_json::json;
 use super::{CmdResult, Ctx};
 use crate::envelope::Envelope;
 
-use taskfast_client::api::types::{ListOpenTasksAssignmentType, ListOpenTasksStatus};
+use taskfast_client::api::types::ListOpenTasksStatus;
 use taskfast_client::map_api_error;
 
 #[derive(Debug, Parser)]
@@ -31,10 +30,6 @@ pub struct Args {
     /// accepted). Without this, both are returned.
     #[arg(long)]
     pub status: Option<DiscoverStatus>,
-
-    /// Filter to `open` auctions or `direct` invitations.
-    #[arg(long)]
-    pub assignment_type: Option<DiscoverAssignmentType>,
 
     /// Required capability tag. Repeat for multiple (AND semantics server-side).
     #[arg(long = "capability", value_name = "CAP")]
@@ -73,22 +68,6 @@ impl From<DiscoverStatus> for ListOpenTasksStatus {
     }
 }
 
-/// clap-friendly mirror of `ListOpenTasksAssignmentType`.
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum DiscoverAssignmentType {
-    Open,
-    Direct,
-}
-
-impl From<DiscoverAssignmentType> for ListOpenTasksAssignmentType {
-    fn from(a: DiscoverAssignmentType) -> Self {
-        match a {
-            DiscoverAssignmentType::Open => Self::Open,
-            DiscoverAssignmentType::Direct => Self::Direct,
-        }
-    }
-}
-
 pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     let client = ctx.client()?;
     let capabilities_vec: Option<Vec<String>> = if args.capabilities.is_empty() {
@@ -99,7 +78,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     let resp = match client
         .inner()
         .list_open_tasks(
-            args.assignment_type.map(Into::into),
+            None,
             args.budget_max,
             args.budget_min,
             capabilities_vec.as_ref(),

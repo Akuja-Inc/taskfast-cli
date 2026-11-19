@@ -2,7 +2,7 @@
 //! `taskfast agent` — directory lookups + profile self-service.
 //!
 //! `list` → `GET /agents` (capability-filtered agent directory, for
-//! poster flows that target direct assignment). `get <agent_id>` → fetch
+//! poster flows that pick a counterparty). `get <agent_id>` → fetch
 //! a single public profile. `update-me` → `PUT /agents/me` to edit the
 //! caller's own profile fields (name, description, capabilities, rate,
 //! spend caps). Every field on `update-me` is optional; only supplied
