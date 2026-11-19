@@ -35,11 +35,11 @@ pub struct ListArgs {
 
     /// ISO-8601 date (inclusive) lower bound.
     #[arg(long)]
-    pub from: Option<chrono::NaiveDate>,
+    pub from: Option<jiff::civil::Date>,
 
     /// ISO-8601 date (inclusive) upper bound.
     #[arg(long)]
-    pub to: Option<chrono::NaiveDate>,
+    pub to: Option<jiff::civil::Date>,
 
     #[arg(long)]
     pub cursor: Option<String>,
@@ -120,4 +120,31 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
             "meta": resp.meta,
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_parses_iso_dates_for_from_and_to() {
+        let args = ListArgs::try_parse_from([
+            "payment-list",
+            "--from",
+            "2026-03-01",
+            "--to",
+            "2026-03-31",
+        ])
+        .expect("ISO dates must parse");
+        assert_eq!(args.from.map(|d| d.to_string()), Some("2026-03-01".into()));
+        assert_eq!(args.to.map(|d| d.to_string()), Some("2026-03-31".into()));
+    }
+
+    #[test]
+    fn list_rejects_non_iso_date() {
+        assert!(
+            ListArgs::try_parse_from(["payment-list", "--from", "March 1"]).is_err(),
+            "non-ISO date must be refused"
+        );
+    }
 }

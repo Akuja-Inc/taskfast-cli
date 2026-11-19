@@ -25,7 +25,7 @@ tokio = { workspace = true, features = ["fs"] }
 tracing.workspace = true
 progenitor-client = "0.15.0"
 bytes = "1.12.1"
-chrono = { version = "0.4.45", default-features = false, features = ["serde", "clock"] }
+jiff.workspace = true
 uuid.workspace = true
 rand = "0.8.8"
 regress = "0.12.0"
@@ -34,6 +34,7 @@ futures = { workspace = true }
 
 [build-dependencies]
 progenitor = "0.15.0"
+schemars = "0.8.22"
 openapiv3 = { version = "2.2.0", default-features = false }
 prettyplease = "0.3.0"
 syn = { version = "3.0.6", features = ["full"] }
@@ -52,4 +53,4 @@ http = "1.5.0"
 # positives. If the spec drops a type (e.g., base64/rand), leave the entry
 # until the next release so re-adding it later is a one-line revert.
 [package.metadata.cargo-machete]
-ignored = ["progenitor-client", "bytes", "chrono", "regress", "futures", "rand", "base64"]
+ignored = ["progenitor-client", "bytes", "regress", "futures", "rand", "base64"]

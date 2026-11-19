@@ -37,6 +37,23 @@ pub fn page_limit(n: i64) -> Option<std::num::NonZeroU64> {
     u64::try_from(n).ok().and_then(std::num::NonZeroU64::new)
 }
 
+#[cfg(test)]
+mod tests {
+    /// typify matches schema→type conversions by exact `SchemaObject`
+    /// equality, so a spec date that grows an extra constraint silently
+    /// reverts to chrono; this pins the gh#235 migration.
+    #[test]
+    fn generated_client_maps_dates_to_jiff() {
+        let codegen = std::fs::read_to_string(env!("TASKFAST_CODEGEN_PATH")).unwrap();
+        assert!(
+            !codegen.contains("chrono::"),
+            "generated client drifted back to chrono (gh#235)"
+        );
+        assert!(codegen.contains("::jiff::Timestamp"));
+        assert!(codegen.contains("::jiff::civil::Date"));
+    }
+}
+
 /// Generated typed client + DTOs for the TaskFast OpenAPI spec.
 ///
 /// Produced by `progenitor` from `spec/openapi.yaml` at build time; see

@@ -32,8 +32,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::{
-    is_proxy_rpc_url, network_policy_for_chain_id, validate_override_rpc_url, CmdError, CmdResult,
-    Ctx,
+    is_proxy_rpc_url, network_policy_for_chain_id, parse_duration, validate_override_rpc_url,
+    CmdError, CmdResult, Ctx,
 };
 use crate::envelope::Envelope;
 
@@ -88,7 +88,7 @@ pub struct SignArgs {
     #[arg(
         long,
         env = "TASKFAST_RECEIPT_TIMEOUT",
-        value_parser = humantime::parse_duration,
+        value_parser = parse_duration,
     )]
     pub receipt_timeout: Option<Duration>,
 }
@@ -493,7 +493,7 @@ fn server_deadline_or_abort(params: &BidEscrowParamsResponse) -> Result<Option<u
             "server poster_approval_min_lifetime={min_lifetime} is negative"
         ))
     })?;
-    let now = u64::try_from(chrono::Utc::now().timestamp())
+    let now = u64::try_from(jiff::Timestamp::now().as_second())
         .map_err(|_| CmdError::Decode("system clock before epoch".into()))?;
     let remaining = deadline.saturating_sub(now);
     if remaining < min_lifetime {

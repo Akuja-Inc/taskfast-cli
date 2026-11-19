@@ -29,7 +29,8 @@ use clap::Parser;
 use serde_json::{json, Value};
 
 use super::{
-    is_proxy_rpc_url, resolve_duration, validate_override_rpc_url, CmdError, CmdResult, Ctx,
+    is_proxy_rpc_url, parse_duration, resolve_duration, validate_override_rpc_url, CmdError,
+    CmdResult, Ctx,
 };
 use crate::envelope::Envelope;
 
@@ -95,7 +96,7 @@ pub struct SendArgs {
 
     /// Receipt-polling ceiling — human duration (`3min`, `90s`). Falls back to
     /// `receipt_timeout` in config, then a network-aware default.
-    #[arg(long, env = "TASKFAST_RECEIPT_TIMEOUT", value_parser = humantime::parse_duration)]
+    #[arg(long, env = "TASKFAST_RECEIPT_TIMEOUT", value_parser = parse_duration)]
     pub receipt_timeout: Option<Duration>,
 }
 
