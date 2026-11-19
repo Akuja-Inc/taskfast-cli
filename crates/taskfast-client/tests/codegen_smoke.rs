@@ -43,7 +43,7 @@ async fn platform_config_happy_path_roundtrips() {
         .mount(&server)
         .await;
 
-    let client = Client::new(&server.uri());
+    let client = Client::new(&server.uri()).expect("generated client builds");
     let resp = client
         .get_platform_config()
         .await
@@ -87,7 +87,7 @@ async fn non_2xx_surfaces_as_unexpected_response() {
         .mount(&server)
         .await;
 
-    let client = Client::new(&server.uri());
+    let client = Client::new(&server.uri()).expect("generated client builds");
     let err = client
         .get_platform_config()
         .await
