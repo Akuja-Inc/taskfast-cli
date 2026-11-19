@@ -45,6 +45,12 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", spec_path.display());
+    // Exported so tests can assert the generated file never drifts back to
+    // chrono (see `generated_client_maps_dates_to_jiff` in src/lib.rs).
+    println!(
+        "cargo:rustc-env=TASKFAST_CODEGEN_PATH={}",
+        out_path.display()
+    );
 
     let raw = fs::read_to_string(spec_path)
         .unwrap_or_else(|e| panic!("read spec at {}: {e}", spec_path.display()));
@@ -65,6 +71,30 @@ fn main() {
     // after each `exec`; see crates/taskfast-client/src/corr.rs.
     let mut settings = progenitor::GenerationSettings::default();
     settings.with_post_hook(quote::quote! { crate::record_corr });
+    // Map OpenAPI `date-time`/`date` strings to jiff (gh#235) — chrono is
+    // unmaintained (RUSTSEC-2026-0543). typify matches conversions by exact
+    // `SchemaObject` equality (metadata ignored); progenitor's
+    // `simplify_default()` leaves constraint-free string schemas with
+    // `string: None`, so the registered schema must stay bare too. If a spec
+    // date ever grows extra constraints (pattern, enum, x-extension), its
+    // schema stops matching and the generated file silently reverts to
+    // chrono — the `generated_client_maps_dates_to_jiff` test catches drift.
+    for (format, rust_type) in [
+        ("date-time", "::jiff::Timestamp"),
+        ("date", "::jiff::civil::Date"),
+    ] {
+        settings.with_conversion(
+            schemars::schema::SchemaObject {
+                instance_type: Some(schemars::schema::SingleOrVec::Single(Box::new(
+                    schemars::schema::InstanceType::String,
+                ))),
+                format: Some(format.to_owned()),
+                ..Default::default()
+            },
+            rust_type,
+            [progenitor::TypeImpl::Display, progenitor::TypeImpl::FromStr].into_iter(),
+        );
+    }
     let mut generator = progenitor::Generator::new(&settings);
     let tokens = generator
         .generate_tokens(&spec)

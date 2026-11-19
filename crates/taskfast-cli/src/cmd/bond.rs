@@ -36,7 +36,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::{
-    is_proxy_rpc_url, resolve_duration, validate_override_rpc_url, CmdError, CmdResult, Ctx,
+    is_proxy_rpc_url, parse_duration, resolve_duration, validate_override_rpc_url, CmdError,
+    CmdResult, Ctx,
 };
 use crate::envelope::Envelope;
 
@@ -143,13 +144,13 @@ pub struct PostArgs {
 
     /// Receipt-polling ceiling — human duration (`3min`, `90s`). Falls back to
     /// `receipt_timeout` in config, then a chain-aware default.
-    #[arg(long, env = "TASKFAST_RECEIPT_TIMEOUT", value_parser = humantime::parse_duration)]
+    #[arg(long, env = "TASKFAST_RECEIPT_TIMEOUT", value_parser = parse_duration)]
     pub receipt_timeout: Option<Duration>,
 
     /// How long to poll the quote for `bond_status=posted` after reporting.
     /// A timeout returns `posting` (the tx is on-chain; verification is async),
     /// not an error.
-    #[arg(long, env = "TASKFAST_BOND_VERIFY_TIMEOUT", value_parser = humantime::parse_duration)]
+    #[arg(long, env = "TASKFAST_BOND_VERIFY_TIMEOUT", value_parser = parse_duration)]
     pub verify_timeout: Option<Duration>,
 }
 

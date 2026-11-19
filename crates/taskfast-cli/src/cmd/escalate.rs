@@ -48,8 +48,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::{
-    is_proxy_rpc_url, network_policy_for_chain_id, validate_override_rpc_url, CmdError, CmdResult,
-    Ctx,
+    is_proxy_rpc_url, network_policy_for_chain_id, parse_duration, validate_override_rpc_url,
+    CmdError, CmdResult, Ctx,
 };
 use crate::envelope::{Envelope, SecurityWarning};
 
@@ -102,7 +102,7 @@ pub struct SignArgs {
     #[arg(
         long,
         env = "TASKFAST_RECEIPT_TIMEOUT",
-        value_parser = humantime::parse_duration,
+        value_parser = parse_duration,
     )]
     pub receipt_timeout: Option<Duration>,
 }
@@ -134,7 +134,7 @@ pub struct TimeoutResolveArgs {
     #[arg(
         long,
         env = "TASKFAST_RECEIPT_TIMEOUT",
-        value_parser = humantime::parse_duration,
+        value_parser = parse_duration,
     )]
     pub receipt_timeout: Option<Duration>,
 }
@@ -297,7 +297,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                  until it records the lapse, which completes the task in the worker's favor",
                 params
                     .escalation_deadline
-                    .map_or_else(|| "unknown".to_string(), |d| d.to_rfc3339())
+                    .map_or_else(|| "unknown".to_string(), |d| d.to_string())
             ),
         });
     }
@@ -574,8 +574,8 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
     if now < eligible_at {
         let at = i64::try_from(eligible_at)
             .ok()
-            .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
-            .map_or_else(|| eligible_at.to_string(), |d| d.to_rfc3339());
+            .and_then(|s| jiff::Timestamp::from_second(s).ok())
+            .map_or_else(|| eligible_at.to_string(), |d| d.to_string());
         return Err(CmdError::Validation {
             code: "dispute_timeout_not_elapsed".into(),
             message: format!(

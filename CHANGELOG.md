@@ -13,6 +13,15 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Changed
+
+- **Replace `chrono` and `humantime` with `jiff` (Closes #235).**
+  Removes both unmaintained dependencies (RUSTSEC-2026-0543, RUSTSEC-2026-0542) from the workspace.
+  The generated client maps OpenAPI `date-time` fields to `jiff::Timestamp` and `date` fields to `jiff::civil::Date` via a progenitor schema conversion, with a regression test that fails if the generated code ever drifts back to `chrono`.
+  `taskfast-agent::webhooks::VerifyOptions::now` is now `Option<jiff::Timestamp>`, `taskfast-client`'s `complete_artifact_upload` and `ArtifactUpload::Put::expires_at` use `jiff::Timestamp`, and the CLI's `--execution-deadline`, `payment --from/--to`, and trace timestamps move to `jiff` types.
+  The six duration flags (`receipt_timeout`, `verify_timeout`) parse through jiff instead of `humantime`: the documented forms (`3min`, `90s`) and common forms (`30s`, `5m`, `1h`, `1h30m`) keep working, ISO 8601 durations (`PT90S`) are newly accepted, and negative durations are rejected. Flag types stay `std::time::Duration`, so config precedence and timeout consumers are unchanged.
+  Source-breaking for `taskfast-client` (public signatures now take `jiff::Timestamp`), `taskfast-agent` (`VerifyOptions`), and `taskfast-cli` (flag value types); ships in the next minor bump. No API wire format changes.
+
 ## [0.22.0] - 2026-11-16
 
 ### Changed

@@ -372,7 +372,7 @@ fn roll_changelog(content: &str, version: &str, date: &str) -> Result<RolledChan
 
 /// Today's date as `YYYY-MM-DD` in UTC, for the rolled changelog heading.
 fn today_utc() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
+    jiff::Timestamp::now().strftime("%Y-%m-%d").to_string()
 }
 
 fn bump_semver(current: &str, level: BumpLevel) -> Result<String> {

@@ -114,10 +114,10 @@ fn try_emit(
     result: &CmdResult,
     corr: Option<&str>,
 ) -> std::io::Result<()> {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let agent = resolve_agent(std::env::var(AGENT_ENV).ok().as_deref(), agent_id);
     let record = build_record(
-        now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        now.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
         agent.clone(),
         op,
         corr.map(str::to_string),
@@ -133,7 +133,7 @@ fn try_emit(
     let file = dir.join(format!(
         "trace-{}-{}.jsonl",
         sanitize(&agent),
-        now.format("%Y-%m-%d")
+        now.strftime("%Y-%m-%d")
     ));
     // O_APPEND makes a single write(2) atomic across processes (the line is
     // ~200 B, well under PIPE_BUF = 4096). `write_all` could split into several

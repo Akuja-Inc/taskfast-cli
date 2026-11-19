@@ -251,7 +251,7 @@ impl TaskFastClient {
         &self,
         task_id: &uuid::Uuid,
         upload_id: &uuid::Uuid,
-        expires_at: chrono::DateTime<chrono::Utc>,
+        expires_at: jiff::Timestamp,
     ) -> Result<api::types::Artifact> {
         let url = format!(
             "{}/tasks/{}/artifacts/uploads/{}/complete",
@@ -284,7 +284,7 @@ impl TaskFastClient {
                 Ok(resp) => return Err(classify_response(resp).await),
                 Err(e) => Error::Network(e),
             };
-            if chrono::Utc::now() + delay >= expires_at {
+            if jiff::Timestamp::now() + delay >= expires_at {
                 return Err(err);
             }
             tracing::warn!(
@@ -457,7 +457,7 @@ pub enum ArtifactUpload {
         #[serde(default)]
         headers: HashMap<String, String>,
         /// When the presigned URL and the pending upload expire.
-        expires_at: chrono::DateTime<chrono::Utc>,
+        expires_at: jiff::Timestamp,
     },
     /// The server stores uploads itself (development's Local adapter): use
     /// [`TaskFastClient::upload_artifact`].

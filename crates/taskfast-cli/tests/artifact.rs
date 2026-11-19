@@ -269,7 +269,7 @@ fn put_ticket(url: String) -> serde_json::Value {
         "method": "put",
         "url": url,
         "headers": {"content-type": "text/plain"},
-        "expires_at": (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339(),
+        "expires_at": (jiff::Timestamp::now() + jiff::SignedDuration::from_mins(15)).to_string(),
     })
 }
 
