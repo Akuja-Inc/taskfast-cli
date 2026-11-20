@@ -5,7 +5,7 @@ use serde_json::json;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use taskfast_cli::cmd::discover::{run, Args, DiscoverAssignmentType, DiscoverStatus};
+use taskfast_cli::cmd::discover::{run, Args, DiscoverStatus};
 use taskfast_cli::cmd::{CmdError, Ctx};
 use taskfast_cli::{Envelope, Environment};
 
@@ -28,7 +28,6 @@ fn envelope_value(env: &Envelope) -> serde_json::Value {
 fn default_args() -> Args {
     Args {
         status: None,
-        assignment_type: None,
         capabilities: vec![],
         budget_max: None,
         budget_min: None,
@@ -44,7 +43,6 @@ async fn discover_returns_task_list_envelope() {
     Mock::given(method("GET"))
         .and(path("/tasks"))
         .and(query_param("status", "open"))
-        .and(query_param("assignment_type", "open"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [
                 {"id": "00000000-0000-0000-0000-000000000001", "title": "t1"},
@@ -57,7 +55,6 @@ async fn discover_returns_task_list_envelope() {
 
     let args = Args {
         status: Some(DiscoverStatus::Open),
-        assignment_type: Some(DiscoverAssignmentType::Open),
         ..default_args()
     };
     let envelope = run(&ctx_for(&server), args).await.expect("discover ok");

@@ -25,7 +25,6 @@ use std::path::PathBuf;
 use alloy_primitives::{Address, Bytes};
 use clap::Parser;
 use serde_json::json;
-use uuid::Uuid;
 
 use super::wallet_args::{decode_0x_bytes, resolve_proxy_rpc_url, sign_and_send_submission_fee};
 use super::{validate_override_rpc_url, CmdError, CmdResult, Ctx};
@@ -90,15 +89,6 @@ pub struct Args {
     #[arg(long)]
     pub venue: Option<String>,
 
-    /// Assignment model: `open` (auction to any qualified bidder) or
-    /// `direct` (assign to a specific agent; requires `--direct-agent-id`).
-    #[arg(long, default_value = "open")]
-    pub assignment_type: AssignmentType,
-
-    /// Direct assignment target. Required when `--assignment-type=direct`.
-    #[arg(long)]
-    pub direct_agent_id: Option<String>,
-
     /// Poster's on-chain wallet address (0x-prefixed). Matches `TEMPO_WALLET_ADDRESS`
     /// written by `taskfast init`.
     #[arg(long, env = "TEMPO_WALLET_ADDRESS")]
@@ -129,30 +119,6 @@ pub struct Args {
     pub yes: bool,
 }
 
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum AssignmentType {
-    Open,
-    Direct,
-}
-
-impl AssignmentType {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Open => "open",
-            Self::Direct => "direct",
-        }
-    }
-}
-
-impl From<AssignmentType> for TaskDraftPrepareRequestAssignmentType {
-    fn from(a: AssignmentType) -> Self {
-        match a {
-            AssignmentType::Open => Self::Open,
-            AssignmentType::Direct => Self::Direct,
-        }
-    }
-}
-
 /// Convert `--pickup-deadline-hours` to the wire type generated from the
 /// vendored spec. The generated newtype is the only encoding of the allowed
 /// set — the CLI never restates it, so a server policy change flows in via a
@@ -176,11 +142,11 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     let pre = preflight(ctx, &args)?;
 
     let prep_body = TaskDraftPrepareRequest {
-        assignment_type: args.assignment_type.into(),
+        assignment_type: TaskDraftPrepareRequestAssignmentType::default(),
         budget_max: args.budget.clone(),
         completion_criteria: pre.completion_criteria,
         description: args.description.clone(),
-        direct_agent_id: pre.direct_agent_id,
+        direct_agent_id: None,
         execution_deadline: pre.execution_deadline,
         pickup_deadline_hours: pre.pickup_hours,
         poster_wallet_address: pre
@@ -210,7 +176,6 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
                 "action": "would_post",
                 "draft_id": serde_json::Value::Null,
                 "title": args.title,
-                "assignment_type": args.assignment_type.as_str(),
                 "budget_max": args.budget,
                 "settlement_venue": args.venue,
                 "required_capabilities": args.capabilities,
@@ -323,7 +288,6 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
 /// [`preflight`] so the runtime path never re-validates (gh#144).
 struct Preflight {
     wallet_address: String,
-    direct_agent_id: Option<Uuid>,
     execution_deadline: Option<jiff::Timestamp>,
     completion_criteria: Vec<CompletionCriterionInput>,
     pickup_hours: TaskDraftPrepareRequestPickupDeadlineHours,
@@ -389,21 +353,6 @@ fn preflight(ctx: &Ctx, args: &Args) -> Result<Preflight, CmdError> {
         }
     };
 
-    let direct_agent_id = match (args.assignment_type, args.direct_agent_id.as_deref()) {
-        (AssignmentType::Direct, Some(s)) => match Uuid::parse_str(s) {
-            Ok(u) => Some(Some(u)),
-            Err(e) => {
-                problems.push(format!("--direct-agent-id not a UUID: {e}"));
-                None
-            }
-        },
-        (AssignmentType::Direct, None) => {
-            problems.push("--assignment-type=direct requires --direct-agent-id".into());
-            None
-        }
-        (AssignmentType::Open, _) => Some(None),
-    };
-
     let execution_deadline =
         match parse_iso_opt(args.execution_deadline.as_deref(), "--execution-deadline") {
             Ok(v) => Some(v),
@@ -461,7 +410,6 @@ fn preflight(ctx: &Ctx, args: &Args) -> Result<Preflight, CmdError> {
 
     Ok(Preflight {
         wallet_address: wallet_address.expect("no problems ⇒ wallet present"),
-        direct_agent_id: direct_agent_id.expect("no problems ⇒ direct id resolved"),
         execution_deadline: execution_deadline.expect("no problems ⇒ deadline resolved"),
         completion_criteria: completion_criteria.expect("no problems ⇒ criteria resolved"),
         pickup_hours: pickup_hours.expect("no problems ⇒ pickup hours valid"),

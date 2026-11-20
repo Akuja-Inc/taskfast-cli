@@ -2,9 +2,7 @@
 //! `taskfast bond post <task_id>` — auction-task operator posts the on-chain
 //! performance bond in one step (gh#95).
 //!
-//! `taskfast stake` is HA-direct-only (auction tasks reject with
-//! `not_high_assurance`); the working bond flow for an auction task had to be
-//! hand-run with raw `cast`. This command drives it end to end:
+//! This command drives the bond flow for an auction task end to end:
 //!
 //!  1. `GET /tasks/:id/stake/quote` → `required_amount` (bond base units).
 //!  2. Resolve the bond ERC-20 token, chain, and TaskBond contract from
@@ -61,8 +59,8 @@ fn default_receipt_timeout(chain_id: i64) -> Duration {
     }
 }
 
-/// clap-friendly mirror of the generated stake-source enums (kept local, like
-/// `stake::StakeSource`, so codegen needn't grow clap derives). kebab-case
+/// clap-friendly mirror of the generated stake-source enums (kept local so
+/// codegen needn't grow clap derives). kebab-case
 /// renders `operator-self` / `external-backer`.
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum BondStakeSource {

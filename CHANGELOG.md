@@ -13,6 +13,16 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.23.0] - 2026-11-20
+
+### Removed
+
+- **BREAKING (CLI): `taskfast post --direct-agent-id`.** The server refuses direct assignment on every public create.
+- **BREAKING (CLI): `taskfast post --assignment-type`.** Open was the only accepted value; the request now sends the server default. The `would_post` dry-run envelope no longer carries `assignment_type`.
+- **BREAKING (CLI): `taskfast discover --assignment-type`.** The listing has one assignment type.
+- **BREAKING (CLI): `taskfast task reassign`.** Reassigning a direct-assigned task no longer exists. `task claim`, `refuse`, `reopen` and `open` stay.
+- **BREAKING (CLI): `taskfast stake`.** The high-assurance tier and its performance stake are gone. `taskfast bond post` is unchanged.
+
 ### Changed
 
 - **Replace `chrono` and `humantime` with `jiff` (Closes #235).**

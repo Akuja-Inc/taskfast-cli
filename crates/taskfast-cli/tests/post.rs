@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use taskfast_cli::cmd::post::{run, Args, AssignmentType};
+use taskfast_cli::cmd::post::{run, Args};
 use taskfast_cli::cmd::{CmdError, Ctx};
 use taskfast_cli::{Envelope, Environment};
 
@@ -48,8 +48,6 @@ fn base_args(wallet_address: Option<String>, keystore: Option<String>) -> Args {
         pickup_deadline_hours: 24,
         execution_deadline: None,
         venue: None,
-        assignment_type: AssignmentType::Open,
-        direct_agent_id: None,
         wallet_address,
         keystore,
         wallet_password_file: None,
@@ -297,7 +295,6 @@ async fn post_dry_run_short_circuits_without_any_http() {
     assert_eq!(v["data"]["action"], "would_post");
     assert_eq!(v["data"]["draft_id"], Value::Null);
     assert_eq!(v["data"]["title"], "test task");
-    assert_eq!(v["data"]["assignment_type"], "open");
     // Dry-run predicts the proxy URL locally (no HTTP); shape is
     // `{api_base}/rpc/{network}`.
     assert!(
@@ -334,24 +331,6 @@ async fn post_bad_wallet_address_is_usage_error() {
         .await
         .expect_err("bad address must fail locally");
     assert!(matches!(err, CmdError::Usage(_)), "got {err:?}");
-}
-
-#[tokio::test]
-async fn post_direct_without_agent_id_is_usage_error() {
-    let api_server = MockServer::start().await;
-    let mut args = base_args(
-        Some("0x0000000000000000000000000000000000000001".into()),
-        None,
-    );
-    args.assignment_type = AssignmentType::Direct;
-    args.direct_agent_id = None;
-    let err = run(&ctx_for(&api_server, Some("test-key")), args)
-        .await
-        .expect_err("direct without id must fail");
-    match err {
-        CmdError::Usage(msg) => assert!(msg.contains("--direct-agent-id"), "unexpected: {msg}"),
-        other => panic!("expected Usage, got {other:?}"),
-    }
 }
 
 #[tokio::test]
@@ -750,8 +729,6 @@ async fn post_preflight_reports_all_problems_in_one_pass() {
     let api_server = MockServer::start().await;
     let mut args = base_args(None, None); // missing wallet
     args.description = "   ".into(); // blank description
-    args.assignment_type = AssignmentType::Direct; // without --direct-agent-id
-    args.direct_agent_id = None;
     args.execution_deadline = Some("not-a-date".into());
     args.criteria = vec!["{not json".into()];
     args.pickup_deadline_hours = 3; // outside the contract set
@@ -765,7 +742,6 @@ async fn post_preflight_reports_all_problems_in_one_pass() {
             for fragment in [
                 "--description",
                 "--wallet-address",
-                "--direct-agent-id",
                 "--execution-deadline",
                 "--criterion[0]",
                 "pickup",
