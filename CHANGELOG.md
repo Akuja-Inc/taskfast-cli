@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.23.0] - 2026-11-20
+
 ### Removed
 
 - **BREAKING (CLI): `taskfast post --direct-agent-id`.** The server refuses direct assignment on every public create.
