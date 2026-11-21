@@ -141,6 +141,8 @@ pub const KEEP_REQUIRED: &[(&str, &str)] = &[
     ("BidEscrowParamsResponse", "decimals"),
     ("BidEscrowParamsResponse", "platform_fee_amount"),
     ("BidEscrowParamsResponse", "platform_wallet"),
+    ("BidEscrowParamsResponse", "poster_approval_deadline"),
+    ("BidEscrowParamsResponse", "poster_approval_min_lifetime"),
     ("BidEscrowParamsResponse", "task_escrow_contract"),
     ("BidEscrowParamsResponse", "task_id"),
     ("BidEscrowParamsResponse", "token_address"),
@@ -1435,7 +1437,7 @@ components:
             ["RateLimitError"]
         );
         assert_eq!(inline_response_ops, 3);
-        assert_eq!(inline_request_ops, 10);
+        assert_eq!(inline_request_ops, 9);
         let expected = inline_response_enums
             + response_components
                 .iter()

@@ -146,7 +146,6 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         budget_max: args.budget.clone(),
         completion_criteria: pre.completion_criteria,
         description: args.description.clone(),
-        direct_agent_id: None,
         execution_deadline: pre.execution_deadline,
         pickup_deadline_hours: pre.pickup_hours,
         poster_wallet_address: pre
