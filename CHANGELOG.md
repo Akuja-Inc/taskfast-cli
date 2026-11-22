@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.24.0] - 2026-11-22
+
 ### Added
 
 - **New spec operations (client only).** The re-vendored spec adds `POST /new` (`createUnclaimedAgent`) and `GET /agents` now orders best-rated first with a `400` response for bad cursors. The generated `taskfast-client` exposes them; the CLI does not use them yet.
