@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
 use serde_json::{json, Value};
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use taskfast_cli::cmd::escrow::{run, Command, SignArgs};
@@ -133,6 +133,9 @@ fn readiness_json_with_chain_id(chain_id: u64) -> Value {
 async fn mount_params(server: &MockServer, body: Value, status: u16) {
     Mock::given(method("GET"))
         .and(path(format!("/bids/{BID_ID}/escrow/params")))
+        // Every caller must declare the review clock (taskfast#2044 4c): a v3
+        // venue answers 409 `review_clock_client_required` without it.
+        .and(query_param("review_clock", "1"))
         .respond_with(ResponseTemplate::new(status).set_body_json(body))
         .mount(server)
         .await;
@@ -445,4 +448,172 @@ async fn escrow_sign_wallet_address_mismatch_aborts_before_rpc() {
         CmdError::Usage(msg) => assert!(msg.contains("does not match"), "msg: {msg}"),
         other => panic!("expected Usage, got {other:?}"),
     }
+}
+
+// ---- review clock (taskfast#2044 4c) ----------------------------------------
+
+const MEMO: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+
+fn selector_of(sig: &str) -> String {
+    format!(
+        "0x{}",
+        hex::encode(&alloy_primitives::keccak256(sig.as_bytes())[..4])
+    )
+}
+
+async fn dry_run_calldata(params: Value) -> Vec<u8> {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    mount_params(&server, params, 200).await;
+    mount_readiness(&server).await;
+    let mut ctx = ctx_for(&server, Some("k"));
+    ctx.dry_run = true;
+    let env = run(&ctx, Command::Sign(base_args(&keys)))
+        .await
+        .expect("dry-run");
+    let v = envelope_value(&env);
+    let hex_str = v["data"]["open_calldata"].as_str().expect("calldata");
+    hex::decode(hex_str.trim_start_matches("0x")).expect("hex")
+}
+
+fn word(calldata: &[u8], n: usize) -> &[u8] {
+    &calldata[4 + 32 * n..4 + 32 * (n + 1)]
+}
+
+fn u256_word(v: u64) -> [u8; 32] {
+    let mut w = [0u8; 32];
+    w[24..].copy_from_slice(&v.to_be_bytes());
+    w
+}
+
+const OPEN_SIG: &str = "open(address,uint256,address,uint256,address,address,bytes32)";
+const MEMO_SIG: &str =
+    "openWithMemo(address,uint256,address,uint256,address,address,bytes32,bytes32)";
+const REVIEW_SIG: &str =
+    "openWithReview(address,uint256,address,uint256,address,address,bytes32,uint256,bytes32)";
+
+#[tokio::test]
+async fn review_window_opens_with_review_and_zero_memo() {
+    let mut params = escrow_params_json();
+    params["review_window_seconds"] = json!(86_400);
+    let cd = dry_run_calldata(params).await;
+    assert_eq!(selector_of(REVIEW_SIG), "0xf1e32bb8");
+    assert_eq!(format!("0x{}", hex::encode(&cd[..4])), "0xf1e32bb8");
+    assert_eq!(cd.len(), 4 + 32 * 9);
+    assert_eq!(word(&cd, 7), u256_word(86_400));
+    assert_eq!(word(&cd, 8), [0u8; 32]);
+}
+
+#[tokio::test]
+async fn review_window_with_memo_carries_memo_hash() {
+    let mut params = escrow_params_json();
+    params["review_window_seconds"] = json!(3_600);
+    params["memo_hash"] = json!(MEMO);
+    let cd = dry_run_calldata(params).await;
+    assert_eq!(
+        format!("0x{}", hex::encode(&cd[..4])),
+        selector_of(REVIEW_SIG)
+    );
+    assert_eq!(word(&cd, 7), u256_word(3_600));
+    assert_eq!(word(&cd, 8), [0x11u8; 32]);
+}
+
+#[tokio::test]
+async fn absent_or_null_window_keeps_legacy_open() {
+    let cd = dry_run_calldata(escrow_params_json()).await;
+    assert_eq!(
+        format!("0x{}", hex::encode(&cd[..4])),
+        selector_of(OPEN_SIG)
+    );
+    assert_eq!(cd.len(), 4 + 32 * 7);
+
+    let mut null_window = escrow_params_json();
+    null_window["review_window_seconds"] = Value::Null;
+    let cd = dry_run_calldata(null_window).await;
+    assert_eq!(
+        format!("0x{}", hex::encode(&cd[..4])),
+        selector_of(OPEN_SIG)
+    );
+
+    let mut memo = escrow_params_json();
+    memo["memo_hash"] = json!(MEMO);
+    let cd = dry_run_calldata(memo).await;
+    assert_eq!(
+        format!("0x{}", hex::encode(&cd[..4])),
+        selector_of(MEMO_SIG)
+    );
+    assert_eq!(cd.len(), 4 + 32 * 8);
+}
+
+async fn sign_err(params: Value) -> CmdError {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    mount_params(&server, params, 200).await;
+    mount_readiness(&server).await;
+    // Not dry-run, rpc_url is an invalid host: reaching RPC would surface a
+    // different error, so these assert the abort happens before any tx.
+    run(
+        &ctx_for(&server, Some("k")),
+        Command::Sign(base_args(&keys)),
+    )
+    .await
+    .expect_err("bad window must abort")
+}
+
+#[tokio::test]
+async fn bad_review_window_aborts_before_any_transaction() {
+    for bad in [json!(0), json!(-1), json!(9_007_199_254_740_993_i64)] {
+        let mut params = escrow_params_json();
+        params["review_window_seconds"] = bad.clone();
+        match sign_err(params).await {
+            CmdError::Validation { code, .. } => assert_eq!(code, "invalid_review_window", "{bad}"),
+            other => panic!("expected Validation(invalid_review_window) for {bad}, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn malformed_review_window_says_no_transaction_was_sent() {
+    for bad in [json!(86_400.5), json!("86400"), json!(1.0e19)] {
+        let mut params = escrow_params_json();
+        params["review_window_seconds"] = bad.clone();
+        match sign_err(params).await {
+            CmdError::Decode(msg) => {
+                assert!(msg.contains("no transaction was sent"), "{bad}: msg: {msg}")
+            }
+            other => panic!("expected Decode for {bad}, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn review_clock_required_409_surfaces_server_code() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    mount_params(
+        &server,
+        json!({"error": "review_clock_client_required", "message": "Upgrade your CLI; send review_clock=1"}),
+        409,
+    )
+    .await;
+    let err = run(
+        &ctx_for(&server, Some("k")),
+        Command::Sign(base_args(&keys)),
+    )
+    .await
+    .expect_err("409");
+    match err {
+        CmdError::Validation { code, message } => {
+            assert_eq!(code, "review_clock_client_required");
+            assert!(message.contains("Upgrade your CLI"), "{message}");
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn params_request_sends_review_clock_flag() {
+    // mount_params requires `review_clock=1`; an unmatched request is a 404,
+    // so a successful dry-run proves the flag was sent.
+    let _ = dry_run_calldata(escrow_params_json()).await;
 }

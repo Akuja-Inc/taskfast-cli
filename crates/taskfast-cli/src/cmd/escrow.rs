@@ -11,8 +11,12 @@
 //!  3. ERC-20 `allowance` preflight; `approve` if short.
 //!  4. Random 32-byte salt → `compute_escrow_id` (matches Solidity).
 //!  5. EIP-712 `DistributionApproval(escrowId, deadline)` — `sign_distribution`.
-//!  6. `TaskEscrow.open` / `openWithMemo` — broadcast + wait for receipt.
+//!  6. `TaskEscrow.open` / `openWithMemo` — or `openWithReview` when the params
+//!     carry `review_window_seconds` (v3 venue) — broadcast + wait for receipt.
 //!  7. `POST /bids/:id/escrow/finalize` with voucher + sig + deadline.
+//!
+//! The params request always sends `review_clock=1`: a v3 venue refuses it
+//! otherwise (409 `review_clock_client_required`).
 //!
 //! Memo is server-driven: `memo_hash` in the params payload selects
 //! `openWithMemo` vs `open`. No `--memo` flag.
@@ -41,9 +45,9 @@ use taskfast_agent::tempo_rpc::TempoRpcClient;
 use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
 use taskfast_client::api::types::{
     BidEscrowFinalizeRequest, BidEscrowFinalizeRequestPosterApprovalDeadline,
-    BidEscrowParamsResponse,
+    BidEscrowParamsResponse, GetBidEscrowParamsReviewClock,
 };
-use taskfast_client::map_api_error;
+use taskfast_client::{map_api_error, TaskFastClient};
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
@@ -106,10 +110,9 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     let client = ctx.client()?;
 
     // 2. Fetch escrow params — server enforces poster-auth + bid status.
-    let params = match client.inner().get_bid_escrow_params(&bid_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => {
-            let mapped = map_api_error(e).await;
+    let params = match fetch_params(&client, &bid_id).await {
+        Ok(v) => v,
+        Err(mapped) => {
             // Version-skew hint: a server predating the v2 arbitrated-escrow
             // rollout omits `arbitrator_address`, which this CLI now requires,
             // so the 200 body fails to deserialize into a generic serde
@@ -141,6 +144,13 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                               version that matches it"
                         .into(),
                 });
+            }
+            // Any other undecodable body (e.g. a non-integer or oversized
+            // `review_window_seconds`): say plainly that nothing was sent.
+            if let taskfast_client::Error::Decode(m) = &mapped {
+                return Err(CmdError::Decode(format!(
+                    "server escrow params response is malformed ({m}); no transaction was sent"
+                )));
             }
             return Err(mapped.into());
         }
@@ -234,6 +244,10 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         })
         .transpose()?;
 
+    // 5b. Review window (v3 venue). Validated here, before the keystore, any
+    //     approve tx or the dry-run envelope: a bad window must send nothing.
+    let review_window = review_window_from(&params)?;
+
     // 6. Load signer + preflight address equality.
     let keystore_path = super::wallet_args::resolve_keystore_path(
         args.keystore.as_deref(),
@@ -277,32 +291,19 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
 
     // 9. Build open / openWithMemo calldata up front — we reuse it for the
     //    dry-run envelope and the live broadcast.
-    let open_calldata: Bytes = if let Some(memo_hash) = memo_hash_opt {
-        TaskEscrow::openWithMemoCall {
+    let open_calldata = open_calldata(
+        &OpenFields {
             token: token_address,
             deposit,
             worker,
-            platformFeeAmount: platform_fee,
+            platform_fee,
             platform: platform_wallet,
             arbitrator,
             salt,
-            memoHash: memo_hash,
-        }
-        .abi_encode()
-        .into()
-    } else {
-        TaskEscrow::openCall {
-            token: token_address,
-            deposit,
-            worker,
-            platformFeeAmount: platform_fee,
-            platform: platform_wallet,
-            arbitrator,
-            salt,
-        }
-        .abi_encode()
-        .into()
-    };
+        },
+        memo_hash_opt,
+        review_window,
+    );
 
     // Resolve RPC URL. Override flows to a bare upstream gateway; default
     // path pulls the deployment's proxy URL from `GET /config/network`
@@ -438,10 +439,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                 let mapped = map_api_error(e).await;
                 if attempts == 0 && is_deadline_below_minimum(&mapped) {
                     attempts += 1;
-                    let fresh = match client.inner().get_bid_escrow_params(&bid_id).await {
-                        Ok(v) => v.into_inner(),
-                        Err(e) => return Err(map_api_error(e).await.into()),
-                    };
+                    let fresh = fetch_params(&client, &bid_id).await?;
                     deadline_unix = server_deadline_or_abort(&fresh)?;
                     signature_hex = sign_distribution(
                         session.signer(),
@@ -470,6 +468,118 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             "deadline": deadline_unix,
         }),
     ))
+}
+
+/// `GET /bids/:id/escrow/params`, always declaring the review clock. Every
+/// fetch goes through here so none can forget the flag (a v3 venue answers 409
+/// `review_clock_client_required` without it).
+async fn fetch_params(
+    client: &TaskFastClient,
+    bid_id: &Uuid,
+) -> Result<BidEscrowParamsResponse, taskfast_client::Error> {
+    match client
+        .inner()
+        .get_bid_escrow_params(bid_id, Some(GetBidEscrowParamsReviewClock::X1))
+        .await
+    {
+        Ok(v) => Ok(v.into_inner()),
+        Err(e) => Err(map_api_error(e).await),
+    }
+}
+
+/// Largest window the browser accepts (`Number.isSafeInteger`). A client-side
+/// sanity bound only; the 1 h–72 h policy bound is the server's and the contract's.
+const MAX_REVIEW_WINDOW_SECONDS: i64 = (1 << 53) - 1;
+
+/// `None` (absent or null) → legacy `open`. A present window must be a
+/// positive safe integer or we abort before any transaction (browser parity).
+fn review_window_from(params: &BidEscrowParamsResponse) -> Result<Option<U256>, CmdError> {
+    match params.review_window_seconds {
+        None => Ok(None),
+        Some(s) if (1..=MAX_REVIEW_WINDOW_SECONDS).contains(&s) => Ok(Some(U256::from(s))),
+        Some(s) => Err(CmdError::Validation {
+            code: "invalid_review_window".into(),
+            message: format!(
+                "server review_window_seconds={s} must be a positive integer \
+                 (at most {MAX_REVIEW_WINDOW_SECONDS}); refusing to open the escrow"
+            ),
+        }),
+    }
+}
+
+// Private so no `TaskEscrowCalls` variant appears in the public `TaskEscrow`
+// block (cargo-semver-checks `enum_variant_added`).
+mod review_abi {
+    alloy_sol_types::sol! {
+        function openWithReview(
+            address token,
+            uint256 deposit,
+            address worker,
+            uint256 platformFeeAmount,
+            address platform,
+            address arbitrator,
+            bytes32 salt,
+            uint256 reviewWindow,
+            bytes32 memoHash
+        ) external returns (bytes32);
+    }
+}
+
+struct OpenFields {
+    token: Address,
+    deposit: U256,
+    worker: Address,
+    platform_fee: U256,
+    platform: Address,
+    arbitrator: Address,
+    salt: B256,
+}
+
+/// Open calldata: `openWithReview` when a window is issued (memo word is
+/// `bytes32(0)` when there is no memo, as in the browser), else `openWithMemo`
+/// / `open` exactly as before.
+fn open_calldata(f: &OpenFields, memo: Option<B256>, review_window: Option<U256>) -> Bytes {
+    if let Some(window) = review_window {
+        return review_abi::openWithReviewCall {
+            token: f.token,
+            deposit: f.deposit,
+            worker: f.worker,
+            platformFeeAmount: f.platform_fee,
+            platform: f.platform,
+            arbitrator: f.arbitrator,
+            salt: f.salt,
+            reviewWindow: window,
+            memoHash: memo.unwrap_or_default(),
+        }
+        .abi_encode()
+        .into();
+    }
+    if let Some(memo_hash) = memo {
+        TaskEscrow::openWithMemoCall {
+            token: f.token,
+            deposit: f.deposit,
+            worker: f.worker,
+            platformFeeAmount: f.platform_fee,
+            platform: f.platform,
+            arbitrator: f.arbitrator,
+            salt: f.salt,
+            memoHash: memo_hash,
+        }
+        .abi_encode()
+        .into()
+    } else {
+        TaskEscrow::openCall {
+            token: f.token,
+            deposit: f.deposit,
+            worker: f.worker,
+            platformFeeAmount: f.platform_fee,
+            platform: f.platform,
+            arbitrator: f.arbitrator,
+            salt: f.salt,
+        }
+        .abi_encode()
+        .into()
+    }
 }
 
 /// Return the server-issued `poster_approval_deadline` (Unix seconds) after the
@@ -630,5 +740,77 @@ mod tests {
         assert!(!is_deadline_below_minimum(&taskfast_client::Error::Server(
             "deadline_below_minimum".into()
         )));
+    }
+
+    fn fields() -> OpenFields {
+        OpenFields {
+            token: Address::repeat_byte(1),
+            deposit: U256::from(75_000_000u64),
+            worker: Address::repeat_byte(3),
+            platform_fee: U256::from(3_750_000u64),
+            platform: Address::repeat_byte(4),
+            arbitrator: Address::repeat_byte(5),
+            salt: B256::repeat_byte(9),
+        }
+    }
+
+    #[test]
+    fn open_with_review_selector_is_pinned() {
+        use alloy_primitives::keccak256;
+        let sig = "openWithReview(address,uint256,address,uint256,address,address,bytes32,uint256,bytes32)";
+        assert_eq!(
+            review_abi::openWithReviewCall::SELECTOR,
+            keccak256(sig)[..4]
+        );
+        assert_eq!(
+            review_abi::openWithReviewCall::SELECTOR,
+            [0xf1, 0xe3, 0x2b, 0xb8]
+        );
+    }
+
+    #[test]
+    fn legacy_calldata_is_byte_identical_without_window() {
+        let f = fields();
+        let memo = B256::repeat_byte(0x11);
+        let open = TaskEscrow::openCall {
+            token: f.token,
+            deposit: f.deposit,
+            worker: f.worker,
+            platformFeeAmount: f.platform_fee,
+            platform: f.platform,
+            arbitrator: f.arbitrator,
+            salt: f.salt,
+        }
+        .abi_encode();
+        let with_memo = TaskEscrow::openWithMemoCall {
+            token: f.token,
+            deposit: f.deposit,
+            worker: f.worker,
+            platformFeeAmount: f.platform_fee,
+            platform: f.platform,
+            arbitrator: f.arbitrator,
+            salt: f.salt,
+            memoHash: memo,
+        }
+        .abi_encode();
+        assert_eq!(open_calldata(&f, None, None).to_vec(), open);
+        assert_eq!(open_calldata(&f, Some(memo), None).to_vec(), with_memo);
+    }
+
+    #[test]
+    fn review_calldata_layout_matches_browser_encoding() {
+        let f = fields();
+        let memo = B256::repeat_byte(0x11);
+        let cd = open_calldata(&f, Some(memo), Some(U256::from(86_400u64)));
+        assert_eq!(cd[..4], [0xf1, 0xe3, 0x2b, 0xb8]);
+        assert_eq!(cd.len(), 4 + 32 * 9);
+        assert_eq!(&cd[4 + 32 * 6..4 + 32 * 7], f.salt.as_slice());
+        assert_eq!(
+            U256::from_be_slice(&cd[4 + 32 * 7..4 + 32 * 8]),
+            U256::from(86_400u64)
+        );
+        assert_eq!(&cd[4 + 32 * 8..], memo.as_slice());
+        let no_memo = open_calldata(&f, None, Some(U256::from(1u64)));
+        assert_eq!(&no_memo[4 + 32 * 8..], B256::ZERO.as_slice());
     }
 }

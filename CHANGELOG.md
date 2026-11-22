@@ -13,6 +13,10 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Changed
+
+- **`taskfast escrow sign` opens review-clock (v3) escrows (taskfast#2044).** The escrow params request now sends `review_clock=1`. When the server returns `review_window_seconds`, the escrow is opened with `openWithReview` (selector `0xf1e32bb8`) instead of `open`/`openWithMemo`. A zero, negative or oversized window aborts before any transaction. An absent window keeps the legacy calldata. Spec: `review_clock` query parameter, `review_window_seconds`, and the `review_clock_client_required` 409 (hand-copied from server 09214d39).
+
 ## [0.24.0] - 2026-11-22
 
 ### Added

@@ -1409,6 +1409,17 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: review_clock
+          in: query
+          required: false
+          description: >-
+            Send `1` to declare that the client opens the escrow with
+            `openWithReview` when the response carries `review_window_seconds`.
+            A task on a review-clock venue answers 409
+            `review_clock_client_required` without it.
+          schema:
+            type: string
+            enum: ["1"]
       responses:
         '200':
           description: Escrow staging parameters
@@ -1423,7 +1434,10 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: Bid is not awaiting escrow signature
+          description: >-
+            Bid is not awaiting escrow signature (`invalid_status`), or the task
+            settles on a review-clock venue and the request did not send
+            `review_clock=1` (`review_clock_client_required`; upgrade the CLI)
           content:
             application/json:
               schema:
@@ -6119,6 +6133,15 @@ components:
             Minimum remaining lifetime (seconds) a poster_approval_deadline must have
             at finalize. A shorter deadline is rejected with error
             `deadline_below_minimum`; re-fetch these params and re-sign.
+
+        review_window_seconds:
+          type: integer
+          description: >-
+            Present only when the task settles on a review-clock venue. The review
+            window in seconds (`review_window_hours` x 3600). Open the escrow with
+            `openWithReview(..., salt, review_window_seconds, memoHash)`; the memo
+            hash is the zero hash when `memo_hash` is null. An escrow opened with
+            another window is not confirmed.
 
     BidEscrowFinalizeRequest:
       type: object

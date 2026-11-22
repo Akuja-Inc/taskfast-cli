@@ -1437,7 +1437,7 @@ components:
             ["RateLimitError"]
         );
         assert_eq!(inline_response_ops, 3);
-        assert_eq!(inline_request_ops, 9);
+        assert_eq!(inline_request_ops, 10); // +1: getBidEscrowParams `review_clock` (taskfast#2044 4c)
         let expected = inline_response_enums
             + response_components
                 .iter()
