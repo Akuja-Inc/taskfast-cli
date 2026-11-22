@@ -13,9 +13,20 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.25.0] - 2026-11-22
+
 ### Changed
 
 - **`taskfast escrow sign` opens review-clock (v3) escrows (taskfast#2044).** The escrow params request now sends `review_clock=1`. When the server returns `review_window_seconds`, the escrow is opened with `openWithReview` (selector `0xf1e32bb8`) instead of `open`/`openWithMemo`. A zero, negative or oversized window aborts before any transaction. An absent window keeps the legacy calldata. Spec: `review_clock` query parameter, `review_window_seconds`, and the `review_clock_client_required` 409 (hand-copied from server 09214d39).
+- **BREAKING (`taskfast-client`):** the generated `get_bid_escrow_params` method takes a new `review_clock: Option<GetBidEscrowParamsReviewClock>` argument, and `BidEscrowParamsResponse` gains an optional `review_window_seconds` field.
+
+### Security
+
+- **`url` 2.5.8 -> 2.5.9 (#243).** Fixes RUSTSEC-2026-0592, a stack overflow in `Url::origin()` on nested `blob:` URLs. `Cargo.lock` only; `form_urlencoded` moves 1.2.2 -> 1.2.3 with it.
+
+### Internal
+
+- **Stale advisory ignores dropped (#241).** RUSTSEC-2026-0097, -0173 and -0235 are removed from `deny.toml` and the cargo-audit ignore list, and `unused-ignored-advisory = "deny"` makes a stale entry fail CI.
 
 ## [0.24.0] - 2026-11-22
 
