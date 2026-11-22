@@ -13,6 +13,19 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Added
+
+- **New spec operations (client only).** The re-vendored spec adds `POST /new` (`createUnclaimedAgent`) and `GET /agents` now orders best-rated first with a `400` response for bad cursors. The generated `taskfast-client` exposes them; the CLI does not use them yet.
+
+### Changed
+
+- **BREAKING (`taskfast-client`): re-vendor the OpenAPI spec from server `cd36f8947286` (taskfast#2885 T11).**
+  The regenerated client no longer has `ReassignTaskBody`, `ReassignTaskResponse`, `PostStakeBody`, `PostStakeBodyStakeSource`, `PostStakeResponse`, `WebhookScopedInviteReceived`, `WebhookScopedInviteReceivedData` or `OAuthAuthorizationServerMetadataAgentAuthIdentityAssertion`.
+  The `direct_agent_id` field is removed from `TaskDraftPrepareRequest`, `TaskCreateRequest` and `TaskDetail`, and the abort reply status enum is narrowed to `open`.
+  `BidEscrowParamsResponse` and `BidEscrowFinalizeRequest` require the poster approval fields again (see below).
+- **`taskfast escrow sign` requires the server-issued `poster_approval_deadline` again.**
+  The v3 optional-approval path from #213 is removed because the server no longer sends `contract_version`.
+
 ## [0.23.0] - 2026-11-20
 
 ### Removed

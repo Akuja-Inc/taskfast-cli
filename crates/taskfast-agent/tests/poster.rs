@@ -27,7 +27,6 @@ fn sample_prepare_request() -> TaskDraftPrepareRequest {
         budget_max: Some("5.00".into()),
         completion_criteria: vec![],
         description: "write a haiku about ledgers".into(),
-        direct_agent_id: None,
         execution_deadline: None,
         pickup_deadline_hours: 24_i64.try_into().expect("valid pickup window"),
         poster_wallet_address: "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"
