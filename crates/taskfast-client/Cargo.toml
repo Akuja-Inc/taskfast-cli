@@ -23,7 +23,7 @@ serde_json.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["fs"] }
 tracing.workspace = true
-progenitor-client = "0.16.1"
+progenitor-client = "0.17.0"
 bytes = "1.12.1"
 jiff.workspace = true
 uuid.workspace = true
