@@ -358,15 +358,15 @@ async fn no_interactive_with_no_key_falls_through_to_post_new() {
     let tmp = TempDir::new().unwrap();
     let cfg_path = config_path_in(tmp.path());
     let prompter = MockPrompter::new(); // empty — panics if touched
+                                        // A wallet signal, as the preflight now demands before `POST /new`.
+    let args = Args {
+        skip_wallet: true,
+        ..base_args()
+    };
 
-    let err = run_with_prompter(
-        &ctx_for(&server, cfg_path.clone()),
-        base_args(),
-        &prompter,
-        false,
-    )
-    .await
-    .expect_err("non-interactive + no key + route off must error");
+    let err = run_with_prompter(&ctx_for(&server, cfg_path.clone()), args, &prompter, false)
+        .await
+        .expect_err("non-interactive + no key + route off must error");
 
     assert!(
         matches!(err, CmdError::MissingApiKey),

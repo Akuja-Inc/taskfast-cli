@@ -53,6 +53,17 @@ fn base_args() -> Args {
     }
 }
 
+/// `base_args()` plus the one thing a keyless run now has to carry before
+/// `POST /new` is tried (gh#238 review, P1): a wallet signal. A fresh
+/// agent never has a wallet, so without one the preflight stops the run
+/// before any request.
+fn keyless_args() -> Args {
+    Args {
+        skip_wallet: true,
+        ..base_args()
+    }
+}
+
 fn config_path_in(dir: &std::path::Path) -> PathBuf {
     dir.join(".taskfast").join("config.json")
 }
@@ -469,7 +480,7 @@ async fn missing_api_key_everywhere_errors_cleanly() {
         .await;
     let tmp = TempDir::new().unwrap();
     let cfg_path = config_path_in(tmp.path());
-    let args = base_args();
+    let args = keyless_args();
 
     let err = run(&ctx_for(&server, None, cfg_path.clone(), false), args)
         .await
@@ -759,7 +770,7 @@ async fn no_key_creates_an_unclaimed_agent_once_and_continues_with_its_key() {
 
     let envelope = run(
         &ctx_for(&server, None, cfg_path.clone(), false),
-        base_args(),
+        keyless_args(),
     )
     .await
     .expect("POST /new path should succeed");
@@ -816,7 +827,7 @@ async fn no_key_daily_limit_429_is_rate_limited_and_saves_nothing() {
 
     let err = run(
         &ctx_for(&server, None, cfg_path.clone(), false),
-        base_args(),
+        keyless_args(),
     )
     .await
     .expect_err("daily limit → RateLimited");
@@ -846,7 +857,7 @@ async fn no_key_terms_unpublished_503_is_a_server_error_and_saves_nothing() {
 
     let err = run(
         &ctx_for(&server, None, cfg_path.clone(), false),
-        base_args(),
+        keyless_args(),
     )
     .await
     .expect_err("Terms unpublished → Server");
@@ -867,9 +878,12 @@ async fn dry_run_without_a_key_previews_post_new_and_touches_nothing() {
     let tmp = TempDir::new().unwrap();
     let cfg_path = config_path_in(tmp.path());
 
-    let envelope = run(&ctx_for(&server, None, cfg_path.clone(), true), base_args())
-        .await
-        .expect("dry-run needs no server");
+    let envelope = run(
+        &ctx_for(&server, None, cfg_path.clone(), true),
+        keyless_args(),
+    )
+    .await
+    .expect("dry-run needs no server");
     let v = envelope_value(&envelope);
     assert_eq!(v["dry_run"], true);
     assert_eq!(v["data"]["agent"]["action"], "would_mint_unclaimed");
@@ -881,6 +895,138 @@ async fn dry_run_without_a_key_previews_post_new_and_touches_nothing() {
         server.received_requests().await.unwrap().is_empty(),
         "dry-run must not call POST /new"
     );
+}
+
+#[tokio::test]
+async fn no_key_without_a_wallet_flag_stops_before_post_new() {
+    // gh#238 review, P1: this run used to create an agent and then die in
+    // the wallet step on this very error, throwing away its key and claim
+    // link. Now the usage error comes first and no quota is spent.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/new"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(new_agent_body()))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let cfg_path = config_path_in(tmp.path());
+
+    let err = run(
+        &ctx_for(&server, None, cfg_path.clone(), false),
+        base_args(),
+    )
+    .await
+    .expect_err("no wallet signal → Usage before any request");
+    match err {
+        CmdError::Usage(msg) => assert!(
+            msg.contains("--generate-wallet") && msg.contains("--skip-wallet"),
+            "message: {msg}"
+        ),
+        other => panic!("expected Usage, got {other:?}"),
+    }
+    assert!(!cfg_path.exists());
+}
+
+#[tokio::test]
+async fn no_key_generate_wallet_without_a_password_stops_before_post_new() {
+    // The second deterministic trigger from the review: the keystore
+    // password is looked up before the request, not after the mint.
+    if std::env::var("TASKFAST_WALLET_PASSWORD").is_ok() {
+        eprintln!("note: TASKFAST_WALLET_PASSWORD is set in the harness env; skipping");
+        return;
+    }
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/new"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(new_agent_body()))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let cfg_path = config_path_in(tmp.path());
+    let mut args = base_args();
+    args.generate_wallet = true;
+
+    let err = run(&ctx_for(&server, None, cfg_path.clone(), false), args)
+        .await
+        .expect_err("--generate-wallet without a password → Usage before any request");
+    match err {
+        CmdError::Usage(msg) => {
+            assert!(msg.contains("--wallet-password-file"), "message: {msg}")
+        }
+        other => panic!("expected Usage, got {other:?}"),
+    }
+    assert!(!cfg_path.exists());
+}
+
+#[tokio::test]
+async fn unclaimed_key_and_claim_link_survive_a_later_failure_and_no_remint_happens() {
+    // gh#238 review, P1, the non-deterministic case: `POST /new` answers
+    // 201 and the very next call (GET /agents/me) fails with a 5xx. The
+    // key and the claim link must already be on disk, and the re-run must
+    // pick them up instead of minting a second agent against the quota.
+    let server = MockServer::start().await;
+    mount_post_new(&server).await; // expect(1): one mint across BOTH runs
+
+    // First run: the profile read fails after the mint.
+    Mock::given(method("GET"))
+        .and(path("/agents/me"))
+        .and(header("x-api-key", NEW_AGENT_KEY))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "error": "internal_error",
+            "message": "database unavailable",
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    // Every later read succeeds with the saved key.
+    Mock::given(method("GET"))
+        .and(path("/agents/me"))
+        .and(header("x-api-key", NEW_AGENT_KEY))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": NEW_AGENT_ID,
+            "name": "taskfast-agent",
+            "status": "active",
+            "capabilities": [],
+        })))
+        .mount(&server)
+        .await;
+    mount_readiness(&server, "complete", true).await;
+
+    let tmp = TempDir::new().unwrap();
+    let cfg_path = config_path_in(tmp.path());
+
+    let err = run(
+        &ctx_for(&server, None, cfg_path.clone(), false),
+        keyless_args(),
+    )
+    .await
+    .expect_err("the 5xx after the mint still fails the run");
+    assert!(matches!(err, CmdError::Server(_)), "got {err:?}");
+
+    // …but the agent is not stranded: key and claim link are on disk.
+    let loaded = Config::load(&cfg_path).unwrap();
+    assert_eq!(loaded.api_key.as_deref(), Some(NEW_AGENT_KEY));
+    assert_eq!(loaded.agent_id.as_deref(), Some(NEW_AGENT_ID));
+    assert_eq!(loaded.claim_url.as_deref(), Some(CLAIM_URL));
+    assert_eq!(loaded.claim_expires_at.as_deref(), Some(EXPIRES_AT));
+
+    // The re-run finds that key and continues as a pre-existing agent.
+    let envelope = run(
+        &ctx_for(&server, None, cfg_path.clone(), false),
+        keyless_args(),
+    )
+    .await
+    .expect("re-run continues from the saved key");
+    let v = envelope_value(&envelope);
+    assert_eq!(v["ok"], true);
+    assert!(
+        v["data"].get("agent").is_none(),
+        "the re-run must not mint again: {:?}",
+        v["data"]["agent"]
+    );
+    // `mount_post_new` carries expect(1) and verifies on server drop.
 }
 
 #[tokio::test]

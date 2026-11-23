@@ -56,14 +56,17 @@
 //!   like a PAT-minted one. The agent belongs to nobody until a person
 //!   opens the link, cannot accept a bid until then, and its key stops
 //!   working at the `expires_at` the server returns (72 hours today), so
-//!   the link and the time are printed, put in the envelope and saved
-//!   next to the key in the config file. Order of resort when no key is
+//!   the link and the time are printed and saved next to the key in the
+//!   config file the moment the 201 arrives — before anything else can
+//!   fail — and later put in the envelope. Order of resort when no key is
 //!   resolvable: `--human-api-key` → interactive PAT prompt (TTY only) →
 //!   `POST /new`; a PAT wins because that agent is claimed from the
 //!   start. The call is made exactly once — the server counts every
-//!   request against a per-address daily limit — and its three refusals
-//!   (404 switched off, 429 daily limit, 503 Terms not published) end
-//!   the run with a plain message and nothing written.
+//!   request against a per-address daily limit — after everything that
+//!   would deterministically fail later (name, description, wallet flags)
+//!   has been checked, and its three refusals (404 switched off, 429 daily
+//!   limit, 503 Terms not published) end the run with a plain message and
+//!   nothing written.
 //!
 //! # `--dry-run` semantics
 //!
@@ -159,9 +162,12 @@ pub struct Args {
     #[arg(long, default_value = "Headless agent registered via taskfast init")]
     pub agent_description: String,
 
-    /// Capability tag for the minted agent (repeat to pass multiple). If
-    /// none are provided, defaults to `["general"]` so the request still
-    /// satisfies the non-empty-array convention most consumers expect.
+    /// Capability tag for the agent minted from a PAT (repeat to pass
+    /// multiple). If none are provided, defaults to `["general"]` so the
+    /// request still satisfies the non-empty-array convention most
+    /// consumers expect. Ignored for an agent created through `POST /new`
+    /// with no key — the server gives it no capabilities until a person
+    /// claims it — and init then says so on stderr.
     #[arg(long = "agent-capability", value_name = "CAP")]
     pub agent_capabilities: Vec<String>,
 
@@ -197,8 +203,9 @@ pub struct Args {
     pub no_default_events: bool,
 
     /// Disable all TTY prompts even when stdin is a terminal. Use in
-    /// scripts or pipes where interactive fallback would stall. Env:
-    /// `TASKFAST_NO_INTERACTIVE=1`.
+    /// scripts or pipes where interactive fallback would stall, and to
+    /// reach the no-key `POST /new` path at a terminal — otherwise init
+    /// first asks for a PAT. Env: `TASKFAST_NO_INTERACTIVE=1`.
     #[arg(long, env = "TASKFAST_NO_INTERACTIVE")]
     pub no_interactive: bool,
 
@@ -273,6 +280,33 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
         }
         Err(e) => return Err(e),
     };
+
+    // 1a'. An unclaimed agent exists the moment `POST /new` answered 201,
+    //      and its key and claim link exist nowhere else. Save both before
+    //      anything else can fail and tell the human now (gh#238 review,
+    //      P1): a later error — a 5xx on /agents/me, a refused wallet
+    //      registration — then leaves a usable config behind, and a re-run
+    //      finds the key there and continues instead of minting another
+    //      agent against the same daily quota. Refusals of `POST /new`
+    //      itself never reach this point, so they still write nothing.
+    if let AgentOutcome::Minted(MintedAgent::Live {
+        id,
+        unclaimed: Some(unclaimed),
+        ..
+    }) = &agent_outcome
+    {
+        cfg.environment = Some(ctx.environment);
+        cfg.api_key = Some(api_key.clone());
+        if let Some(id) = id {
+            cfg.agent_id = Some(id.clone());
+        }
+        cfg.claim_url = unclaimed.claim_url.clone();
+        cfg.claim_expires_at = unclaimed.expires_at.map(|t| t.to_string());
+        cfg.save(&cfg_path)?;
+        if let Some(note) = unclaimed_announcement(&agent_outcome) {
+            eprintln!("{note}");
+        }
+    }
 
     // 1b. Interactive wallet-mode prompt. Only fires when this run just
     //     minted a fresh agent AND the human gave us zero wallet signal
@@ -420,12 +454,6 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
         &final_readiness,
     )
     .await;
-
-    // 5c. An agent created through `POST /new` is nobody's until a person
-    // opens the claim link (gh#238). Say so where a human will see it.
-    if let Some(note) = unclaimed_announcement(&agent_outcome) {
-        eprintln!("{note}");
-    }
 
     let data = build_envelope_data(
         &cfg_path,
@@ -629,15 +657,21 @@ async fn mint_agent(ctx: &Ctx, args: &Args, pat: &str) -> Result<MintedAgent, Cm
 /// is surfaced verbatim so nobody has to guess at it.
 ///
 /// Made at most once per run and never retried: the server counts every
-/// request against a per-address daily quota, refused ones included. The
-/// name and description are checked here against the spec's own length
-/// limits (the generated types carry them) so a bad flag fails before the
-/// quota is spent.
+/// request against a per-address daily quota, refused ones included.
+/// Everything that would deterministically fail later is checked here
+/// first, so a bad flag never spends that quota on an agent the run then
+/// abandons: the name and description against the spec's own length
+/// limits (the generated types carry them), and the wallet step's two
+/// requirements (see [`preflight_wallet_args`]).
 async fn create_unclaimed(ctx: &Ctx, args: &Args) -> Result<MintedAgent, CmdError> {
     let name = NewAgentRequestName::from_str(&args.agent_name)
         .map_err(|e| CmdError::Usage(format!("--agent-name: {e}")))?;
     let description = NewAgentRequestDescription::from_str(&args.agent_description)
         .map_err(|e| CmdError::Usage(format!("--agent-description: {e}")))?;
+    preflight_wallet_args(args)?;
+    if !args.agent_capabilities.is_empty() {
+        eprintln!("{}", capabilities_ignored_note(&args.agent_capabilities));
+    }
 
     if ctx.dry_run {
         return Ok(MintedAgent::DryRun {
@@ -679,6 +713,50 @@ async fn create_unclaimed(ctx: &Ctx, args: &Args) -> Result<MintedAgent, CmdErro
             terms_accepted: resp.terms_accepted,
         }),
     })
+}
+
+/// The wallet step's one requirement on the flags, shared by
+/// [`preflight_wallet_args`] and [`provision_wallet`] so the two can't
+/// drift apart.
+const WALLET_FLAG_HINT: &str =
+    "pass --wallet-address <0x...> or --generate-wallet (or --skip-wallet to defer)";
+
+/// Fail the two ways [`provision_wallet`] would fail later, before the one
+/// request that creates an agent (gh#238 review, P1). A fresh agent never
+/// has a wallet, so the run must carry a wallet signal; and
+/// `--generate-wallet` must be able to find a keystore password. Without
+/// this, `taskfast init` with no wallet flag — the path runs
+/// non-interactively, so nothing prompts — would create an agent and then
+/// drop its key and claim link on the usage error; the user fixes the flag,
+/// re-runs, and a second agent is minted against the same daily quota.
+fn preflight_wallet_args(args: &Args) -> Result<(), CmdError> {
+    if args.wallet_address.is_none() && !args.generate_wallet && !args.skip_wallet {
+        return Err(CmdError::Usage(WALLET_FLAG_HINT.into()));
+    }
+    if args.generate_wallet {
+        // Only the lookup matters here; `provision_wallet` resolves it
+        // again when it actually needs the value.
+        resolve_wallet_password(args)?;
+    }
+    Ok(())
+}
+
+/// stderr note for `--agent-capability` on the `POST /new` path (gh#238
+/// review, P3): the server creates an unclaimed agent with no
+/// capabilities, and `PUT /agents/me` answers 403 `claim_required` until a
+/// person claims it, so the flags can't take effect now or be applied
+/// later by the CLI.
+fn capabilities_ignored_note(capabilities: &[String]) -> String {
+    format!(
+        "WARNING: --agent-capability is ignored for an agent created through POST /new: {} \
+         was asked for, but the server gives an unclaimed agent no capabilities until a \
+         person claims it. Set them after claiming with `taskfast agent update-me`.",
+        capabilities
+            .iter()
+            .map(|c| format!("--agent-capability {c}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// Why `POST /new` refused to create an agent. The three cases the server
@@ -916,9 +994,7 @@ async fn provision_wallet(
         };
     }
     if !args.generate_wallet {
-        return Err(CmdError::Usage(
-            "pass --wallet-address <0x...> or --generate-wallet (or --skip-wallet to defer)".into(),
-        ));
+        return Err(CmdError::Usage(WALLET_FLAG_HINT.into()));
     }
 
     let signer = wallet::generate_signer();
@@ -1854,6 +1930,53 @@ mod tests {
         // unchanged and the new one gets its own tag.
         assert_eq!(MintKind::FromPat.dry_run_action(), "would_mint");
         assert_eq!(MintKind::Unclaimed.dry_run_action(), "would_mint_unclaimed");
+    }
+
+    #[test]
+    fn wallet_preflight_demands_a_signal_and_a_password_before_the_mint() {
+        // gh#238 review, P1: the two usage errors `provision_wallet` would
+        // raise after a 201 are raised before the request instead, with
+        // the very same wording.
+        let no_signal = base_args();
+        match preflight_wallet_args(&no_signal) {
+            Err(CmdError::Usage(msg)) => assert_eq!(msg, WALLET_FLAG_HINT),
+            other => panic!("expected Usage, got {other:?}"),
+        }
+        // A password source that cannot work surfaces the password error
+        // (a nonexistent file is deterministic even where the env var is set).
+        let mut generate_no_password = base_args();
+        generate_no_password.generate_wallet = true;
+        generate_no_password.wallet_password_file = Some(PathBuf::from("/nonexistent/gh238/pw"));
+        match preflight_wallet_args(&generate_no_password) {
+            Err(CmdError::Usage(msg)) => assert!(msg.contains("password"), "{msg}"),
+            other => panic!("expected Usage, got {other:?}"),
+        }
+        // Each way of satisfying the wallet step passes.
+        let mut skip = base_args();
+        skip.skip_wallet = true;
+        assert!(preflight_wallet_args(&skip).is_ok());
+        let mut byow = base_args();
+        byow.wallet_address = Some("0xabc".into());
+        assert!(preflight_wallet_args(&byow).is_ok());
+        let mut inline = base_args();
+        inline.generate_wallet = true;
+        inline.inline_wallet_password = Some("pw".into());
+        assert!(preflight_wallet_args(&inline).is_ok());
+    }
+
+    #[test]
+    fn capability_note_names_the_flags_and_the_way_out() {
+        let note = capabilities_ignored_note(&["research".into(), "sql".into()]);
+        assert!(
+            note.starts_with("WARNING: --agent-capability is ignored"),
+            "{note}"
+        );
+        assert!(
+            note.contains("--agent-capability research, --agent-capability sql"),
+            "{note}"
+        );
+        assert!(note.contains("claims"), "{note}");
+        assert!(note.contains("taskfast agent update-me"), "{note}");
     }
 
     fn live_unclaimed(name: Option<&str>) -> AgentOutcome {
