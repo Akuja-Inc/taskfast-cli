@@ -231,6 +231,19 @@ async fn interactive_byow_path_mints_and_registers_wallet() {
     mount_profile_active(&server).await;
     mount_readiness(&server, "not_configured", false).await;
     mount_post_wallet(&server, BYOW_ADDRESS).await;
+    // gh#238: a person with a PAT at the prompt gets the claimed kind of
+    // agent — the no-credential route is never touched.
+    Mock::given(method("POST"))
+        .and(path("/new"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "agent_id": "22222222-2222-2222-2222-222222222222",
+            "api_key": "am_live_should_not_exist",
+            "claim_url": "https://staging.taskfast.app/new/claim?claim_token=x",
+            "expires_at": "2026-11-26T17:48:51Z",
+        })))
+        .expect(0)
+        .mount(&server)
+        .await;
 
     let tmp = TempDir::new().unwrap();
     let cfg_path = config_path_in(tmp.path());
@@ -325,25 +338,41 @@ async fn interactive_users_me_404_falls_back_to_neutral_greeting() {
 }
 
 #[tokio::test]
-async fn no_interactive_flag_disables_tui_and_surfaces_missing_key() {
-    // With no api_key, no PAT, and the TUI gate forced off, init must
-    // fall back to the original `MissingApiKey` error — no prompting.
+async fn no_interactive_with_no_key_falls_through_to_post_new() {
+    // With no api_key, no PAT and the TUI gate forced off, init goes to
+    // the no-credential route (gh#238) instead of prompting. The mock
+    // server has no `/new` route — the 404 of a deployment with the
+    // switch off — so the run ends on the error a keyless init always
+    // had, after exactly one `POST /new`.
     let server = MockServer::start().await;
-    // Deliberately no HTTP mocks — a silent prompt fire would still try
-    // to fetch /users/me and error out differently.
+    Mock::given(method("POST"))
+        .and(path("/new"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": "not_found",
+            "message": "The requested resource does not exist",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
 
     let tmp = TempDir::new().unwrap();
     let cfg_path = config_path_in(tmp.path());
     let prompter = MockPrompter::new(); // empty — panics if touched
 
-    let err = run_with_prompter(&ctx_for(&server, cfg_path), base_args(), &prompter, false)
-        .await
-        .expect_err("non-interactive + no key must error");
+    let err = run_with_prompter(
+        &ctx_for(&server, cfg_path.clone()),
+        base_args(),
+        &prompter,
+        false,
+    )
+    .await
+    .expect_err("non-interactive + no key + route off must error");
 
     assert!(
         matches!(err, CmdError::MissingApiKey),
         "expected MissingApiKey, got {err:?}"
     );
+    assert!(!cfg_path.exists(), "nothing may be saved on a refusal");
 }
 
 #[tokio::test]

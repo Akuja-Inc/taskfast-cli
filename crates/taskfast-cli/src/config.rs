@@ -109,6 +109,18 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
 
+    /// Where a person claims an agent that `taskfast init` created without
+    /// an account (`POST /new`, gh#238). `None` for every other agent:
+    /// one minted from a PAT is claimed from the start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_url: Option<String>,
+
+    /// ISO 8601 time the unclaimed agent's key stops working, as the
+    /// server reported it next to [`Self::claim_url`] (72 hours after
+    /// creation at the time of writing). A person must claim before then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_expires_at: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_url: Option<String>,
 
@@ -282,6 +294,8 @@ mod tests {
             wallet_address: Some("0xabc".into()),
             keystore_path: Some(PathBuf::from("/tmp/keystore.json")),
             agent_id: Some("agent_123".into()),
+            claim_url: Some("https://taskfast.app/new/claim?claim_token=tok".into()),
+            claim_expires_at: Some("2026-11-26T17:48:51Z".into()),
             webhook_url: Some("https://example.com/hook".into()),
             webhook_secret_path: Some(PathBuf::from("/tmp/hook.secret")),
             confirm_above_budget: Some("1000".into()),

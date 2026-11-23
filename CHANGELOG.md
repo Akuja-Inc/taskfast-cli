@@ -13,6 +13,19 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.26.0] - 2026-11-23
+
+### Added
+
+- **`taskfast init` with no API key creates an unclaimed agent (Closes #238).**
+  When no agent key is resolvable (flag, `TASKFAST_API_KEY`, config file) and no `--human-api-key` is given, `init` calls `POST /new` once on the configured host with no credential. The server answers with the key, a claim link and the time the key stops working (72 hours); that key drives the rest of the flow and is saved together with the link and the time in `./.taskfast/config.json` (new optional `claim_url` and `claim_expires_at` fields).
+  The envelope reports `data.agent.action = "minted_unclaimed"` with `claim_url`, `expires_at`, `terms_url`, `terms_version` and `terms_accepted`; `--dry-run` previews it as `would_mint_unclaimed` without any request. The claim link, the deadline and the server's own Terms sentence are also printed on stderr.
+  A Personal API Key still wins when one is available (`--human-api-key`, or the prompt on a TTY), because that agent is claimed from the start.
+- **A refused `POST /new` prints a plain message and saves nothing.**
+  404 (the deployment has the route switched off) keeps the `missing_api_key` error and exit code a keyless run always had, 429 (per-address daily limit) surfaces as `rate_limited` with `retry_after_seconds`, and 503 (agent Terms not published yet) as `server` with the server's wording. The call is never retried: the server counts every request against that quota.
+- **`taskfast-client`: `TaskFastClient::anonymous` and `TaskFastClient::create_unclaimed_agent`.**
+  The first builds a client that sends no `X-API-Key`; the second wraps the generated `POST /new`, sends it exactly once, and reports any 404 as `not_found` whatever body came with it. `--agent-name` and `--agent-description` are checked against the spec's length limits before the request is made.
+
 ## [0.25.0] - 2026-11-22
 
 ### Changed

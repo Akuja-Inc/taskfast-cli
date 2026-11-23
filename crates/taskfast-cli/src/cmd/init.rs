@@ -48,6 +48,23 @@
 //!   the server's `funding_hint` when the readiness `funded` gate emits
 //!   one. The run stays `ok:true` — the gap is a warning, not a failure.
 //!
+//! # Scope (gh#238 extension)
+//!
+//! * No key of any kind: `POST /new` on the configured host, with no
+//!   authentication. The server creates an unclaimed agent, its key and
+//!   a claim link in one call; the key then drives the rest of the flow
+//!   like a PAT-minted one. The agent belongs to nobody until a person
+//!   opens the link, cannot accept a bid until then, and its key stops
+//!   working at the `expires_at` the server returns (72 hours today), so
+//!   the link and the time are printed, put in the envelope and saved
+//!   next to the key in the config file. Order of resort when no key is
+//!   resolvable: `--human-api-key` → interactive PAT prompt (TTY only) →
+//!   `POST /new`; a PAT wins because that agent is claimed from the
+//!   start. The call is made exactly once — the server counts every
+//!   request against a per-address daily limit — and its three refusals
+//!   (404 switched off, 429 daily limit, 503 Terms not published) end
+//!   the run with a plain message and nothing written.
+//!
 //! # `--dry-run` semantics
 //!
 //! Mutations short-circuit: no wallet POST, no config file write, no
@@ -56,6 +73,7 @@
 //! profile reads pass through.
 
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use clap::Parser;
 use serde_json::json;
@@ -69,7 +87,10 @@ use taskfast_agent::bootstrap::{create_agent_headless, get_readiness, validate_a
 use taskfast_agent::faucet::{request_testnet_funds, FaucetDrop};
 use taskfast_agent::keystore;
 use taskfast_agent::wallet;
-use taskfast_client::api::types::{AgentCreateRequest, AgentReadiness};
+use taskfast_client::api::types::{
+    AgentCreateRequest, AgentReadiness, NewAgentRequest, NewAgentRequestDescription,
+    NewAgentRequestName,
+};
 use taskfast_client::TaskFastClient;
 
 /// Wallet status string emitted by the server when the agent hasn't
@@ -122,15 +143,19 @@ pub struct Args {
     /// `POST /agents` when no agent API key is available. The server
     /// derives the owning user from the PAT, so no owner UUID is required.
     /// Ignored if an agent key is already resolvable (direct flag / env
-    /// var / config file).
+    /// var / config file). Preferred over the no-credential path: with a
+    /// PAT the agent is claimed from the start, whereas `POST /new`
+    /// creates one a person must claim within 72 hours.
     #[arg(long, env = "TASKFAST_HUMAN_API_KEY")]
     pub human_api_key: Option<String>,
 
-    /// Display name for the minted agent.
+    /// Display name for the agent created without a key — from a PAT or
+    /// through `POST /new`. 1 to 80 characters.
     #[arg(long, default_value = "taskfast-agent")]
     pub agent_name: String,
 
-    /// Description for the minted agent.
+    /// Description for the agent created without a key — from a PAT or
+    /// through `POST /new`. 1 to 500 characters.
     #[arg(long, default_value = "Headless agent registered via taskfast init")]
     pub agent_description: String,
 
@@ -214,19 +239,25 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
     //    Ctx already resolved (flag > env var > config).
     let mut cfg = Config::load(&cfg_path)?;
 
-    // 1a. Resolve the agent API key. If none is available but the caller
-    //     supplied a user PAT, mint a fresh agent headlessly and use the
-    //     returned key. Under --dry-run we short-circuit before the POST
-    //     and return early — the rest of the flow depends on a real key.
+    // 1a. Resolve the agent API key. If none is available, mint one:
+    //     from a user PAT when the caller supplied one (or, on a TTY, typed
+    //     one in), else through the no-credential `POST /new`. Under
+    //     --dry-run both short-circuit before any POST and return early —
+    //     the rest of the flow depends on a real key.
     //
-    //     Interactive fallback: when no key and no --human-api-key, and
-    //     we're attached to a TTY, prompt the human for their PAT and
-    //     greet them via /users/me before minting.
+    //     A PAT goes first on purpose: its agent is claimed from the start,
+    //     while a `POST /new` agent needs a person to open the claim link
+    //     within 72 hours. The interactive prompt is TTY-only, so a script
+    //     with no key at all goes straight to `POST /new`.
     let (api_key, agent_outcome) = match resolve_api_key(ctx, &cfg) {
         Ok(k) => (k, AgentOutcome::PreExisting),
         Err(CmdError::MissingApiKey) => {
-            let pat = resolve_pat(ctx, &args, interactive, prompter).await?;
-            let minted = mint_agent(ctx, &args, &pat).await?;
+            let minted = match resolve_pat(ctx, &args, interactive, prompter).await {
+                Ok(pat) => mint_agent(ctx, &args, &pat).await?,
+                // No PAT and no prompt possible: last resort, no login.
+                Err(CmdError::MissingApiKey) => create_unclaimed(ctx, &args).await?,
+                Err(e) => return Err(e),
+            };
             match minted {
                 MintedAgent::DryRun { ref intent } => {
                     return Ok(Envelope::success(
@@ -318,6 +349,23 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
     if let AgentOutcome::Minted(MintedAgent::Live { id: Some(id), .. }) = &agent_outcome {
         cfg.agent_id = Some(id.clone());
     }
+    match &agent_outcome {
+        // gh#238: the claim link is the only way a person can take the
+        // agent over, so it lives next to the key that needs claiming.
+        AgentOutcome::Minted(MintedAgent::Live {
+            unclaimed: Some(unclaimed),
+            ..
+        }) => {
+            cfg.claim_url = unclaimed.claim_url.clone();
+            cfg.claim_expires_at = unclaimed.expires_at.map(|t| t.to_string());
+        }
+        // Any other fresh agent makes the previous link stale.
+        AgentOutcome::Minted(_) => {
+            cfg.claim_url = None;
+            cfg.claim_expires_at = None;
+        }
+        AgentOutcome::PreExisting => {}
+    }
     if let Some(url) = args.webhook_url.as_deref().filter(|s| !s.trim().is_empty()) {
         cfg.webhook_url = Some(url.to_string());
     }
@@ -373,6 +421,12 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
     )
     .await;
 
+    // 5c. An agent created through `POST /new` is nobody's until a person
+    // opens the claim link (gh#238). Say so where a human will see it.
+    if let Some(note) = unclaimed_announcement(&agent_outcome) {
+        eprintln!("{note}");
+    }
+
     let data = build_envelope_data(
         &cfg_path,
         config_written,
@@ -388,8 +442,9 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
 
 /// Result of the agent-key resolution step. When the caller already had
 /// a key (flag / env var / config file), this is `PreExisting` and the
-/// envelope stays quiet about it. When a key was minted via
-/// `--human-api-key`, the envelope surfaces the minted agent's id/name.
+/// envelope stays quiet about it. When a key was minted without one —
+/// from `--human-api-key` or through `POST /new` — the envelope surfaces
+/// the new agent's id and name.
 enum AgentOutcome {
     PreExisting,
     Minted(MintedAgent),
@@ -403,13 +458,52 @@ enum MintedAgent {
         api_key: String,
         id: Option<String>,
         name: Option<String>,
+        /// Set when the agent came from `POST /new` (gh#238): nobody owns
+        /// it until a person opens the claim link.
+        unclaimed: Option<Unclaimed>,
     },
     DryRun {
         intent: MintIntent,
     },
 }
 
+/// The claim half of a `POST /new` response. Every field is optional
+/// because the generated response type is (the spec marks them required
+/// and the server sends them all); each consumer omits what is absent
+/// rather than failing a run whose key already works.
+struct Unclaimed {
+    /// Link a person opens to take the agent over.
+    claim_url: Option<String>,
+    /// When the agent's key stops working unless it is claimed first.
+    expires_at: Option<jiff::Timestamp>,
+    terms_url: Option<String>,
+    terms_version: Option<String>,
+    /// The server's own sentence stating that the request accepted the
+    /// Terms — printed verbatim, never reworded here.
+    terms_notice: Option<String>,
+    terms_accepted: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MintKind {
+    /// `POST /agents` with a user PAT: the agent belongs to that user now.
+    FromPat,
+    /// `POST /new` with no login: the agent waits to be claimed.
+    Unclaimed,
+}
+
+impl MintKind {
+    /// `data.agent.action` of the `--dry-run` envelope.
+    fn dry_run_action(self) -> &'static str {
+        match self {
+            Self::FromPat => "would_mint",
+            Self::Unclaimed => "would_mint_unclaimed",
+        }
+    }
+}
+
 struct MintIntent {
+    kind: MintKind,
     name: String,
     description: String,
     capabilities: Vec<String>,
@@ -417,8 +511,9 @@ struct MintIntent {
 
 /// Resolve the PAT used to mint a fresh agent. Priority: `--human-api-key`
 /// (flag / env) → interactive prompt (when TTY-attached). Absent both,
-/// propagate the original [`CmdError::MissingApiKey`] so non-interactive
-/// callers see the same message they did before the TUI landed.
+/// propagate [`CmdError::MissingApiKey`] so the caller falls through to
+/// the no-credential `POST /new` (gh#238) — the same error non-interactive
+/// callers saw before any of this existed.
 async fn resolve_pat<P: crate::cmd::init_tui::Prompter>(
     ctx: &Ctx,
     args: &Args,
@@ -490,6 +585,7 @@ async fn mint_agent(ctx: &Ctx, args: &Args, pat: &str) -> Result<MintedAgent, Cm
     if ctx.dry_run {
         return Ok(MintedAgent::DryRun {
             intent: MintIntent {
+                kind: MintKind::FromPat,
                 name: args.agent_name.clone(),
                 description: args.agent_description.clone(),
                 capabilities,
@@ -521,13 +617,162 @@ async fn mint_agent(ctx: &Ctx, args: &Args, pat: &str) -> Result<MintedAgent, Cm
         api_key,
         id: resp.id.map(|u| u.to_string()),
         name: resp.name.clone(),
+        unclaimed: None,
     })
+}
+
+/// Create an agent with no credential at all: `POST /new` (gh#238). The
+/// server answers with the key, the claim link and the time the key
+/// stops working; the flow then continues exactly as for a PAT-minted
+/// agent. The request accepts the agent Terms on the caller's behalf —
+/// that is the server's published rule, and the response's `terms_notice`
+/// is surfaced verbatim so nobody has to guess at it.
+///
+/// Made at most once per run and never retried: the server counts every
+/// request against a per-address daily quota, refused ones included. The
+/// name and description are checked here against the spec's own length
+/// limits (the generated types carry them) so a bad flag fails before the
+/// quota is spent.
+async fn create_unclaimed(ctx: &Ctx, args: &Args) -> Result<MintedAgent, CmdError> {
+    let name = NewAgentRequestName::from_str(&args.agent_name)
+        .map_err(|e| CmdError::Usage(format!("--agent-name: {e}")))?;
+    let description = NewAgentRequestDescription::from_str(&args.agent_description)
+        .map_err(|e| CmdError::Usage(format!("--agent-description: {e}")))?;
+
+    if ctx.dry_run {
+        return Ok(MintedAgent::DryRun {
+            intent: MintIntent {
+                kind: MintKind::Unclaimed,
+                name: args.agent_name.clone(),
+                description: args.agent_description.clone(),
+                // `POST /new` takes no capabilities; the server sets none.
+                capabilities: Vec::new(),
+            },
+        });
+    }
+
+    let client = TaskFastClient::anonymous(ctx.base_url()).map_err(CmdError::from)?;
+    let body = NewAgentRequest {
+        name: Some(name),
+        description: Some(description),
+    };
+    let resp = client
+        .create_unclaimed_agent(&body)
+        .await
+        .map_err(|e| new_agent_refused(ctx, e))?;
+
+    let api_key = resp
+        .api_key
+        .clone()
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| CmdError::Server("POST /new returned no api_key despite 201".into()))?;
+    Ok(MintedAgent::Live {
+        api_key,
+        id: resp.agent_id.map(|u| u.to_string()),
+        name: Some(args.agent_name.clone()),
+        unclaimed: Some(Unclaimed {
+            claim_url: resp.claim_url,
+            expires_at: resp.expires_at,
+            terms_url: resp.terms_url,
+            terms_version: resp.terms_version,
+            terms_notice: resp.terms_notice,
+            terms_accepted: resp.terms_accepted,
+        }),
+    })
+}
+
+/// Why `POST /new` refused to create an agent. The three cases the server
+/// documents are expected outcomes rather than faults, so each maps to
+/// the plain message an orchestrator can branch on and a human can read.
+#[derive(Debug, PartialEq, Eq)]
+enum NewAgentRefusal {
+    /// 404: the deployment has the no-login route switched off.
+    Off,
+    /// 429: this address used up its daily quota; `Retry-After` says when
+    /// the window closes (up to a day).
+    DailyLimit { retry_after: std::time::Duration },
+    /// 503: the agent Terms are not published yet. Carries the server's
+    /// own sentence explaining it.
+    NotReady(String),
+}
+
+impl NewAgentRefusal {
+    /// Recognise a refusal in a client error. `None` for anything else
+    /// (transport failure, 422, malformed body), which keeps its usual
+    /// [`CmdError`] mapping.
+    fn classify(err: &taskfast_client::Error) -> Option<Self> {
+        use taskfast_client::Error as E;
+        match err {
+            E::Validation { code, .. } if code == "not_found" => Some(Self::Off),
+            E::RateLimited { retry_after } => Some(Self::DailyLimit {
+                retry_after: *retry_after,
+            }),
+            // `Error::Server` is every 5xx (and pre-flight faults); only
+            // the documented 503 means "not ready".
+            E::Server(msg) => msg
+                .strip_prefix("HTTP 503: ")
+                .map(|m| Self::NotReady(m.to_string())),
+            _ => None,
+        }
+    }
+
+    /// The error `init` returns. Nothing has been written at this point
+    /// in the run, so every arm saves nothing by construction.
+    ///
+    /// `Off` keeps the exact error and exit code a keyless run always
+    /// had: the caller needs a key, and existing orchestrators already
+    /// branch on `missing_api_key` for it. `DailyLimit` keeps
+    /// `retry_after_seconds` in the envelope through [`CmdError::RateLimited`].
+    fn cmd_error(&self) -> CmdError {
+        match self {
+            Self::Off => CmdError::MissingApiKey,
+            Self::DailyLimit { retry_after } => CmdError::RateLimited {
+                retry_after: *retry_after,
+            },
+            Self::NotReady(msg) => CmdError::Server(msg.clone()),
+        }
+    }
+
+    /// The human-readable reason and next step, for stderr. The envelope's
+    /// message is the stable machine one; these lines say what happened.
+    fn note(&self, host: &str) -> String {
+        match self {
+            Self::Off => format!(
+                "taskfast init: no API key was given, and {host} does not create agents \
+                 without an account (POST /new answered 404). Nothing was saved.\n  \
+                 To create a claimed agent instead: taskfast init --human-api-key <PAT> \
+                 (or pass --api-key / TASKFAST_API_KEY)."
+            ),
+            Self::DailyLimit { retry_after } => format!(
+                "taskfast init: {host} refused to create an agent without an account: too \
+                 many were created from this address today (POST /new answered 429). \
+                 Nothing was saved.\n  Try again in {} seconds.",
+                retry_after.as_secs()
+            ),
+            Self::NotReady(msg) => format!(
+                "taskfast init: {host} refused to create an agent without an account: \
+                 {msg} (POST /new answered 503). Nothing was saved.\n  Try again later."
+            ),
+        }
+    }
+}
+
+/// Map a failed `POST /new` (gh#238) to the error `init` returns, with the
+/// reason on stderr for whoever is watching the terminal.
+fn new_agent_refused(ctx: &Ctx, err: taskfast_client::Error) -> CmdError {
+    match NewAgentRefusal::classify(&err) {
+        Some(refusal) => {
+            eprintln!("{}", refusal.note(ctx.base_url()));
+            refusal.cmd_error()
+        }
+        None => CmdError::from(err),
+    }
 }
 
 fn build_dry_run_mint_envelope(cfg_path: &Path, intent: &MintIntent) -> serde_json::Value {
     json!({
         "agent": {
-            "action": "would_mint",
+            "action": intent.kind.dry_run_action(),
             "name": intent.name,
             "description": intent.description,
             "capabilities": intent.capabilities,
@@ -1081,17 +1326,96 @@ fn build_envelope_data(
         "readiness": readiness,
         "ready_to_work": readiness.ready_to_work,
     });
-    if let AgentOutcome::Minted(MintedAgent::Live { id, name, .. }) = agent {
-        let mut a = json!({ "action": "minted" });
+    if let AgentOutcome::Minted(MintedAgent::Live {
+        id,
+        name,
+        unclaimed,
+        ..
+    }) = agent
+    {
+        let mut a = json!({
+            // Orchestrators branch on this: `minted` is owned from the
+            // start, `minted_unclaimed` needs a person to claim it.
+            "action": if unclaimed.is_some() { "minted_unclaimed" } else { "minted" },
+        });
         if let Some(id) = id {
             a["id"] = json!(id);
         }
         if let Some(name) = name {
             a["name"] = json!(name);
         }
+        if let Some(u) = unclaimed {
+            if let Some(url) = &u.claim_url {
+                a["claim_url"] = json!(url);
+            }
+            if let Some(expires_at) = u.expires_at {
+                a["expires_at"] = json!(expires_at);
+            }
+            if let Some(url) = &u.terms_url {
+                a["terms_url"] = json!(url);
+            }
+            if let Some(version) = &u.terms_version {
+                a["terms_version"] = json!(version);
+            }
+            if let Some(accepted) = u.terms_accepted {
+                a["terms_accepted"] = json!(accepted);
+            }
+        }
         out["agent"] = a;
     }
     out
+}
+
+/// The stderr note for an agent that waits to be claimed (gh#238): where
+/// to claim it, until when, and what the request accepted. The Terms
+/// sentence is the server's, verbatim — legal wording is the operator's
+/// to approve, not this crate's to paraphrase. `None` when the run did not
+/// just create such an agent, or the server sent no link to announce.
+fn unclaimed_announcement(agent: &AgentOutcome) -> Option<String> {
+    let AgentOutcome::Minted(MintedAgent::Live {
+        name,
+        unclaimed: Some(unclaimed),
+        ..
+    }) = agent
+    else {
+        return None;
+    };
+    let claim_url = unclaimed.claim_url.as_deref()?;
+    let mut lines = Vec::new();
+    lines.push(match name {
+        Some(name) => format!(
+            "Created agent \"{name}\" without an account. Nobody owns it until a person \
+             claims it, and it cannot accept a bid before that."
+        ),
+        None => "Created an agent without an account. Nobody owns it until a person claims \
+             it, and it cannot accept a bid before that."
+            .to_string(),
+    });
+    lines.push(format!(
+        "  Claim link (share it with your owner): {claim_url}"
+    ));
+    if let Some(expires_at) = unclaimed.expires_at {
+        lines.push(format!(
+            "  Its key stops working at {expires_at} unless it is claimed first."
+        ));
+    }
+    let terms = match (
+        unclaimed.terms_notice.as_deref(),
+        unclaimed.terms_url.as_deref(),
+    ) {
+        (Some(notice), _) => Some(notice.to_string()),
+        (None, Some(url)) => Some(format!(
+            "Creating it accepted the Terms of Service for agents at {url}."
+        )),
+        (None, None) => None,
+    };
+    if let Some(terms) = terms {
+        match unclaimed.terms_version.as_deref() {
+            Some(version) => lines.push(format!("  {terms} Terms version {version}.")),
+            None => lines.push(format!("  {terms}")),
+        }
+    }
+    Some(lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -1399,5 +1723,291 @@ mod tests {
         let client = TaskFastClient::from_api_key("http://127.0.0.1:1/", "k").unwrap();
         let outcome = maybe_configure_webhook(&client, &base_args(), true).await;
         assert!(matches!(outcome, WebhookOutcome::Skipped));
+    }
+
+    // ─── no key → POST /new (gh#238) ────────────────────────────────────────
+
+    use taskfast_client::Error as ClientError;
+
+    #[test]
+    fn refusal_classifies_the_three_documented_answers() {
+        use std::time::Duration;
+        assert_eq!(
+            NewAgentRefusal::classify(&ClientError::Validation {
+                code: "not_found".into(),
+                message: "The requested resource does not exist".into(),
+            }),
+            Some(NewAgentRefusal::Off)
+        );
+        assert_eq!(
+            NewAgentRefusal::classify(&ClientError::RateLimited {
+                retry_after: Duration::from_hours(24),
+            }),
+            Some(NewAgentRefusal::DailyLimit {
+                retry_after: Duration::from_hours(24),
+            })
+        );
+        assert_eq!(
+            NewAgentRefusal::classify(&ClientError::Server(
+                "HTTP 503: The Terms of Service are not published yet; try again later.".into()
+            )),
+            Some(NewAgentRefusal::NotReady(
+                "The Terms of Service are not published yet; try again later.".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn refusal_leaves_everything_else_alone() {
+        // A 422 is the caller's bad input, another 5xx an outage, a network
+        // failure a transport problem: none is "the route is unavailable".
+        assert_eq!(
+            NewAgentRefusal::classify(&ClientError::Validation {
+                code: "validation_error".into(),
+                message: "Invalid agent data".into(),
+            }),
+            None
+        );
+        assert_eq!(
+            NewAgentRefusal::classify(&ClientError::Server("HTTP 502: Bad Gateway".into())),
+            None
+        );
+        assert_eq!(
+            NewAgentRefusal::classify(&ClientError::Server(
+                "response body exceeds 16777216-byte safety cap".into()
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn refusal_off_keeps_the_keyless_error_and_exit_code() {
+        // The error a keyless run always had, so `missing_api_key` handling
+        // in existing orchestrators keeps working on deployments without
+        // the route.
+        assert!(matches!(
+            NewAgentRefusal::Off.cmd_error(),
+            CmdError::MissingApiKey
+        ));
+    }
+
+    #[test]
+    fn refusal_daily_limit_keeps_retry_after_for_the_envelope() {
+        use std::time::Duration;
+        match (NewAgentRefusal::DailyLimit {
+            retry_after: Duration::from_hours(24),
+        })
+        .cmd_error()
+        {
+            CmdError::RateLimited { retry_after } => {
+                assert_eq!(retry_after, Duration::from_hours(24))
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refusal_not_ready_carries_the_server_wording() {
+        match NewAgentRefusal::NotReady(
+            "The Terms of Service are not published yet; try again later.".into(),
+        )
+        .cmd_error()
+        {
+            CmdError::Server(msg) => assert_eq!(
+                msg,
+                "The Terms of Service are not published yet; try again later."
+            ),
+            other => panic!("expected Server, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refusal_notes_say_what_happened_and_what_next() {
+        use std::time::Duration;
+        let off = NewAgentRefusal::Off.note("https://staging.api.taskfast.app");
+        assert!(off.contains("https://staging.api.taskfast.app"), "{off}");
+        assert!(off.contains("404"), "{off}");
+        assert!(off.contains("--human-api-key"), "{off}");
+        assert!(off.contains("Nothing was saved"), "{off}");
+
+        let limited = NewAgentRefusal::DailyLimit {
+            retry_after: Duration::from_hours(24),
+        }
+        .note("https://h");
+        assert!(limited.contains("429"), "{limited}");
+        assert!(limited.contains("86400 seconds"), "{limited}");
+        assert!(limited.contains("Nothing was saved"), "{limited}");
+
+        let not_ready =
+            NewAgentRefusal::NotReady("Terms are not published yet.".into()).note("https://h");
+        assert!(
+            not_ready.contains("Terms are not published yet."),
+            "{not_ready}"
+        );
+        assert!(not_ready.contains("503"), "{not_ready}");
+        assert!(not_ready.contains("Nothing was saved"), "{not_ready}");
+    }
+
+    #[test]
+    fn dry_run_action_distinguishes_the_two_mints() {
+        // Orchestrators branch on `data.agent.action`; the PAT preview is
+        // unchanged and the new one gets its own tag.
+        assert_eq!(MintKind::FromPat.dry_run_action(), "would_mint");
+        assert_eq!(MintKind::Unclaimed.dry_run_action(), "would_mint_unclaimed");
+    }
+
+    fn live_unclaimed(name: Option<&str>) -> AgentOutcome {
+        AgentOutcome::Minted(MintedAgent::Live {
+            api_key: "am_live_x".into(),
+            id: Some("22222222-2222-2222-2222-222222222222".into()),
+            name: name.map(str::to_string),
+            unclaimed: Some(Unclaimed {
+                claim_url: Some("https://staging.taskfast.app/new/claim?claim_token=tok".into()),
+                expires_at: Some("2026-11-26T17:48:51Z".parse().unwrap()),
+                terms_url: Some("https://staging.taskfast.app/terms/agents".into()),
+                terms_version: Some("2026-11-15".into()),
+                terms_notice: Some(
+                    "By sending this request you accepted the TaskFast Terms of Service at \
+                     https://staging.taskfast.app/terms/agents."
+                        .into(),
+                ),
+                terms_accepted: Some(true),
+            }),
+        })
+    }
+
+    #[test]
+    fn announcement_names_the_link_the_deadline_and_the_server_terms_sentence() {
+        let note = unclaimed_announcement(&live_unclaimed(Some("taskfast-agent")))
+            .expect("an unclaimed agent is announced");
+        assert!(note.contains("\"taskfast-agent\""), "{note}");
+        assert!(
+            note.contains("https://staging.taskfast.app/new/claim?claim_token=tok"),
+            "{note}"
+        );
+        assert!(note.contains("2026-11-26T17:48:51Z"), "{note}");
+        // Legal wording is the operator's: the server's sentence is
+        // reproduced as is, with its version.
+        assert!(
+            note.contains(
+                "By sending this request you accepted the TaskFast Terms of Service at \
+                 https://staging.taskfast.app/terms/agents. Terms version 2026-11-15."
+            ),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn announcement_falls_back_to_the_terms_url_and_skips_absent_lines() {
+        let AgentOutcome::Minted(MintedAgent::Live { unclaimed, .. }) = live_unclaimed(None) else {
+            unreachable!()
+        };
+        let mut unclaimed = unclaimed.unwrap();
+        unclaimed.terms_notice = None;
+        unclaimed.expires_at = None;
+        let note = unclaimed_announcement(&AgentOutcome::Minted(MintedAgent::Live {
+            api_key: "am_live_x".into(),
+            id: None,
+            name: None,
+            unclaimed: Some(unclaimed),
+        }))
+        .expect("still announced");
+        assert!(
+            note.contains("Created an agent without an account"),
+            "{note}"
+        );
+        assert!(!note.contains("stops working"), "{note}");
+        assert!(
+            note.contains(
+                "Creating it accepted the Terms of Service for agents at \
+                 https://staging.taskfast.app/terms/agents. Terms version 2026-11-15."
+            ),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn announcement_is_silent_for_other_outcomes() {
+        assert!(unclaimed_announcement(&AgentOutcome::PreExisting).is_none());
+        assert!(
+            unclaimed_announcement(&AgentOutcome::Minted(MintedAgent::Live {
+                api_key: "am_live_x".into(),
+                id: None,
+                name: None,
+                unclaimed: None,
+            }))
+            .is_none()
+        );
+        // No link, nothing to announce.
+        let AgentOutcome::Minted(MintedAgent::Live { unclaimed, .. }) = live_unclaimed(None) else {
+            unreachable!()
+        };
+        let mut unclaimed = unclaimed.unwrap();
+        unclaimed.claim_url = None;
+        assert!(
+            unclaimed_announcement(&AgentOutcome::Minted(MintedAgent::Live {
+                api_key: "am_live_x".into(),
+                id: None,
+                name: None,
+                unclaimed: Some(unclaimed),
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn envelope_agent_object_carries_the_claim_half_only_for_post_new() {
+        let readiness: AgentReadiness = serde_json::from_value(json!({
+            "ready_to_work": true,
+            "checks": {
+                "api_key": {"status": "complete"},
+                "wallet": {"status": "complete"},
+                "funded": {"status": "complete"},
+                "webhook": {"status": "not_configured", "required": false},
+            },
+            "settlement_domain": {
+                "chain_id": 42431,
+                "verifying_contract": "0x0000000000000000000000000000000000000000",
+            },
+        }))
+        .unwrap();
+        let data = build_envelope_data(
+            Path::new("/dev/null"),
+            true,
+            &WalletOutcome::Skipped,
+            &live_unclaimed(Some("taskfast-agent")),
+            &readiness,
+            &FaucetOutcome::Skipped { reason: "dry_run" },
+            &WebhookOutcome::Skipped,
+            false,
+        );
+        assert_eq!(data["agent"]["action"], "minted_unclaimed");
+        assert_eq!(
+            data["agent"]["claim_url"],
+            "https://staging.taskfast.app/new/claim?claim_token=tok"
+        );
+        assert_eq!(data["agent"]["expires_at"], "2026-11-26T17:48:51Z");
+        assert_eq!(data["agent"]["terms_version"], "2026-11-15");
+        assert_eq!(data["agent"]["terms_accepted"], true);
+
+        // The PAT mint keeps its old shape: action `minted`, no claim fields.
+        let pat = AgentOutcome::Minted(MintedAgent::Live {
+            api_key: "am_live_x".into(),
+            id: Some("11111111-1111-1111-1111-111111111111".into()),
+            name: Some("taskfast-agent".into()),
+            unclaimed: None,
+        });
+        let data = build_envelope_data(
+            Path::new("/dev/null"),
+            true,
+            &WalletOutcome::Skipped,
+            &pat,
+            &readiness,
+            &FaucetOutcome::Skipped { reason: "dry_run" },
+            &WebhookOutcome::Skipped,
+            false,
+        );
+        assert_eq!(data["agent"]["action"], "minted");
+        assert!(data["agent"].get("claim_url").is_none());
     }
 }

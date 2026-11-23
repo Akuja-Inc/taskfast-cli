@@ -74,7 +74,19 @@ impl TaskFastClient {
         value.set_sensitive(true);
         let mut headers = HeaderMap::new();
         headers.insert("X-API-Key", value);
+        Self::with_default_headers(base_url, headers)
+    }
 
+    /// Construct a client that sends no `X-API-Key`, for the public
+    /// routes a caller has no credential for yet — today only
+    /// [`Self::create_unclaimed_agent`]. Same timeouts and redirect policy
+    /// as [`Self::from_api_key`]; an authenticated call through it fails
+    /// server-side with 401, which is the correct outcome.
+    pub fn anonymous(base_url: &str) -> Result<Self> {
+        Self::with_default_headers(base_url, HeaderMap::new())
+    }
+
+    fn with_default_headers(base_url: &str, headers: HeaderMap) -> Result<Self> {
         // F5: pin redirect policy to `none`. reqwest's default follows up
         // to 10 redirects. `Authorization` is stripped cross-host by
         // reqwest, but `X-API-Key` is a custom header so it would be
@@ -151,6 +163,41 @@ impl TaskFastClient {
         Fut: Future<Output = Result<T>>,
     {
         with_backoff(self.policy, op).await
+    }
+
+    /// `POST /new` — create an unclaimed poster agent with no login
+    /// (gh#238, server taskfast#1617). Returns the agent's key together with
+    /// the `claim_url` a person opens later to take it over, and the
+    /// `expires_at` after which that key stops working.
+    ///
+    /// Public: build the client with [`Self::anonymous`]. Sent exactly once
+    /// and never through [`Self::call_with_retry`] — the server counts
+    /// every request against a per-address daily limit, refused ones
+    /// included, so a retry would spend the caller's quota for nothing.
+    /// The three refusals are expected outcomes rather than faults:
+    /// 404 (route switched off) arrives as [`Error::Validation`] with code
+    /// `not_found`, 429 (daily limit) as [`Error::RateLimited`] carrying the
+    /// server's `Retry-After`, and 503 (agent Terms not published yet) as
+    /// [`Error::Server`]. A 404 always arrives as `not_found`, whatever
+    /// body came with it: the server's JSON when the route is switched
+    /// off, or nothing when an edge in front of it answers instead.
+    pub async fn create_unclaimed_agent(
+        &self,
+        body: &api::types::NewAgentRequest,
+    ) -> Result<api::types::NewAgentCreated> {
+        match self.inner.create_unclaimed_agent(body).await {
+            Ok(resp) => Ok(resp.into_inner()),
+            Err(api::Error::UnexpectedResponse(resp))
+                if resp.status() == reqwest::StatusCode::NOT_FOUND =>
+            {
+                let mut err = classify_response(resp).await;
+                if let Error::Validation { code, .. } = &mut err {
+                    *code = "not_found".to_string();
+                }
+                Err(err)
+            }
+            Err(e) => Err(map_api_error(e).await),
+        }
     }
 
     /// `GET /users/me` — fetch the human owner's display name + email.
