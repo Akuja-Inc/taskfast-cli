@@ -1094,6 +1094,132 @@ async fn minting_with_a_pat_clears_a_stale_claim_link() {
 }
 
 #[tokio::test]
+async fn key_from_flag_or_env_clears_the_config_claim_link_of_another_agent() {
+    // gh#238 review: `TASKFAST_API_KEY=<B>` on a config that still holds
+    // agent A's key and claim link must not save (B, A's link).
+    let server = MockServer::start().await;
+    mount_profile_active(&server).await;
+    mount_readiness(&server, "complete", true).await;
+    let tmp = TempDir::new().unwrap();
+    let cfg_path = config_path_in(tmp.path());
+    Config {
+        api_key: Some("am_live_agent_A".into()),
+        claim_url: Some("https://staging.taskfast.app/new/claim?claim_token=A".into()),
+        claim_expires_at: Some("2026-11-26T17:48:51Z".into()),
+        ..Config::default()
+    }
+    .save(&cfg_path)
+    .unwrap();
+    let mut args = base_args();
+    args.skip_wallet = true;
+
+    run(
+        &ctx_for(&server, Some("am_live_agent_B"), cfg_path.clone(), false),
+        args,
+    )
+    .await
+    .expect("pre-existing key path");
+    let loaded = Config::load(&cfg_path).unwrap();
+    assert_eq!(loaded.api_key.as_deref(), Some("am_live_agent_B"));
+    assert_eq!(loaded.claim_url, None, "A's link does not belong to B");
+    assert_eq!(loaded.claim_expires_at, None);
+}
+
+#[tokio::test]
+async fn key_from_the_config_keeps_its_own_claim_link() {
+    // …while a re-run on the saved key keeps the pair together.
+    let server = MockServer::start().await;
+    mount_profile_active(&server).await;
+    mount_readiness(&server, "complete", true).await;
+    let tmp = TempDir::new().unwrap();
+    let cfg_path = config_path_in(tmp.path());
+    Config {
+        api_key: Some(NEW_AGENT_KEY.into()),
+        claim_url: Some(CLAIM_URL.into()),
+        claim_expires_at: Some(EXPIRES_AT.into()),
+        ..Config::default()
+    }
+    .save(&cfg_path)
+    .unwrap();
+    let mut args = base_args();
+    args.skip_wallet = true;
+
+    run(&ctx_for(&server, None, cfg_path.clone(), false), args)
+        .await
+        .expect("re-run on the saved key");
+    let loaded = Config::load(&cfg_path).unwrap();
+    assert_eq!(loaded.api_key.as_deref(), Some(NEW_AGENT_KEY));
+    assert_eq!(loaded.claim_url.as_deref(), Some(CLAIM_URL));
+    assert_eq!(loaded.claim_expires_at.as_deref(), Some(EXPIRES_AT));
+}
+
+#[tokio::test]
+async fn blank_agent_name_stops_before_post_new() {
+    // Whitespace passes the spec's length limits; the server trims and
+    // refuses — after counting the request. Mirrored before the request.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/new"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(new_agent_body()))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let cfg_path = config_path_in(tmp.path());
+    let mut args = keyless_args();
+    args.agent_name = "   ".into();
+
+    match run(&ctx_for(&server, None, cfg_path.clone(), false), args).await {
+        Err(CmdError::Usage(msg)) => assert!(msg.contains("--agent-name"), "message: {msg}"),
+        other => panic!("expected Usage, got {other:?}"),
+    }
+    assert!(!cfg_path.exists());
+}
+
+#[tokio::test]
+async fn created_201_without_an_api_key_is_a_server_error_and_saves_nothing() {
+    // Sibling of create_agent_headless's invariant: the key is shown once,
+    // so a 201 that omits it cannot be proceeded from. Checked before the
+    // early save, so nothing reaches the config.
+    for body in [
+        {
+            let mut b = new_agent_body();
+            b.as_object_mut().unwrap().remove("api_key");
+            b
+        },
+        {
+            let mut b = new_agent_body();
+            b["api_key"] = json!("");
+            b
+        },
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/new"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tmp = TempDir::new().unwrap();
+        let cfg_path = config_path_in(tmp.path());
+
+        let err = run(
+            &ctx_for(&server, None, cfg_path.clone(), false),
+            keyless_args(),
+        )
+        .await
+        .expect_err("201 without a usable key");
+        match err {
+            CmdError::Server(msg) => {
+                assert_eq!(msg, "POST /new returned no api_key despite 201")
+            }
+            other => panic!("expected Server, got {other:?}"),
+        }
+        assert!(!cfg_path.exists(), "nothing may be saved without a key");
+    }
+}
+
+#[tokio::test]
 async fn unfunded_wallet_at_init_end_surfaces_machine_signals_and_stays_ok() {
     // gh#142: faucet failure / zero balance must not sit quietly next to
     // success. The stderr warning text itself is unit-tested against

@@ -31,9 +31,12 @@
 //!
 //! # Secrets
 //!
-//! `api_key` lives in this file. The file is written mode `0600` on unix
-//! (atomic temp + rename) and the containing `.taskfast/` directory is
-//! intended to be git-ignored.
+//! `api_key` lives in this file, and so does `claim_url` for an agent
+//! created without an account (gh#238) — opening that link and signing in
+//! makes the opener the agent's owner, so it is a bearer credential like
+//! the key. The file is written mode `0600` on unix (atomic temp + rename)
+//! and the containing `.taskfast/` directory is intended to be git-ignored.
+//! `taskfast config show` masks both unless `--reveal` is passed.
 
 use std::path::{Path, PathBuf};
 

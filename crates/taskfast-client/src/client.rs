@@ -174,28 +174,22 @@ impl TaskFastClient {
     /// and never through [`Self::call_with_retry`] — the server counts
     /// every request against a per-address daily limit, refused ones
     /// included, so a retry would spend the caller's quota for nothing.
-    /// The three refusals are expected outcomes rather than faults:
-    /// 404 (route switched off) arrives as [`Error::Validation`] with code
-    /// `not_found`, 429 (daily limit) as [`Error::RateLimited`] carrying the
-    /// server's `Retry-After`, and 503 (agent Terms not published yet) as
-    /// [`Error::Server`]. A 404 always arrives as `not_found`, whatever
-    /// body came with it: the server's JSON when the route is switched
-    /// off, or nothing when an edge in front of it answers instead.
+    ///
+    /// The server's three documented refusals are expected results of a
+    /// keyless init rather than faults, so they come back as
+    /// [`NewAgentOutcome`] variants, decided here on the raw response where
+    /// the status and the JSON envelope are still available. 429 and 503
+    /// count as those refusals only when the body is the server's
+    /// `{error, message}` envelope; an edge or load balancer answering
+    /// instead is the generic [`Error`], like any other call. Every other
+    /// non-2xx (422 for a bad name, 401, …) is the generic [`Error`] too.
     pub async fn create_unclaimed_agent(
         &self,
         body: &api::types::NewAgentRequest,
-    ) -> Result<api::types::NewAgentCreated> {
+    ) -> Result<NewAgentOutcome> {
         match self.inner.create_unclaimed_agent(body).await {
-            Ok(resp) => Ok(resp.into_inner()),
-            Err(api::Error::UnexpectedResponse(resp))
-                if resp.status() == reqwest::StatusCode::NOT_FOUND =>
-            {
-                let mut err = classify_response(resp).await;
-                if let Error::Validation { code, .. } = &mut err {
-                    *code = "not_found".to_string();
-                }
-                Err(err)
-            }
+            Ok(resp) => Ok(NewAgentOutcome::Created(Box::new(resp.into_inner()))),
+            Err(api::Error::UnexpectedResponse(resp)) => classify_new_agent_response(resp).await,
             Err(e) => Err(map_api_error(e).await),
         }
     }
@@ -511,6 +505,37 @@ pub enum ArtifactUpload {
     Multipart,
 }
 
+/// What `POST /new` answered, beyond the two outcomes every call shares
+/// (`Created`, and a transport or decoding failure as `Err`). The server's
+/// three documented refusals are expected results of a keyless init, not
+/// faults, so they are typed here instead of being flattened into
+/// [`Error`]: a caller has to tell them apart to say what happened, and
+/// must not parse [`Error`]'s `Display` to do so.
+#[derive(Debug)]
+pub enum NewAgentOutcome {
+    /// 201: the agent exists. Its key and claim link are shown nowhere
+    /// else, so a caller persists them before doing anything else.
+    /// Boxed: the response is the only large variant (clippy
+    /// `large_size_difference`), and it is constructed and matched once.
+    Created(Box<api::types::NewAgentCreated>),
+    /// 404: this deployment has the no-login route switched off, or has no
+    /// such route. Whatever body came with it.
+    RouteOff,
+    /// 429 with the server's `rate_limited` envelope: this address used up
+    /// its daily quota. `retry_after` is the server's `Retry-After` (or its
+    /// `retry_after_seconds`), so the window can be a day.
+    RateLimited {
+        /// How long to wait before the address may mint again.
+        retry_after: Duration,
+    },
+    /// 503 with the server's `try_later` envelope: the agent Terms are not
+    /// published yet. Carries the server's own sentence.
+    NotReady {
+        /// The server's `message`, verbatim.
+        message: String,
+    },
+}
+
 /// Stream `resp` body chunks into memory, refusing to allocate past `cap`.
 ///
 /// Reqwest offers no native body-size cap on the ClientBuilder. Wrapping
@@ -650,6 +675,10 @@ struct ErrorBody {
     /// server's real limit reaches the operator; the CLI holds no copy.
     #[serde(default)]
     max_bytes: Option<u64>,
+    /// The server's own sleep hint on 429 `rate_limited` / 503 `try_later`,
+    /// used only when the `Retry-After` header is missing.
+    #[serde(default)]
+    retry_after_seconds: Option<u64>,
 }
 
 /// Classify a non-2xx response by status code, reading the body to extract
@@ -661,20 +690,33 @@ struct ErrorBody {
 /// drops are observable in logs.
 async fn classify_response(resp: reqwest::Response) -> Error {
     let status = resp.status();
-    let code = status.as_u16();
     let retry_after = parse_retry_after(&resp);
-    // Cap the error body read at 64 KiB. TaskFast error envelopes are
-    // `{error, message}` JSON objects — a megabyte-class body on a 4xx
-    // is an abuse signal, not a legitimate payload. Smaller cap than
-    // success bodies: error paths never carry task-list pages.
-    let body = match read_body_capped(resp, 64 * 1024).await {
+    let body = read_error_body(resp).await;
+    classify_status(status, retry_after, &body)
+}
+
+/// Read a non-2xx body, capped at 64 KiB. TaskFast error envelopes are
+/// `{error, message}` JSON objects — a megabyte-class body on a 4xx is an
+/// abuse signal, not a legitimate payload. Smaller cap than success bodies:
+/// error paths never carry task-list pages. Also captures the server
+/// `x-request-id` for the CLI trace (gh#85).
+async fn read_error_body(resp: reqwest::Response) -> String {
+    let code = resp.status().as_u16();
+    match read_body_capped(resp, 64 * 1024).await {
         Ok(b) => String::from_utf8_lossy(&b).into_owned(),
         Err(e) => {
             tracing::warn!(error = %e.kind(), %code, "classify_response: failed to read body");
             String::new()
         }
-    };
-    let mut parsed: ErrorBody = match serde_json::from_str(&body) {
+    }
+}
+
+/// Parse an already-read error body as the envelope. A body that is not
+/// JSON becomes an envelope with an empty `error` and the raw text as
+/// `message` — which is how [`classify_new_agent_response`] tells the
+/// server's own answers from a page written by something in front of it.
+fn parse_error_body(code: u16, body: &str) -> ErrorBody {
+    let mut parsed: ErrorBody = match serde_json::from_str(body) {
         Ok(p) => p,
         Err(e) => {
             if !body.is_empty() {
@@ -682,14 +724,28 @@ async fn classify_response(resp: reqwest::Response) -> Error {
             }
             ErrorBody {
                 error: String::new(),
-                message: body,
+                message: body.to_string(),
                 max_bytes: None,
+                retry_after_seconds: None,
             }
         }
     };
     if let Some(max) = parsed.max_bytes {
         parsed.message = format!("{} (max_bytes: {max})", parsed.message);
     }
+    parsed
+}
+
+/// The status → [`Error`] mapping, on an already-read body. Split from
+/// [`classify_response`] so `POST /new` can look at the same body first
+/// (see [`classify_new_agent_response`]).
+fn classify_status(
+    status: reqwest::StatusCode,
+    retry_after: Option<Duration>,
+    body: &str,
+) -> Error {
+    let code = status.as_u16();
+    let parsed = parse_error_body(code, body);
 
     match code {
         401 | 403 => Error::Auth(format_status(
@@ -721,6 +777,38 @@ async fn classify_response(resp: reqwest::Response) -> Error {
             code,
             display_or_status(&parsed, status.as_str()),
         )),
+    }
+}
+
+/// Decide a non-2xx `POST /new` on the raw response (gh#238 review): 404 is
+/// always [`NewAgentOutcome::RouteOff`], whatever came with it — the
+/// server's JSON when the switch is off, or nothing when an edge in front
+/// answers instead. 429 and 503 are the documented refusals only when the
+/// body is the server's `{error, message}` envelope; anything else is the
+/// generic [`Error`], so an edge's rate limit is not reported as the daily
+/// quota and a deploy-time load-balancer page is not quoted as the server's
+/// wording.
+async fn classify_new_agent_response(resp: reqwest::Response) -> Result<NewAgentOutcome> {
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        // Not read otherwise; still keep the trace correlation (gh#85).
+        crate::corr::record_corr_response(&resp);
+        return Ok(NewAgentOutcome::RouteOff);
+    }
+    let retry_after = parse_retry_after(&resp);
+    let body = read_error_body(resp).await;
+    let parsed = parse_error_body(status.as_u16(), &body);
+    let from_server = (!parsed.error.is_empty()).then_some(parsed);
+    match (status.as_u16(), from_server) {
+        (429, Some(parsed)) => Ok(NewAgentOutcome::RateLimited {
+            retry_after: retry_after
+                .or_else(|| parsed.retry_after_seconds.map(Duration::from_secs))
+                .unwrap_or(Duration::from_secs(1)),
+        }),
+        (503, Some(parsed)) => Ok(NewAgentOutcome::NotReady {
+            message: parsed.message,
+        }),
+        (_, _) => Err(classify_status(status, retry_after, &body)),
     }
 }
 

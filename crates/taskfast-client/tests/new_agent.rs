@@ -1,20 +1,22 @@
 // SPDX-License-Identifier: MIT
 //! `POST /new` through `TaskFastClient` (gh#238): the call carries no
-//! credential, each documented refusal lands on its typed error, and the
-//! method never retries — the server counts every request against the
-//! caller's daily quota, refused ones included.
+//! credential, each documented refusal lands on its typed outcome, anything
+//! the server did not say stays the generic error, and the method never
+//! retries — the server counts every request against the caller's daily
+//! quota, refused ones included.
 
 use std::time::Duration;
 
 use taskfast_client::api::types::{
     NewAgentRequest, NewAgentRequestDescription, NewAgentRequestName,
 };
-use taskfast_client::{Error, TaskFastClient};
+use taskfast_client::{Error, NewAgentOutcome, TaskFastClient};
 use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const CLAIM_URL: &str = "https://staging.taskfast.app/new/claim?claim_token=tok";
 const TERMS_URL: &str = "https://staging.taskfast.app/terms/agents";
+const NOT_READY_MSG: &str = "The Terms of Service are not published yet; try again later.";
 
 fn body() -> NewAgentRequest {
     NewAgentRequest {
@@ -50,6 +52,10 @@ fn created_body() -> serde_json::Value {
     })
 }
 
+fn anonymous(server: &MockServer) -> TaskFastClient {
+    TaskFastClient::anonymous(&server.uri()).expect("construct client")
+}
+
 #[tokio::test]
 async fn creates_unclaimed_agent_with_no_credential() {
     let server = MockServer::start().await;
@@ -64,11 +70,10 @@ async fn creates_unclaimed_agent_with_no_credential() {
         .mount(&server)
         .await;
 
-    let client = TaskFastClient::anonymous(&server.uri()).expect("construct client");
-    let created = client
-        .create_unclaimed_agent(&body())
-        .await
-        .expect("201 parses into NewAgentCreated");
+    let created = match anonymous(&server).create_unclaimed_agent(&body()).await {
+        Ok(NewAgentOutcome::Created(created)) => *created,
+        other => panic!("expected Created, got {other:?}"),
+    };
 
     assert_eq!(created.api_key.as_deref(), Some("am_live_fresh"));
     assert_eq!(
@@ -94,7 +99,7 @@ async fn creates_unclaimed_agent_with_no_credential() {
 }
 
 #[tokio::test]
-async fn status_404_with_server_body_is_not_found() {
+async fn status_404_with_server_body_is_route_off() {
     // The `RequireNewAgentEnabled` plug's answer while the switch is off.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -106,20 +111,17 @@ async fn status_404_with_server_body_is_not_found() {
         .mount(&server)
         .await;
 
-    let client = TaskFastClient::anonymous(&server.uri()).expect("construct client");
-    match client.create_unclaimed_agent(&body()).await {
-        Err(Error::Validation { code, message }) => {
-            assert_eq!(code, "not_found");
-            assert_eq!(message, "The requested resource does not exist");
-        }
-        other => panic!("expected Validation(not_found), got {other:?}"),
-    }
+    let outcome = anonymous(&server).create_unclaimed_agent(&body()).await;
+    assert!(
+        matches!(outcome, Ok(NewAgentOutcome::RouteOff)),
+        "{outcome:?}"
+    );
 }
 
 #[tokio::test]
-async fn status_404_without_body_is_still_not_found() {
+async fn status_404_without_body_is_still_route_off() {
     // An edge or proxy in front of the app answers 404 with no JSON. The
-    // CLI branches on `not_found`, so the code must not depend on a body.
+    // caller branches on the outcome, so it must not depend on a body.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/new"))
@@ -127,18 +129,17 @@ async fn status_404_without_body_is_still_not_found() {
         .mount(&server)
         .await;
 
-    let client = TaskFastClient::anonymous(&server.uri()).expect("construct client");
-    match client.create_unclaimed_agent(&body()).await {
-        Err(Error::Validation { code, .. }) => assert_eq!(code, "not_found"),
-        other => panic!("expected Validation(not_found), got {other:?}"),
-    }
+    let outcome = anonymous(&server).create_unclaimed_agent(&body()).await;
+    assert!(
+        matches!(outcome, Ok(NewAgentOutcome::RouteOff)),
+        "{outcome:?}"
+    );
 }
 
 #[tokio::test]
-async fn status_429_is_rate_limited_with_retry_after() {
-    // `RateLimitNewAgent`: per-address daily limit. Both the header and the
-    // body's `retry_after_seconds` carry the window; the classifier reads
-    // the header, like every other 429 in the client.
+async fn status_429_from_the_server_is_the_daily_limit() {
+    // `RateLimitNewAgent`: per-address daily limit, with both the header
+    // and the body's `retry_after_seconds`. The header wins.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/new"))
@@ -148,15 +149,15 @@ async fn status_429_is_rate_limited_with_retry_after() {
                 .set_body_json(serde_json::json!({
                     "error": "rate_limited",
                     "message": "Too many new agents from this address; retry after the rate-limit window expires.",
-                    "retry_after_seconds": 86400,
+                    "retry_after_seconds": 86_400,
                 })),
         )
         .mount(&server)
         .await;
 
-    let client = TaskFastClient::anonymous(&server.uri()).expect("construct client");
-    match client.create_unclaimed_agent(&body()).await {
-        Err(Error::RateLimited { retry_after }) => {
+    let outcome = anonymous(&server).create_unclaimed_agent(&body()).await;
+    match outcome {
+        Ok(NewAgentOutcome::RateLimited { retry_after }) => {
             assert_eq!(retry_after, Duration::from_hours(24));
         }
         other => panic!("expected RateLimited, got {other:?}"),
@@ -164,7 +165,52 @@ async fn status_429_is_rate_limited_with_retry_after() {
 }
 
 #[tokio::test]
-async fn status_503_is_server_error_and_is_never_retried() {
+async fn status_429_without_header_uses_the_body_hint() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/new"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
+            "error": "rate_limited",
+            "message": "Too many new agents from this address.",
+            "retry_after_seconds": 5,
+        })))
+        .mount(&server)
+        .await;
+
+    let outcome = anonymous(&server).create_unclaimed_agent(&body()).await;
+    match outcome {
+        Ok(NewAgentOutcome::RateLimited { retry_after }) => {
+            assert_eq!(retry_after, Duration::from_secs(5));
+        }
+        other => panic!("expected RateLimited, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn status_429_from_an_edge_is_not_the_daily_limit() {
+    // A WAF's or proxy's 429 carries no TaskFast envelope: it must not be
+    // reported as the server's per-address quota (gh#238 review). It keeps
+    // the generic 429 mapping every other call gets.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/new"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "30")
+                .set_body_string("<html>Too many requests</html>"),
+        )
+        .mount(&server)
+        .await;
+
+    let outcome = anonymous(&server).create_unclaimed_agent(&body()).await;
+    match outcome {
+        Err(Error::RateLimited { retry_after }) => assert_eq!(retry_after, Duration::from_secs(30)),
+        other => panic!("expected generic RateLimited, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn status_503_from_the_server_is_not_ready_and_is_never_retried() {
     // `{:error, :terms_unpublished}` while `agent_terms_published` is
     // false. 5xx is retryable everywhere else in the client; here a retry
     // would spend the caller's quota for nothing, so exactly one request.
@@ -173,20 +219,38 @@ async fn status_503_is_server_error_and_is_never_retried() {
         .and(path("/new"))
         .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
             "error": "try_later",
-            "message": "The Terms of Service are not published yet; try again later.",
+            "message": NOT_READY_MSG,
             "retry_after_seconds": 3600,
         })))
         .expect(1)
         .mount(&server)
         .await;
 
-    let client = TaskFastClient::anonymous(&server.uri()).expect("construct client");
-    match client.create_unclaimed_agent(&body()).await {
-        Err(Error::Server(msg)) => assert_eq!(
-            msg,
-            "HTTP 503: The Terms of Service are not published yet; try again later."
-        ),
-        other => panic!("expected Server, got {other:?}"),
+    let outcome = anonymous(&server).create_unclaimed_agent(&body()).await;
+    match outcome {
+        Ok(NewAgentOutcome::NotReady { message }) => assert_eq!(message, NOT_READY_MSG),
+        other => panic!("expected NotReady, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn status_503_without_envelope_is_a_generic_server_error() {
+    // A load balancer's page during a deploy is not the server saying its
+    // Terms are unpublished; the generic error keeps the raw body and the
+    // caller does not quote it as the server's wording.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/new"))
+        .respond_with(
+            ResponseTemplate::new(503).set_body_string("<html>Service Unavailable</html>"),
+        )
+        .mount(&server)
+        .await;
+
+    let outcome = anonymous(&server).create_unclaimed_agent(&body()).await;
+    match outcome {
+        Err(Error::Server(msg)) => assert_eq!(msg, "HTTP 503: <html>Service Unavailable</html>"),
+        other => panic!("expected generic Server, got {other:?}"),
     }
 }
 
@@ -206,8 +270,8 @@ async fn status_422_keeps_the_server_validation_error() {
         .mount(&server)
         .await;
 
-    let client = TaskFastClient::anonymous(&server.uri()).expect("construct client");
-    match client.create_unclaimed_agent(&body()).await {
+    let outcome = anonymous(&server).create_unclaimed_agent(&body()).await;
+    match outcome {
         Err(Error::Validation { code, message }) => {
             assert_eq!(code, "validation_error");
             assert_eq!(message, "Invalid agent data");

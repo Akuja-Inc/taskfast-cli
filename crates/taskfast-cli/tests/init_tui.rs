@@ -338,12 +338,14 @@ async fn interactive_users_me_404_falls_back_to_neutral_greeting() {
 }
 
 #[tokio::test]
-async fn no_interactive_with_no_key_falls_through_to_post_new() {
-    // With no api_key, no PAT and the TUI gate forced off, init goes to
-    // the no-credential route (gh#238) instead of prompting. The mock
-    // server has no `/new` route — the 404 of a deployment with the
-    // switch off — so the run ends on the error a keyless init always
-    // had, after exactly one `POST /new`.
+async fn non_interactive_no_key_falls_through_to_post_new() {
+    // With no api_key, no PAT and `interactive` forced off (this drives
+    // `run_with_prompter` directly, so the `--no-interactive` flag and the
+    // TTY check in `run()` are not what is under test), init goes to the
+    // no-credential route (gh#238) instead of prompting. `/new` is mounted
+    // to answer the 404 of a deployment with the switch off, so the run
+    // ends on the error a keyless init always had, after exactly one
+    // `POST /new`.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/new"))

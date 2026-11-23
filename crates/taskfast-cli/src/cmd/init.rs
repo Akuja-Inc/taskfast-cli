@@ -94,7 +94,7 @@ use taskfast_client::api::types::{
     AgentCreateRequest, AgentReadiness, NewAgentRequest, NewAgentRequestDescription,
     NewAgentRequestName,
 };
-use taskfast_client::TaskFastClient;
+use taskfast_client::{NewAgentOutcome, TaskFastClient};
 
 /// Wallet status string emitted by the server when the agent hasn't
 /// registered one yet. `AgentReadinessChecks.wallet.status == "complete"`
@@ -148,7 +148,7 @@ pub struct Args {
     /// Ignored if an agent key is already resolvable (direct flag / env
     /// var / config file). Preferred over the no-credential path: with a
     /// PAT the agent is claimed from the start, whereas `POST /new`
-    /// creates one a person must claim within 72 hours.
+    /// creates one a person must claim before the `expires_at` it returns.
     #[arg(long, env = "TASKFAST_HUMAN_API_KEY")]
     pub human_api_key: Option<String>,
 
@@ -245,6 +245,9 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
     //    config-supplied api_key is layered under the CLI/env sources
     //    Ctx already resolved (flag > env var > config).
     let mut cfg = Config::load(&cfg_path)?;
+    // The key as it was on disk when the run started, for step 4's check
+    // that a claim link saved earlier still belongs to the key in use.
+    let config_api_key_on_start = cfg.api_key.clone();
 
     // 1a. Resolve the agent API key. If none is available, mint one:
     //     from a user PAT when the caller supplied one (or, on a TTY, typed
@@ -289,12 +292,20 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
     //      finds the key there and continues instead of minting another
     //      agent against the same daily quota. Refusals of `POST /new`
     //      itself never reach this point, so they still write nothing.
+    //
+    //      Said before it is saved: the link is the one thing a person
+    //      needs to claim the agent, and a save can fail (an unwritable
+    //      working directory is enough) — the note must not go down with
+    //      it.
     if let AgentOutcome::Minted(MintedAgent::Live {
         id,
         unclaimed: Some(unclaimed),
         ..
     }) = &agent_outcome
     {
+        if let Some(note) = unclaimed_announcement(&agent_outcome) {
+            eprintln!("{note}");
+        }
         cfg.environment = Some(ctx.environment);
         cfg.api_key = Some(api_key.clone());
         if let Some(id) = id {
@@ -303,9 +314,6 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
         cfg.claim_url = unclaimed.claim_url.clone();
         cfg.claim_expires_at = unclaimed.expires_at.map(|t| t.to_string());
         cfg.save(&cfg_path)?;
-        if let Some(note) = unclaimed_announcement(&agent_outcome) {
-            eprintln!("{note}");
-        }
     }
 
     // 1b. Interactive wallet-mode prompt. Only fires when this run just
@@ -348,7 +356,12 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
     // Cross-system invariant — fail-closed before any wallet/agent state
     // is written if the deployment advertises a different (or additional)
     // network than the env mandates. Skipped under --dry-run so a `taskfast
-    // init --dry-run` still succeeds against a fresh deployment.
+    // init --dry-run` still succeeds against a fresh deployment. One
+    // exception, deliberate (gh#238): a key just minted through `POST /new`
+    // is already on disk by now (step 1a'), because that key exists
+    // server-side and is shown once — discarding it is worse than a config
+    // the operator must delete after a strict-mode failure, and the error
+    // says so.
     if !ctx.dry_run {
         super::enforce_server_network_invariant(&effective_ctx, &client).await?;
     }
@@ -398,7 +411,16 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
             cfg.claim_url = None;
             cfg.claim_expires_at = None;
         }
-        AgentOutcome::PreExisting => {}
+        // gh#238 review: a key from a flag or env var can be a different
+        // agent than the one whose link the config carries. The field's
+        // promise is "`None` for every other agent", so the link goes
+        // unless the key in use is the one that was on disk.
+        AgentOutcome::PreExisting => {
+            if config_api_key_on_start.as_deref() != Some(api_key.as_str()) {
+                cfg.claim_url = None;
+                cfg.claim_expires_at = None;
+            }
+        }
     }
     if let Some(url) = args.webhook_url.as_deref().filter(|s| !s.trim().is_empty()) {
         cfg.webhook_url = Some(url.to_string());
@@ -481,6 +503,7 @@ enum AgentOutcome {
 /// Live vs dry-run distinction for minting. Live carries the full
 /// response; dry-run carries just the would-have-called payload so the
 /// envelope can echo it back without touching the network.
+#[cfg_attr(test, derive(Debug))]
 enum MintedAgent {
     Live {
         api_key: String,
@@ -499,6 +522,8 @@ enum MintedAgent {
 /// because the generated response type is (the spec marks them required
 /// and the server sends them all); each consumer omits what is absent
 /// rather than failing a run whose key already works.
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug))]
 struct Unclaimed {
     /// Link a person opens to take the agent over.
     claim_url: Option<String>,
@@ -530,6 +555,7 @@ impl MintKind {
     }
 }
 
+#[cfg_attr(test, derive(Debug))]
 struct MintIntent {
     kind: MintKind,
     name: String,
@@ -664,6 +690,18 @@ async fn mint_agent(ctx: &Ctx, args: &Args, pat: &str) -> Result<MintedAgent, Cm
 /// limits (the generated types carry them), and the wallet step's two
 /// requirements (see [`preflight_wallet_args`]).
 async fn create_unclaimed(ctx: &Ctx, args: &Args) -> Result<MintedAgent, CmdError> {
+    // The generated types carry the spec's length limits; the server also
+    // rejects a value that is blank after trimming, and only after its
+    // rate limiter has counted the request — so that rule is mirrored here
+    // too, next to the length checks (gh#238 review).
+    if args.agent_name.trim().is_empty() {
+        return Err(CmdError::Usage("--agent-name: must not be blank".into()));
+    }
+    if args.agent_description.trim().is_empty() {
+        return Err(CmdError::Usage(
+            "--agent-description: must not be blank".into(),
+        ));
+    }
     let name = NewAgentRequestName::from_str(&args.agent_name)
         .map_err(|e| CmdError::Usage(format!("--agent-name: {e}")))?;
     let description = NewAgentRequestDescription::from_str(&args.agent_description)
@@ -690,10 +728,14 @@ async fn create_unclaimed(ctx: &Ctx, args: &Args) -> Result<MintedAgent, CmdErro
         name: Some(name),
         description: Some(description),
     };
-    let resp = client
-        .create_unclaimed_agent(&body)
-        .await
-        .map_err(|e| new_agent_refused(ctx, e))?;
+    // The client has already decided, on the raw response, which of the
+    // server's documented refusals this is; everything else is a generic
+    // error with its usual mapping.
+    let resp = match client.create_unclaimed_agent(&body).await {
+        Ok(NewAgentOutcome::Created(resp)) => *resp,
+        Ok(refused) => return Err(new_agent_refused(ctx, refused)),
+        Err(e) => return Err(CmdError::from(e)),
+    };
 
     let api_key = resp
         .api_key
@@ -762,35 +804,32 @@ fn capabilities_ignored_note(capabilities: &[String]) -> String {
 /// Why `POST /new` refused to create an agent. The three cases the server
 /// documents are expected outcomes rather than faults, so each maps to
 /// the plain message an orchestrator can branch on and a human can read.
+/// The client already told them apart on the raw response
+/// ([`NewAgentOutcome`]); nothing here parses an error's `Display`.
 #[derive(Debug, PartialEq, Eq)]
 enum NewAgentRefusal {
     /// 404: the deployment has the no-login route switched off.
     Off,
-    /// 429: this address used up its daily quota; `Retry-After` says when
-    /// the window closes (up to a day).
+    /// 429 with the server's `rate_limited` envelope: this address used up
+    /// its daily quota; `Retry-After` says when the window closes (up to
+    /// a day).
     DailyLimit { retry_after: std::time::Duration },
-    /// 503: the agent Terms are not published yet. Carries the server's
-    /// own sentence explaining it.
+    /// 503 with the server's `try_later` envelope: the agent Terms are not
+    /// published yet. Carries the server's own sentence explaining it.
     NotReady(String),
 }
 
 impl NewAgentRefusal {
-    /// Recognise a refusal in a client error. `None` for anything else
-    /// (transport failure, 422, malformed body), which keeps its usual
-    /// [`CmdError`] mapping.
-    fn classify(err: &taskfast_client::Error) -> Option<Self> {
-        use taskfast_client::Error as E;
-        match err {
-            E::Validation { code, .. } if code == "not_found" => Some(Self::Off),
-            E::RateLimited { retry_after } => Some(Self::DailyLimit {
+    /// The refusal the client reported. `None` for `Created`, which the
+    /// caller has already matched before reaching the refusal path.
+    fn from_outcome(outcome: &NewAgentOutcome) -> Option<Self> {
+        match outcome {
+            NewAgentOutcome::RouteOff => Some(Self::Off),
+            NewAgentOutcome::RateLimited { retry_after } => Some(Self::DailyLimit {
                 retry_after: *retry_after,
             }),
-            // `Error::Server` is every 5xx (and pre-flight faults); only
-            // the documented 503 means "not ready".
-            E::Server(msg) => msg
-                .strip_prefix("HTTP 503: ")
-                .map(|m| Self::NotReady(m.to_string())),
-            _ => None,
+            NewAgentOutcome::NotReady { message } => Some(Self::NotReady(message.clone())),
+            NewAgentOutcome::Created(_) => None,
         }
     }
 
@@ -835,16 +874,15 @@ impl NewAgentRefusal {
     }
 }
 
-/// Map a failed `POST /new` (gh#238) to the error `init` returns, with the
+/// Map a refused `POST /new` (gh#238) to the error `init` returns, with the
 /// reason on stderr for whoever is watching the terminal.
-fn new_agent_refused(ctx: &Ctx, err: taskfast_client::Error) -> CmdError {
-    match NewAgentRefusal::classify(&err) {
-        Some(refusal) => {
-            eprintln!("{}", refusal.note(ctx.base_url()));
-            refusal.cmd_error()
-        }
-        None => CmdError::from(err),
-    }
+fn new_agent_refused(ctx: &Ctx, outcome: NewAgentOutcome) -> CmdError {
+    let refusal = match NewAgentRefusal::from_outcome(&outcome) {
+        Some(refusal) => refusal,
+        None => return CmdError::Server("POST /new: created an agent on the refusal path".into()),
+    };
+    eprintln!("{}", refusal.note(ctx.base_url()));
+    refusal.cmd_error()
 }
 
 fn build_dry_run_mint_envelope(cfg_path: &Path, intent: &MintIntent) -> serde_json::Value {
@@ -1445,8 +1483,9 @@ fn build_envelope_data(
 /// The stderr note for an agent that waits to be claimed (gh#238): where
 /// to claim it, until when, and what the request accepted. The Terms
 /// sentence is the server's, verbatim — legal wording is the operator's
-/// to approve, not this crate's to paraphrase. `None` when the run did not
-/// just create such an agent, or the server sent no link to announce.
+/// to approve, not this crate's to paraphrase — and is printed only when
+/// the server itself says the Terms were accepted. `None` when the run did
+/// not just create such an agent, or the server sent no link to announce.
 fn unclaimed_announcement(agent: &AgentOutcome) -> Option<String> {
     let AgentOutcome::Minted(MintedAgent::Live {
         name,
@@ -1475,20 +1514,24 @@ fn unclaimed_announcement(agent: &AgentOutcome) -> Option<String> {
             "  Its key stops working at {expires_at} unless it is claimed first."
         ));
     }
-    let terms = match (
-        unclaimed.terms_notice.as_deref(),
-        unclaimed.terms_url.as_deref(),
-    ) {
-        (Some(notice), _) => Some(notice.to_string()),
-        (None, Some(url)) => Some(format!(
-            "Creating it accepted the Terms of Service for agents at {url}."
-        )),
-        (None, None) => None,
-    };
-    if let Some(terms) = terms {
-        match unclaimed.terms_version.as_deref() {
-            Some(version) => lines.push(format!("  {terms} Terms version {version}.")),
-            None => lines.push(format!("  {terms}")),
+    // Only the server may say the Terms were accepted. The line is printed
+    // when it said so (`terms_accepted`): in its words when it sent a
+    // notice, else as a plain pointer to the document — never a sentence
+    // this crate composed from the URL alone (gh#238 review).
+    if unclaimed.terms_accepted == Some(true) {
+        let terms = match (
+            unclaimed.terms_notice.as_deref(),
+            unclaimed.terms_url.as_deref(),
+        ) {
+            (Some(notice), _) => notice.to_string(),
+            (None, Some(url)) => format!("Terms of Service for agents: {url}."),
+            (None, None) => String::new(),
+        };
+        if !terms.is_empty() {
+            match unclaimed.terms_version.as_deref() {
+                Some(version) => lines.push(format!("  {terms} Terms version {version}.")),
+                None => lines.push(format!("  {terms}")),
+            }
         }
     }
     Some(lines.join("\n"))
@@ -1803,20 +1846,22 @@ mod tests {
 
     // ─── no key → POST /new (gh#238) ────────────────────────────────────────
 
-    use taskfast_client::Error as ClientError;
+    fn created_outcome() -> NewAgentOutcome {
+        NewAgentOutcome::Created(Box::default())
+    }
 
     #[test]
-    fn refusal_classifies_the_three_documented_answers() {
+    fn refusal_comes_from_the_typed_outcome_not_from_error_display() {
+        // The client decides the documented refusals on the raw response;
+        // here they only map to the CLI's note + error. Nothing parses an
+        // error string (gh#238 review).
         use std::time::Duration;
         assert_eq!(
-            NewAgentRefusal::classify(&ClientError::Validation {
-                code: "not_found".into(),
-                message: "The requested resource does not exist".into(),
-            }),
+            NewAgentRefusal::from_outcome(&NewAgentOutcome::RouteOff),
             Some(NewAgentRefusal::Off)
         );
         assert_eq!(
-            NewAgentRefusal::classify(&ClientError::RateLimited {
+            NewAgentRefusal::from_outcome(&NewAgentOutcome::RateLimited {
                 retry_after: Duration::from_hours(24),
             }),
             Some(NewAgentRefusal::DailyLimit {
@@ -1824,36 +1869,15 @@ mod tests {
             })
         );
         assert_eq!(
-            NewAgentRefusal::classify(&ClientError::Server(
-                "HTTP 503: The Terms of Service are not published yet; try again later.".into()
-            )),
+            NewAgentRefusal::from_outcome(&NewAgentOutcome::NotReady {
+                message: "The Terms of Service are not published yet; try again later.".into(),
+            }),
             Some(NewAgentRefusal::NotReady(
                 "The Terms of Service are not published yet; try again later.".into()
             ))
         );
-    }
-
-    #[test]
-    fn refusal_leaves_everything_else_alone() {
-        // A 422 is the caller's bad input, another 5xx an outage, a network
-        // failure a transport problem: none is "the route is unavailable".
-        assert_eq!(
-            NewAgentRefusal::classify(&ClientError::Validation {
-                code: "validation_error".into(),
-                message: "Invalid agent data".into(),
-            }),
-            None
-        );
-        assert_eq!(
-            NewAgentRefusal::classify(&ClientError::Server("HTTP 502: Bad Gateway".into())),
-            None
-        );
-        assert_eq!(
-            NewAgentRefusal::classify(&ClientError::Server(
-                "response body exceeds 16777216-byte safety cap".into()
-            )),
-            None
-        );
+        // A created agent is not a refusal; the caller matches it first.
+        assert_eq!(NewAgentRefusal::from_outcome(&created_outcome()), None);
     }
 
     #[test]
@@ -1933,25 +1957,20 @@ mod tests {
     }
 
     #[test]
-    fn wallet_preflight_demands_a_signal_and_a_password_before_the_mint() {
-        // gh#238 review, P1: the two usage errors `provision_wallet` would
-        // raise after a 201 are raised before the request instead, with
-        // the very same wording.
+    fn wallet_preflight_demands_a_signal_before_the_mint() {
+        // gh#238 review, P1: the usage error `provision_wallet` would raise
+        // after a 201 is raised before the request instead, with the very
+        // same wording.
         let no_signal = base_args();
         match preflight_wallet_args(&no_signal) {
             Err(CmdError::Usage(msg)) => assert_eq!(msg, WALLET_FLAG_HINT),
             other => panic!("expected Usage, got {other:?}"),
         }
-        // A password source that cannot work surfaces the password error
-        // (a nonexistent file is deterministic even where the env var is set).
-        let mut generate_no_password = base_args();
-        generate_no_password.generate_wallet = true;
-        generate_no_password.wallet_password_file = Some(PathBuf::from("/nonexistent/gh238/pw"));
-        match preflight_wallet_args(&generate_no_password) {
-            Err(CmdError::Usage(msg)) => assert!(msg.contains("password"), "{msg}"),
-            other => panic!("expected Usage, got {other:?}"),
-        }
-        // Each way of satisfying the wallet step passes.
+        // Each way of satisfying the wallet step passes. (The password
+        // failure depends on `TASKFAST_WALLET_PASSWORD`, which wins over
+        // the file in `wallet_args` and is set process-wide by that
+        // module's tests behind a private lock — so that case is pinned by
+        // the integration test, which can skip when the variable is set.)
         let mut skip = base_args();
         skip.skip_wallet = true;
         assert!(preflight_wallet_args(&skip).is_ok());
@@ -1962,6 +1981,30 @@ mod tests {
         inline.generate_wallet = true;
         inline.inline_wallet_password = Some("pw".into());
         assert!(preflight_wallet_args(&inline).is_ok());
+    }
+
+    #[tokio::test]
+    async fn blank_name_or_description_is_rejected_before_the_mint() {
+        // The spec's length limits let whitespace through; the server trims
+        // and refuses — after counting the request. Mirrored here.
+        let mut args = base_args();
+        args.agent_name = "   ".into();
+        let err = create_unclaimed(&ctx_with_key(None), &args)
+            .await
+            .expect_err("blank name");
+        assert!(
+            matches!(err, CmdError::Usage(ref m) if m.contains("--agent-name")),
+            "{err:?}"
+        );
+        let mut args = base_args();
+        args.agent_description = "\t\n".into();
+        let err = create_unclaimed(&ctx_with_key(None), &args)
+            .await
+            .expect_err("blank description");
+        assert!(
+            matches!(err, CmdError::Usage(ref m) if m.contains("--agent-description")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -2021,7 +2064,10 @@ mod tests {
     }
 
     #[test]
-    fn announcement_falls_back_to_the_terms_url_and_skips_absent_lines() {
+    fn announcement_without_a_notice_points_at_the_terms_but_only_if_accepted() {
+        // No notice: a plain pointer, never a sentence of this crate's own
+        // claiming acceptance — and nothing at all unless the server said
+        // the Terms were accepted (gh#238 review).
         let AgentOutcome::Minted(MintedAgent::Live { unclaimed, .. }) = live_unclaimed(None) else {
             unreachable!()
         };
@@ -2032,7 +2078,7 @@ mod tests {
             api_key: "am_live_x".into(),
             id: None,
             name: None,
-            unclaimed: Some(unclaimed),
+            unclaimed: Some(unclaimed.clone()),
         }))
         .expect("still announced");
         assert!(
@@ -2042,11 +2088,22 @@ mod tests {
         assert!(!note.contains("stops working"), "{note}");
         assert!(
             note.contains(
-                "Creating it accepted the Terms of Service for agents at \
-                 https://staging.taskfast.app/terms/agents. Terms version 2026-11-15."
+                "Terms of Service for agents: https://staging.taskfast.app/terms/agents. \
+                 Terms version 2026-11-15."
             ),
             "{note}"
         );
+        assert!(!note.contains("accepted"), "{note}");
+
+        unclaimed.terms_accepted = None;
+        let note = unclaimed_announcement(&AgentOutcome::Minted(MintedAgent::Live {
+            api_key: "am_live_x".into(),
+            id: None,
+            name: None,
+            unclaimed: Some(unclaimed),
+        }))
+        .expect("still announced");
+        assert!(!note.contains("Terms"), "{note}");
     }
 
     #[test]
