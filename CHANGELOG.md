@@ -13,6 +13,10 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Changed
+
+- **Re-vendored the OpenAPI spec** (fetched 2026-11-23). PLACEHOLDER_REWORD
+
 ## [0.26.0] - 2026-11-24
 
 ### Added
