@@ -31,9 +31,12 @@
 //!
 //! # Secrets
 //!
-//! `api_key` lives in this file. The file is written mode `0600` on unix
-//! (atomic temp + rename) and the containing `.taskfast/` directory is
-//! intended to be git-ignored.
+//! `api_key` lives in this file, and so does `claim_url` for an agent
+//! created without an account (gh#238) — opening that link and signing in
+//! makes the opener the agent's owner, so it is a bearer credential like
+//! the key. The file is written mode `0600` on unix (atomic temp + rename)
+//! and the containing `.taskfast/` directory is intended to be git-ignored.
+//! `taskfast config show` masks both unless `--reveal` is passed.
 
 use std::path::{Path, PathBuf};
 
@@ -108,6 +111,18 @@ pub struct Config {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+
+    /// Where a person claims an agent that `taskfast init` created without
+    /// an account (`POST /new`, gh#238). `None` for every other agent:
+    /// one minted from a PAT is claimed from the start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_url: Option<String>,
+
+    /// ISO 8601 time the unclaimed agent's key stops working, as the
+    /// server reported it next to [`Self::claim_url`] (72 hours after
+    /// creation at the time of writing). A person must claim before then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_expires_at: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_url: Option<String>,
@@ -282,6 +297,8 @@ mod tests {
             wallet_address: Some("0xabc".into()),
             keystore_path: Some(PathBuf::from("/tmp/keystore.json")),
             agent_id: Some("agent_123".into()),
+            claim_url: Some("https://taskfast.app/new/claim?claim_token=tok".into()),
+            claim_expires_at: Some("2026-11-26T17:48:51Z".into()),
             webhook_url: Some("https://example.com/hook".into()),
             webhook_secret_path: Some(PathBuf::from("/tmp/hook.secret")),
             confirm_above_budget: Some("1000".into()),

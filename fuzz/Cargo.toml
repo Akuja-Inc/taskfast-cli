@@ -43,7 +43,7 @@ bench = false
 
 # Keep this crate OUT of the parent workspace. cargo-fuzz builds it under a
 # nightly toolchain with sanitizer RUSTFLAGS, while the workspace pins stable
-# 1.95 and sets `-D warnings`. An empty [workspace] table makes `fuzz/` its
+# 1.97 and sets `-D warnings`. An empty [workspace] table makes `fuzz/` its
 # own workspace root, so `cargo build/clippy --workspace` never touches it.
 [workspace]
 

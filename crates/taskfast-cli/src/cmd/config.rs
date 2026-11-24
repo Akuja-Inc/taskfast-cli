@@ -3,9 +3,10 @@
 //!
 //! Three operations, each shaped around the orchestrator JSON envelope:
 //!
-//! * `show` — dump the config with `api_key` redacted to its last 4 chars.
-//!   `--reveal` prints the full value (e.g. for piping into an env var in
-//!   a one-shot).
+//! * `show` — dump the config with `api_key` redacted to its last 4 chars,
+//!   and the `claim_token` of a `claim_url` likewise (gh#238: whoever opens
+//!   that link and signs in becomes the agent's owner). `--reveal` prints
+//!   the full values (e.g. for piping into an env var in a one-shot).
 //! * `path` — print the resolved config path. Useful for `jq -r
 //!   .data.path` in a shell wrapper that needs to mount the file.
 //! * `set <key> <value>` — mutate a single field. Keys are allowlisted so
@@ -29,7 +30,8 @@ use crate::Environment;
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Print the current config as JSON. `api_key` is redacted to
-    /// `***<last4>` unless `--reveal` is passed.
+    /// `***<last4>`, and a `claim_url`'s `claim_token` likewise, unless
+    /// `--reveal` is passed.
     Show(ShowArgs),
     /// Print the resolved config path (respects `--config` /
     /// `TASKFAST_CONFIG`).
@@ -43,9 +45,11 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct ShowArgs {
-    /// Print `api_key` in full instead of the `***<last4>` redaction.
-    /// Consider piping to a file you `chmod 600` immediately rather than
-    /// letting the key sit in your shell history.
+    /// Print `api_key` and `claim_url` in full instead of the `***<last4>`
+    /// redaction. Both are bearer credentials: the key acts as the agent,
+    /// the claim link makes its opener the agent's owner. Consider piping
+    /// to a file you `chmod 600` immediately rather than letting either
+    /// sit in your shell history.
     #[arg(long)]
     pub reveal: bool,
 }
@@ -265,9 +269,42 @@ fn serialize_for_display(cfg: &Config, reveal: bool) -> serde_json::Value {
                     *key = serde_json::Value::String(redact(s));
                 }
             }
+            // gh#238 review: the claim link is a bearer capability too —
+            // whoever opens it, signs in and confirms becomes the agent's
+            // owner — so pasting `config show` output must not hand the
+            // agent over. Origin kept, token masked like the key.
+            if let Some(url) = obj.get_mut("claim_url") {
+                if let Some(s) = url.as_str() {
+                    *url = serde_json::Value::String(redact_claim_url(s));
+                }
+            }
         }
     }
     v
+}
+
+/// `https://host/new/claim?claim_token=<token>&x=1` → the same URL with the
+/// token's last 4 chars kept and the rest masked. Anything without a
+/// `claim_token` query value is masked whole: this function never returns
+/// an unmasked string it was given.
+fn redact_claim_url(s: &str) -> String {
+    let Ok(mut u) = url::Url::parse(s) else {
+        return "***".to_string();
+    };
+    let mut pairs: Vec<(String, String)> = u
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    if !pairs.iter().any(|(k, _)| k == "claim_token") {
+        return "***".to_string();
+    }
+    for (k, v) in &mut pairs {
+        if k == "claim_token" {
+            *v = redact(v);
+        }
+    }
+    u.query_pairs_mut().clear().extend_pairs(pairs);
+    u.to_string()
 }
 
 /// Mask all but the last 4 chars: `am_live_abcd1234` → `***1234`. Short
@@ -297,6 +334,22 @@ mod tests {
             quiet: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn redact_claim_url_masks_only_the_token_and_fails_closed() {
+        assert_eq!(
+            redact_claim_url("https://h/new/claim?claim_token=abcdefghijklmnop&x=1"),
+            "https://h/new/claim?claim_token=***mnop&x=1"
+        );
+        // Short tokens are masked whole, like short keys.
+        assert_eq!(
+            redact_claim_url("https://h/new/claim?claim_token=ab"),
+            "https://h/new/claim?claim_token=***"
+        );
+        // No token, or not a URL: nothing of the input comes back.
+        assert_eq!(redact_claim_url("https://h/new/claim"), "***");
+        assert_eq!(redact_claim_url("not a url"), "***");
     }
 
     #[test]
@@ -387,6 +440,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn show_redacts_claim_token_by_default() {
+        // gh#238 review: the claim link is a bearer capability; `config
+        // show` output must not hand the agent to whoever reads it.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.json");
+        Config {
+            api_key: Some("am_live_secret0123".into()),
+            claim_url: Some(
+                "https://staging.taskfast.app/new/claim?claim_token=abcdefghijklmnop&next=%2Fx"
+                    .into(),
+            ),
+            ..Config::default()
+        }
+        .save(&path)
+        .unwrap();
+
+        let env = run(
+            &ctx_with(path.clone(), false),
+            Command::Show(ShowArgs { reveal: false }),
+        )
+        .await
+        .unwrap();
+        let v = serde_json::to_value(&env).unwrap();
+        assert_eq!(
+            v["data"]["config"]["claim_url"],
+            "https://staging.taskfast.app/new/claim?claim_token=***mnop&next=%2Fx"
+        );
+    }
+
+    #[tokio::test]
     async fn show_reveal_prints_api_key_in_full() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.json");
@@ -405,6 +488,28 @@ mod tests {
         .unwrap();
         let v = serde_json::to_value(&env).unwrap();
         assert_eq!(v["data"]["config"]["api_key"], "am_live_secret0123");
+    }
+
+    #[tokio::test]
+    async fn show_reveal_prints_claim_url_in_full() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.json");
+        let full = "https://staging.taskfast.app/new/claim?claim_token=abcdefghijklmnop";
+        Config {
+            claim_url: Some(full.into()),
+            ..Config::default()
+        }
+        .save(&path)
+        .unwrap();
+
+        let env = run(
+            &ctx_with(path, false),
+            Command::Show(ShowArgs { reveal: true }),
+        )
+        .await
+        .unwrap();
+        let v = serde_json::to_value(&env).unwrap();
+        assert_eq!(v["data"]["config"]["claim_url"], full);
     }
 
     #[tokio::test]

@@ -13,6 +13,33 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Changed
+
+- **MSRV bumped to Rust 1.97** (from 1.95). `rust-version` in `Cargo.toml`, `rust-toolchain.toml`, and the CI matrix's MSRV leg now use 1.97. Required by `progenitor` 0.17 (#248, #250). `taskfast-client` users on Rust 1.95/1.96 need to stay on the previous release.
+- **`taskfast-client` is generated with progenitor 0.17 (#248, #250).** The generator API changed — `Generator::build(&settings, &spec)` + `generate_sdk()` replace `Generator::new` / `generate_tokens` — and request hooks moved from `GenerationSettings::with_post_hook` to the `progenitor_client::ClientHooks` trait. `taskfast-client` now implements `ClientHooks<()> for api::Client`, so the `x-request-id` capture (`record_corr`) still fires for every generated call (`corr_capture.rs` proves it). `MIT-0` joins the license allow list (`borrow-or-share`, a transitive of progenitor 0.17).
+
+## [0.26.0] - 2026-11-23
+
+### Added
+
+- **`taskfast init` with no API key creates an unclaimed agent (Closes #238).**
+  When no agent key is resolvable (flag, `TASKFAST_API_KEY`, config file) and no `--human-api-key` is given, `init` calls `POST /new` once on the configured host with no credential. The server answers with the key, a claim link and the time the key stops working; that key drives the rest of the flow and is saved together with the link and the time in `./.taskfast/config.json` (`claim_url`, `claim_expires_at`).
+  The envelope reports `data.agent.action = "minted_unclaimed"` with `claim_url`, `expires_at`, `terms_url`, `terms_version` and `terms_accepted`; `--dry-run` previews it as `would_mint_unclaimed` without any request. The claim link and the deadline are printed on stderr, with the server's own Terms sentence — and only when the server says the Terms were accepted.
+  A Personal API Key still wins when one is available (`--human-api-key`, or the prompt on a TTY), because that agent is claimed from the start — so at a terminal the no-key path needs `--no-interactive`.
+- **Nothing that would fail later is tried after a `POST /new` success.**
+  The name and description (spec length limits, and not blank after trimming, as the server checks), the wallet flags (a wallet signal; a keystore password for `--generate-wallet`) are all checked before the request, so a bad flag never spends the daily quota on an agent the run then abandons. And the claim link is announced, then the key and the link written to the config file, the moment the 201 arrives — before the rest of the flow: a later failure (a 5xx on `/agents/me`, a refused wallet registration) leaves a usable config, and re-running `init` continues from that key instead of minting another agent. A key that comes from a flag or env var instead clears a claim link that belongs to a different agent.
+- **`--agent-capability` on the `POST /new` path warns instead of staying silent.** The server gives an unclaimed agent no capabilities until it is claimed, so the flag is ignored with a stderr warning; the help text says so.
+- **A refused `POST /new` prints a plain message and saves nothing.**
+  404 (the deployment has the route switched off) keeps the `missing_api_key` error and exit code a keyless run always had, 429 (per-address daily limit) surfaces as `rate_limited` with `retry_after_seconds`, and 503 (agent Terms not published yet) as `server` with the server's wording. The call is never retried: the server counts every request against that quota. Only the server's own 429 and 503 — a body carrying its `{error, message}` envelope — are read as those refusals; a rate limit or outage page from something in front of it keeps the generic error and is never quoted as the server's wording.
+- **`taskfast-client`: `TaskFastClient::anonymous`, `TaskFastClient::create_unclaimed_agent` and `NewAgentOutcome`.**
+  The first builds a client that sends no `X-API-Key`. The second wraps the generated `POST /new`, sends it exactly once, and decides the server's three documented refusals on the raw response: it returns `NewAgentOutcome::Created`, `RouteOff` (any 404), `RateLimited { retry_after }` or `NotReady { message }`, so no caller has to parse an error's `Display`; everything else is the generic `Error`.
+- **`taskfast config show` redacts a `claim_url`'s `claim_token`** like `api_key` (`***<last4>`; `--reveal` prints it in full). The claim link is a bearer credential: whoever opens it and signs in becomes the agent's owner, so `config show` output must not hand the agent over.
+
+### Changed
+
+- **BREAKING (`taskfast-cli`): `Config` gains `claim_url` and `claim_expires_at`.** The struct is not `#[non_exhaustive]`, so an exhaustive `Config { … }` literal must add the two fields (`Config::default()` / `..Default::default()` users are unaffected). The on-disk format is backward and forward compatible: both fields are optional and older CLIs ignore them.
+- **Docs: the skill's keyless path needs `--no-interactive` at a terminal, and re-run safety comes from `./.taskfast/config.json`.** SKILL.md, BOOT.md, SETUP.md and TROUBLESHOOTING.md now also say that an unclaimed agent cannot bid or accept a bid, register a webhook or update its profile until claimed (403 `claim_required`, whose remedy is the claim link, not a reactivation), that a keyless run in a directory without the saved config mints a new agent, and that `config show` redacts the claim token.
+
 ## [0.25.0] - 2026-11-22
 
 ### Changed

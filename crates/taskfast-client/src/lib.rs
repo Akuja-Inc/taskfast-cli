@@ -16,10 +16,10 @@ pub mod retry;
 
 pub use client::{
     map_api_error, put_presigned_upload, ArtifactUpload, NetworkConfigEntry, NetworkConfigResponse,
-    TaskFastClient, UserProfile,
+    NewAgentOutcome, TaskFastClient, UserProfile,
 };
-// `record_corr` is referenced by the generated client as `crate::record_corr`
-// (wired as progenitor's post-hook in build.rs), so it must live at the root.
+// `record_corr` is the generated client's post-hook body (via the
+// `ClientHooks` impl in corr.rs) and is re-exported for hand-rolled callers.
 pub use corr::{record_corr, record_corr_response, take_last_corr};
 pub use errors::{Error, Result};
 pub use retry::{with_backoff, RetryPolicy};

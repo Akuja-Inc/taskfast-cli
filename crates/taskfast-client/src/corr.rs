@@ -5,9 +5,10 @@
 //! `mix taskfast.trace <task_id>` joins on. The CLI needs that value to write a
 //! correlated trace line, but ~50 call sites discard the response headers at
 //! `ResponseValue::into_inner()`. Rather than thread the header through each
-//! one, [`record_corr`] is wired as progenitor's **post-hook** (see
-//! `build.rs`), so it fires for every generated request — success or error —
-//! at one place. Hand-rolled reqwest calls capture via [`record_corr_response`].
+//! one, [`record_corr`] is wired as progenitor's **post-hook** (the
+//! `ClientHooks` impl below), so it fires for every generated request —
+//! success or error — at one place. Hand-rolled reqwest calls capture via
+//! [`record_corr_response`].
 //!
 //! Storage is a process-global "last seen" cell. One CLI process runs exactly
 //! one command, so the most recent HTTP call's id is the right `corr` for that
@@ -23,9 +24,9 @@ const HEADER: &str = "x-request-id";
 
 /// Progenitor post-hook: records the correlation id from a completed request.
 ///
-/// The generated client invokes `(crate::record_corr)(&result)` after every
-/// `exec`, before the response is unwrapped, so this sees both 2xx and error
-/// (4xx/5xx) responses — those still join, so their id is kept.
+/// The [`progenitor_client::ClientHooks::post`] impl below hands it the result of every
+/// generated `exec`, before the response is unwrapped, so this sees both 2xx
+/// and error (4xx/5xx) responses — those still join, so their id is kept.
 ///
 /// A transport failure (`Err`) carries no response, so it *clears* the stored
 /// id: otherwise a later transport error in a multi-call command would leave a
@@ -48,6 +49,24 @@ pub fn record_corr_response(resp: &reqwest::Response) {
         if let Ok(mut slot) = LAST_CORR.lock() {
             *slot = Some(id.to_string());
         }
+    }
+}
+
+/// progenitor ≥0.17 routes request/response hooks through
+/// [`progenitor_client::ClientHooks`] instead of generator settings. The
+/// generated `api` module emits a no-op `impl ClientHooks<()> for &Client`
+/// (`HooksMode::Optional`); for the generated `client.post(..)` method calls
+/// this impl on `Client` itself wins resolution — auto-ref tries `Client`
+/// before `&Client` — so every generated request reports its response here.
+/// Same contract the 0.16 `with_post_hook` setting gave us.
+impl progenitor_client::ClientHooks<()> for crate::api::Client {
+    async fn post<E>(
+        &self,
+        result: &Result<reqwest::Response, reqwest::Error>,
+        _info: &progenitor_client::OperationInfo,
+    ) -> Result<(), progenitor_client::Error<E>> {
+        record_corr(result);
+        Ok(())
     }
 }
 

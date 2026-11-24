@@ -19,7 +19,7 @@ taskfast --version
 
 ## Cargo
 
-Install from crates.io. Requires Rust `1.95+`.
+Install from crates.io. Requires Rust `1.97+`.
 
 ```bash
 cargo install taskfast-cli --locked
@@ -63,7 +63,7 @@ cargo build -p taskfast-cli --release
 ./target/release/taskfast --help
 ```
 
-MSRV is Rust `1.95` (pinned in `rust-toolchain.toml`). CI tests on stable + 1.95.
+MSRV is Rust `1.97` (pinned in `rust-toolchain.toml`). CI tests on stable + 1.97.
 
 ## Verify
 
