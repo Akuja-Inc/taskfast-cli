@@ -3,8 +3,7 @@
 //!
 //! v1 ships `tempo` only — other features compile to empty stub modules so the
 //! feature matrix (and downstream `cargo check`) is exercised in CI without
-//! implementing a chain. Mirrors the Elixir `TaskFast.Chain` behaviour split
-//! (beads am-6v7b.1 / am-6v7b.2).
+//! implementing a chain. Mirrors the Elixir `TaskFast.Chain` behaviour split.
 
 #![allow(missing_docs)]
 

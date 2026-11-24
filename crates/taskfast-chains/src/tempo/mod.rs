@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Tempo chain — EIP-712 typed-data + raw payload signing.
 //!
-//! Moved verbatim from `taskfast-agent/src/signing.rs` (beads am-6v7b.4) behind
+//! Moved verbatim from `taskfast-agent/src/signing.rs` behind
 //! the `tempo` cargo feature. Byte-identical behaviour is load-bearing: the
 //! cross-check fixture `cross_check_digest_matches_elixir_fixture` mirrors the
 //! Elixir platform digest — any drift forks signature recoverability.

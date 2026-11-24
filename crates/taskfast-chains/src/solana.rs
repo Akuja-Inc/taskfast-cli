@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Solana stub — architecture-readiness only (beads am-6v7b.4). No body in v1.
+//! Solana stub — architecture-readiness only. No body in v1.
 
 use crate::chain::Chain;
 

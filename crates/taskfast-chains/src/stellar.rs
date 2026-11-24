@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Stellar stub — architecture-readiness only (beads am-6v7b.4). No body in v1.
+//! Stellar stub — architecture-readiness only. No body in v1.
 
 use crate::chain::Chain;
 
