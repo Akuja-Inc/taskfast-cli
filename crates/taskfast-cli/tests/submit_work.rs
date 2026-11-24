@@ -319,7 +319,7 @@ async fn server_refusal_makes_no_rpc_call() {
     let keys = fresh_keys();
     let err = sw(&server, Some(&keys), false).await.unwrap_err();
     assert!(matches!(err, CmdError::Auth(_)), "{err:?}");
-    assert!(rpc_bodies(&server).await.is_empty());
+    assert_eq!(rpc_bodies(&server).await, Vec::<String>::new());
 }
 
 #[tokio::test]
@@ -384,7 +384,7 @@ async fn server_refusal_means_no_chain_call_at_all() {
         !matches!(err, CmdError::HandedInClockNotStarted(_)),
         "{err:?}"
     );
-    assert!(rpc_bodies(&server).await.is_empty());
+    assert_eq!(rpc_bodies(&server).await, Vec::<String>::new());
 }
 
 #[tokio::test]
