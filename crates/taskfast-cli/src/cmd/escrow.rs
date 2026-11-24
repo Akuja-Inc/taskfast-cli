@@ -40,7 +40,10 @@ use super::{
 };
 use crate::envelope::Envelope;
 
-use taskfast_agent::chain::{compute_escrow_id, EscrowIdParams, TaskEscrow};
+use taskfast_agent::chain::{
+    compute_escrow_id, decode_escrow_state, decode_escrow_worker, decode_u256, get_escrow_calldata,
+    EscrowIdParams, TaskEscrow,
+};
 use taskfast_agent::tempo_rpc::TempoRpcClient;
 use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
 use taskfast_client::api::types::{
@@ -53,6 +56,41 @@ use taskfast_client::{map_api_error, TaskFastClient};
 pub enum Command {
     /// Sign + broadcast the on-chain escrow for a deferred bid; POST finalize.
     Sign(SignArgs),
+    /// Worker: send `submitWork(escrowId)` from your wallet so the review clock
+    /// starts on chain. `task submit` / `task remedy` already do this; run it
+    /// to retry after one reports `handed_in_clock_not_started`. Safe to repeat.
+    SubmitWork(SubmitWorkArgs),
+}
+
+/// Wallet/RPC flags as for `escalate timeout-resolve`; the task must be one you work on.
+#[derive(Debug, Parser)]
+pub struct SubmitWorkArgs {
+    /// Task UUID. Must be `under_review`; caller must be the escrow's worker.
+    pub task_id: String,
+
+    /// Keystore reference (same form as `taskfast escrow sign`).
+    #[arg(long, env = "TEMPO_KEY_SOURCE")]
+    pub keystore: Option<String>,
+
+    /// Path to keystore password file.
+    #[arg(long, env = "TASKFAST_WALLET_PASSWORD_FILE")]
+    pub wallet_password_file: Option<PathBuf>,
+
+    /// Wallet address preflight (0x-prefixed): fail if the keystore differs.
+    #[arg(long, env = "TEMPO_WALLET_ADDRESS")]
+    pub wallet_address: Option<String>,
+
+    /// Tempo RPC override. Defaults to the deployment's authenticated proxy.
+    #[arg(long, env = "TEMPO_RPC_URL")]
+    pub rpc_url: Option<String>,
+
+    /// Receipt-polling ceiling — human duration (`3min`, `90s`).
+    #[arg(
+        long,
+        env = "TASKFAST_RECEIPT_TIMEOUT",
+        value_parser = super::parse_duration,
+    )]
+    pub receipt_timeout: Option<std::time::Duration>,
 }
 
 #[derive(Debug, Parser)]
@@ -99,6 +137,19 @@ pub struct SignArgs {
 pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
     match cmd {
         Command::Sign(a) => sign(ctx, a).await,
+        Command::SubmitWork(a) => {
+            let opts = WalletOpts {
+                keystore: a.keystore.as_deref(),
+                password_file: a.wallet_password_file.as_deref(),
+                wallet_address: a.wallet_address.as_deref(),
+                rpc_url: a.rpc_url.as_deref(),
+                receipt_timeout: a.receipt_timeout,
+            };
+            let task_id = Uuid::parse_str(&a.task_id)
+                .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
+            let data = submit_work(ctx, &task_id, &opts, false).await?;
+            Ok(Envelope::success(ctx.environment, ctx.dry_run, data))
+        }
     }
 }
 
@@ -511,6 +562,9 @@ fn review_window_from(params: &BidEscrowParamsResponse) -> Result<Option<U256>, 
 // block (cargo-semver-checks `enum_variant_added`).
 mod review_abi {
     alloy_sol_types::sol! {
+        function submitWork(bytes32 escrowId) external;
+        function reviewWindowOf(bytes32 escrowId) external view returns (uint256);
+        function submittedAtOf(bytes32 escrowId) external view returns (uint256);
         function openWithReview(
             address token,
             uint256 deposit,
@@ -662,8 +716,244 @@ fn decimal_to_u256(s: &str, decimals: u8) -> Result<U256, CmdError> {
         .map_err(|e| CmdError::Decode(format!("amount `{s}` not parseable as integer: {e}")))
 }
 
+// ─── worker `submitWork` (taskfast#2044) ──────────────────────────────────
+
+/// Wallet/RPC flags, same sources as `escrow sign` and `settle` (flag, env,
+/// then `Ctx` config). Used by `escrow submit-work` and by `task submit`/`remedy`.
+pub(super) struct WalletOpts<'a> {
+    pub keystore: Option<&'a str>,
+    pub password_file: Option<&'a std::path::Path>,
+    pub wallet_address: Option<&'a str>,
+    pub rpc_url: Option<&'a str>,
+    pub receipt_timeout: Option<std::time::Duration>,
+}
+
+/// `EscrowState::Open` in `ArbitratedEscrow.sol`.
+const ESCROW_STATE_OPEN: u8 = 1;
+
+pub(super) fn submit_work_calldata(escrow_id: B256) -> Bytes {
+    review_abi::submitWorkCall {
+        escrowId: escrow_id,
+    }
+    .abi_encode()
+    .into()
+}
+
+/// True when the chain already holds this hand-in. The server sets
+/// `review_deadline = hand-in time + window`, and the chain send follows the
+/// hand-in, so a send for the current hand-in always lands at or after it;
+/// an earlier hand-in's `submittedAt + window` is strictly below.
+fn already_recorded(submitted_at: U256, window: U256, review_deadline: U256) -> bool {
+    !submitted_at.is_zero() && submitted_at.saturating_add(window) >= review_deadline
+}
+
+fn view_calldata(escrow_id: B256, window: bool) -> Bytes {
+    if window {
+        review_abi::reviewWindowOfCall {
+            escrowId: escrow_id,
+        }
+        .abi_encode()
+        .into()
+    } else {
+        review_abi::submittedAtOfCall {
+            escrowId: escrow_id,
+        }
+        .abi_encode()
+        .into()
+    }
+}
+
+/// Send `submitWork` for the task's current hand-in. Returns the envelope data.
+///
+/// Order: window read (legacy escrow, window 0, returns before any wallet is
+/// loaded) → task status → signer → escrow state + worker → duplicate check →
+/// send. `auto` is the call after a server-accepted hand-in: a task with no
+/// escrow yet, or already `complete` (auto-approve), has no clock to start.
+pub(super) async fn submit_work(
+    ctx: &Ctx,
+    task_id: &Uuid,
+    opts: &WalletOpts<'_>,
+    auto: bool,
+) -> Result<serde_json::Value, CmdError> {
+    let client = ctx.client()?;
+    let task = match client.inner().get_task(task_id).await {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    let skipped = |reason: &str| json!({ "action": "skipped", "reason": reason });
+    if auto && (task.escrow_id.is_none() || task.settlement_domain.is_none()) {
+        return Ok(skipped("task has no escrow to start a review clock on"));
+    }
+    let target = super::escalate::chain_target(&task, "nothing to submit")?;
+    let (contract, escrow_id) = (target.contract, target.escrow_id);
+    let (rpc, _) = super::escalate::connect_rpc(ctx, &client, &target, opts.rpc_url).await?;
+    let read = |what: &'static str, data: Bytes| {
+        let rpc = &rpc;
+        async move {
+            rpc.eth_call(contract, &data)
+                .await
+                .map_err(|e| super::escalate::chain_read_err(what, e))
+        }
+    };
+
+    let window = decode_u256(&read("reviewWindowOf", view_calldata(escrow_id, true)).await?)
+        .map_err(|e| super::escalate::chain_read_err("reviewWindowOf", e))?;
+    if window.is_zero() {
+        return Ok(json!({
+            "action": "no_review_clock",
+            "task_id": task_id.to_string(),
+            "note": "this escrow has no review clock (legacy escrow); nothing to send",
+        }));
+    }
+    let status = task.status.as_deref().unwrap_or("");
+    if status != "under_review" {
+        if auto && status == "complete" {
+            return Ok(skipped("task is already complete; no review clock needed"));
+        }
+        return Err(CmdError::Validation {
+            code: "task_not_under_review".into(),
+            message: format!(
+                "task status is `{status}`; the review clock starts only for a handed-in \
+                 (`under_review`) task. Nothing sent"
+            ),
+        });
+    }
+    let review_deadline = task
+        .review_deadline
+        .and_then(|t| u64::try_from(t.as_second()).ok())
+        .map(U256::from)
+        .ok_or_else(|| CmdError::Validation {
+            code: "review_deadline_missing".into(),
+            message: "under_review task has no review_deadline; cannot tell whether this \
+                      hand-in is already on chain. Nothing sent"
+                .into(),
+        })?;
+
+    let keystore_path =
+        super::wallet_args::resolve_keystore_path(opts.keystore, ctx.keystore_path.as_deref());
+    let signer = super::wallet_args::load_signer_and_validate(
+        keystore_path.as_deref(),
+        opts.password_file,
+        opts.wallet_address.or(ctx.wallet_address.as_deref()),
+        "escrow submit-work",
+    )?;
+    let signer_address = signer.address();
+
+    let state_raw = read("getEscrow", get_escrow_calldata(escrow_id).into()).await?;
+    let state = decode_escrow_state(&state_raw)
+        .map_err(|e| super::escalate::chain_read_err("getEscrow", e))?;
+    if state != ESCROW_STATE_OPEN {
+        return Err(CmdError::Validation {
+            code: "escrow_not_open".into(),
+            message: format!(
+                "escrow state on chain is {state} (Open=1, PendingRefund=2, Completed=3, \
+                 Refunded=4, Disputed=5); submitWork needs an Open escrow. Nothing sent"
+            ),
+        });
+    }
+    let worker = decode_escrow_worker(&state_raw)
+        .map_err(|e| super::escalate::chain_read_err("getEscrow", e))?;
+    if worker != signer_address {
+        return Err(CmdError::Validation {
+            code: "not_escrow_worker".into(),
+            message: format!(
+                "wallet {signer_address:#x} is not the escrow's worker {worker:#x}; only the \
+                 worker can submit work. Nothing sent"
+            ),
+        });
+    }
+    let submitted_at = decode_u256(&read("submittedAtOf", view_calldata(escrow_id, false)).await?)
+        .map_err(|e| super::escalate::chain_read_err("submittedAtOf", e))?;
+    let common = |action: &str| {
+        json!({
+            "action": action,
+            "task_id": task_id.to_string(),
+            "escrow_id": format!("{escrow_id:#x}"),
+            "to": format!("{contract:#x}"),
+            "chain_id": target.chain_id,
+            "from": format!("{signer_address:#x}"),
+            "window": window.to_string(),
+            "submitted_at": submitted_at.to_string(),
+        })
+    };
+    if already_recorded(submitted_at, window, review_deadline) {
+        return Ok(common("already_submitted"));
+    }
+    let calldata = submit_work_calldata(escrow_id);
+    let mut data = common(if ctx.dry_run {
+        "would_submit_work"
+    } else {
+        "submit_work_submitted"
+    });
+    data["calldata"] = json!(format!("0x{}", hex::encode(&calldata)));
+    if ctx.dry_run {
+        return Ok(data);
+    }
+
+    let receipt_timeout = super::resolve_duration(
+        opts.receipt_timeout,
+        ctx.receipt_timeout,
+        crate::tempo_session::default_receipt_timeout_for_chain_id(target.chain_id_u64),
+    );
+    let session =
+        crate::tempo_session::TempoSession::new(signer, keystore_path, rpc, receipt_timeout);
+    let tx = session
+        .send_transaction_and_wait(
+            contract,
+            calldata,
+            "submit-work",
+            Some(
+                " (InvalidState: escrow not Open; Unauthorized: not the worker wallet; \
+                 InvalidReviewWindow: no review clock; SubmissionLimitReached: 4 hand-ins already recorded)",
+            ),
+        )
+        .await?;
+    data["tx_hash"] = json!(format!("{tx:#x}"));
+    data["note"] =
+        json!("the review clock counts from the mined block; TaskFast reads it from chain");
+    Ok(data)
+}
+
+/// Chain step after a server-accepted hand-in (`task submit` / `task remedy`).
+/// Any failure here is NOT a failed hand-in: it becomes
+/// [`CmdError::HandedInClockNotStarted`] naming the retry command.
+pub(super) async fn submit_work_after_handin(
+    ctx: &Ctx,
+    task_id: &Uuid,
+    opts: &WalletOpts<'_>,
+) -> Result<serde_json::Value, CmdError> {
+    submit_work(ctx, task_id, opts, true).await.map_err(|e| {
+        CmdError::HandedInClockNotStarted(format!(
+            "your work IS handed in (the server accepted it), but the on-chain review \
+                 clock did NOT start: {e}. Do not submit again. Retry only the chain step: \
+                 `taskfast escrow submit-work {task_id}` (safe to run more than once)"
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn submit_work_selector_and_calldata_are_pinned() {
+        // Golden: `cast sig "submitWork(bytes32)"` = 0x3a9cfef2.
+        let id = B256::repeat_byte(0xab);
+        let cd = submit_work_calldata(id);
+        assert_eq!(hex::encode(&cd[..4]), "3a9cfef2");
+        assert_eq!(cd.len(), 36);
+        assert_eq!(&cd[4..], id.as_slice());
+        let sel = |b: &Bytes| hex::encode(&b[..4]);
+        assert_eq!(sel(&view_calldata(id, true)), "ec853c7d"); // reviewWindowOf
+        assert_eq!(sel(&view_calldata(id, false)), "53fff8ac"); // submittedAtOf
+    }
+
+    #[test]
+    fn already_recorded_boundaries() {
+        let (w, d) = (U256::from(100u64), U256::from(1000u64));
+        assert!(already_recorded(U256::from(900u64), w, d)); // equal: recorded
+        assert!(!already_recorded(U256::from(899u64), w, d)); // earlier hand-in
+        assert!(!already_recorded(U256::ZERO, w, U256::ZERO)); // never submitted, even at deadline 0
+    }
     use super::*;
     use taskfast_chains::tempo::TEMPO_MAINNET_CHAIN_ID;
 

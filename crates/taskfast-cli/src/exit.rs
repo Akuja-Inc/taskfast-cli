@@ -17,6 +17,7 @@
 //! | 5    | wallet / chain / signing                    |
 //! | 6    | server (5xx after retries) / network        |
 //! | 7    | validation (422, 4xx other)                 |
+//! | 8    | work handed in, on-chain review clock not started |
 //! | 70   | unimplemented (transitional, scaffold-only) |
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +29,8 @@ pub enum ExitCode {
     Wallet = 5,
     Server = 6,
     Validation = 7,
+    /// `task submit`/`remedy` succeeded on the server; `submitWork` failed. Retry `escrow submit-work`.
+    HandedInClockNotStarted = 8,
     Unimplemented = 70,
 }
 

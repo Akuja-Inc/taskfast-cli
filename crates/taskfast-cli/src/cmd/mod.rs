@@ -532,6 +532,10 @@ pub enum CmdError {
     #[error("signing: {0}")]
     Signing(String),
 
+    /// The server accepted the hand-in; only the on-chain `submitWork` failed.
+    #[error("{0}")]
+    HandedInClockNotStarted(String),
+
     #[error("not yet implemented: {0}")]
     Unimplemented(&'static str),
 
@@ -553,6 +557,7 @@ impl CmdError {
             Self::Decode(_) => "decode",
             Self::Keystore(_) => "keystore",
             Self::Signing(_) => "signing",
+            Self::HandedInClockNotStarted(_) => "handed_in_clock_not_started",
             Self::Unimplemented(_) => "unimplemented",
             Self::Config(_) => "config",
         }
@@ -567,6 +572,7 @@ impl CmdError {
             Self::Validation { .. } => ExitCode::Validation,
             Self::Server(_) | Self::Network(_) | Self::Decode(_) => ExitCode::Server,
             Self::Keystore(_) | Self::Signing(_) => ExitCode::Wallet,
+            Self::HandedInClockNotStarted(_) => ExitCode::HandedInClockNotStarted,
             Self::Unimplemented(_) => ExitCode::Unimplemented,
         }
     }
@@ -671,6 +677,12 @@ mod tests {
         assert_eq!(sample("auth").exit_code(), ExitCode::Auth);
         assert_eq!(sample("rate_limited").exit_code(), ExitCode::RateLimited);
         assert_eq!(sample("validation").exit_code(), ExitCode::Validation);
+        assert_eq!(
+            CmdError::HandedInClockNotStarted("x".into())
+                .exit_code()
+                .as_u8(),
+            8
+        );
         assert_eq!(sample("server").exit_code(), ExitCode::Server);
         assert_eq!(sample("network").exit_code(), ExitCode::Server);
         assert_eq!(sample("decode").exit_code(), ExitCode::Server);

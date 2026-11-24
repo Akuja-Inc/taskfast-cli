@@ -161,6 +161,13 @@ pub fn decode_escrow_state(data: &[u8]) -> Result<u8, String> {
     Ok(e.state)
 }
 
+/// Decode the `worker` address out of a `getEscrow` return.
+pub fn decode_escrow_worker(data: &[u8]) -> Result<Address, String> {
+    let e = <timeout_abi::Escrow as alloy_sol_types::SolType>::abi_decode(data)
+        .map_err(|e| format!("not an Escrow struct: {e}"))?;
+    Ok(e.worker)
+}
+
 /// Derive the `bytes32 taskRef` that `TaskBond.post` binds for a given task.
 ///
 /// The server verifier expects `taskRef` = 16 zero bytes concatenated with the
@@ -360,6 +367,18 @@ mod tests {
             dispute_timeout_calldata(),
             keccak256("DISPUTE_TIMEOUT()")[..4].to_vec()
         );
+    }
+
+    #[test]
+    fn decode_escrow_worker_reads_the_second_word() {
+        // Distinct poster, worker, platform: a wrong word index returns the wrong one.
+        let mut escrow = [0u8; 256];
+        escrow[31] = 0x11; // poster
+        escrow[63] = 0x22; // worker
+        escrow[95] = 0x33; // platform
+        let worker = decode_escrow_worker(&escrow).unwrap();
+        assert_eq!(worker, Address::with_last_byte(0x22));
+        assert!(decode_escrow_worker(&escrow[..224]).is_err());
     }
 
     #[test]

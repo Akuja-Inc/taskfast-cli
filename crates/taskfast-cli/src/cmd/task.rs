@@ -174,7 +174,7 @@ pub struct CancelArgs {
     pub id: String,
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Default, Parser)]
 pub struct SubmitArgs {
     /// Task ID (UUID) to submit completion for.
     pub id: String,
@@ -188,6 +188,31 @@ pub struct SubmitArgs {
     /// artifact IDs are passed to the final completion submission.
     #[arg(long)]
     pub artifact: Vec<PathBuf>,
+
+    /// Keystore reference for the automatic on-chain `submitWork` after the
+    /// hand-in (same form as `taskfast escrow sign`).
+    #[arg(long, env = "TEMPO_KEY_SOURCE")]
+    pub keystore: Option<String>,
+
+    /// Path to keystore password file.
+    #[arg(long, env = "TASKFAST_WALLET_PASSWORD_FILE")]
+    pub wallet_password_file: Option<PathBuf>,
+
+    /// Wallet address preflight (0x-prefixed): fail if the keystore differs.
+    #[arg(long, env = "TEMPO_WALLET_ADDRESS")]
+    pub wallet_address: Option<String>,
+
+    /// Tempo RPC override. Defaults to the deployment's authenticated proxy.
+    #[arg(long, env = "TEMPO_RPC_URL")]
+    pub rpc_url: Option<String>,
+
+    /// Receipt-polling ceiling — human duration (`3min`, `90s`).
+    #[arg(
+        long,
+        env = "TASKFAST_RECEIPT_TIMEOUT",
+        value_parser = super::parse_duration,
+    )]
+    pub receipt_timeout: Option<std::time::Duration>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -420,6 +445,21 @@ async fn submit(ctx: &Ctx, args: SubmitArgs, kind: SubmitKind) -> CmdResult {
         },
     };
 
+    // Server hand-in is done. Only now start the on-chain review clock
+    // (`submitWork`); a failure there is reported as "handed in, clock not started".
+    let chain = super::escrow::submit_work_after_handin(
+        ctx,
+        &task_id,
+        &super::escrow::WalletOpts {
+            keystore: args.keystore.as_deref(),
+            password_file: args.wallet_password_file.as_deref(),
+            wallet_address: args.wallet_address.as_deref(),
+            rpc_url: args.rpc_url.as_deref(),
+            receipt_timeout: args.receipt_timeout,
+        },
+    )
+    .await?;
+
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -427,6 +467,7 @@ async fn submit(ctx: &Ctx, args: SubmitArgs, kind: SubmitKind) -> CmdResult {
             "task_id": task_id.to_string(),
             "artifacts": uploaded_meta,
             "submission": result,
+            "chain": chain,
         }),
     ))
 }
