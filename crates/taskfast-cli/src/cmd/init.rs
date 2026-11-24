@@ -1669,7 +1669,8 @@ mod tests {
             no_default_events: true,
             ..base_args()
         };
-        assert!(resolve_webhook_events(&args).is_empty());
+        let events = resolve_webhook_events(&args);
+        assert!(events.is_empty(), "expected no events, got {events:?}");
     }
 
     #[test]
@@ -1830,7 +1831,9 @@ mod tests {
         };
         let outcome = maybe_configure_webhook(&client, &args, true).await;
         match outcome {
-            WebhookOutcome::DryRun { events, .. } => assert!(events.is_empty()),
+            WebhookOutcome::DryRun { events, .. } => {
+                assert!(events.is_empty(), "expected no events, got {events:?}");
+            }
             other => panic!("expected DryRun, got {other:?}"),
         }
     }

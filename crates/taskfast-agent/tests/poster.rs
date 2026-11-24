@@ -64,7 +64,10 @@ async fn create_task_draft_returns_payload_on_201() {
         resp.draft_id,
         Uuid::parse_str("00000000-0000-0000-0000-000000000123").unwrap()
     );
-    assert!(!resp.payload_to_sign.is_empty());
+    assert!(
+        !resp.payload_to_sign.is_empty(),
+        "payload_to_sign must not be empty"
+    );
     assert_eq!(
         resp.token_address,
         "0x1111111111111111111111111111111111111111"
