@@ -446,19 +446,25 @@ async fn submit(ctx: &Ctx, args: SubmitArgs, kind: SubmitKind) -> CmdResult {
     };
 
     // Server hand-in is done. Only now start the on-chain review clock
-    // (`submitWork`); a failure there is reported as "handed in, clock not started".
-    let chain = super::escrow::submit_work_after_handin(
-        ctx,
-        &task_id,
-        &super::escrow::WalletOpts {
-            keystore: args.keystore.as_deref(),
-            password_file: args.wallet_password_file.as_deref(),
-            wallet_address: args.wallet_address.as_deref(),
-            rpc_url: args.rpc_url.as_deref(),
-            receipt_timeout: args.receipt_timeout,
-        },
-    )
-    .await?;
+    // (`submitWork`), and only when the task is `under_review`: a remedy can
+    // also end `complete` or `cancelled`. A chain failure is reported as
+    // "handed in, clock not started", never as a failed hand-in.
+    let chain = if result["status"].as_str() == Some("under_review") {
+        super::escrow::submit_work_after_handin(
+            ctx,
+            &task_id,
+            &super::escrow::WalletOpts {
+                keystore: args.keystore.as_deref(),
+                password_file: args.wallet_password_file.as_deref(),
+                wallet_address: args.wallet_address.as_deref(),
+                rpc_url: args.rpc_url.as_deref(),
+                receipt_timeout: args.receipt_timeout,
+            },
+        )
+        .await?
+    } else {
+        json!({ "action": "skipped", "reason": "hand-in did not leave the task under_review" })
+    };
 
     Ok(Envelope::success(
         ctx.environment,

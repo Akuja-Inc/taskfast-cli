@@ -32,7 +32,9 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   `submitWork(escrowId)` from your wallet (same keystore and password sources
   as `escrow sign` / `settle`; new `--keystore`, `--wallet-password-file`,
   `--wallet-address`, `--rpc-url`, `--receipt-timeout` flags with the same env
-  vars) and reports `data.chain.tx_hash`. It never sends the same hand-in
+  vars) and reports `data.chain.tx_hash`. It acts only when the hand-in leaves
+  the task `under_review`, and a contract with no `reviewWindowOf` (pre-review-
+  clock) counts as a legacy escrow. It never sends the same hand-in
   twice. A failure after a good hand-in exits **8** with code
   `handed_in_clock_not_started`: the work IS handed in, the clock did not start,
   and the message names the retry command. Do not submit again.

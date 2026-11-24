@@ -80,6 +80,8 @@ struct Chain {
     state: u8,
     worker: Address,
     send: Send,
+    /// Pre-review-clock contract: `reviewWindowOf` reverts.
+    window_reverts: bool,
 }
 
 impl wiremock::Respond for Chain {
@@ -103,7 +105,12 @@ impl wiremock::Respond for Chain {
             "eth_getTransactionReceipt" => ok(json!({"status": "0x1"})),
             "eth_call" => {
                 let data = body["params"][0]["data"].as_str().unwrap();
-                if data.starts_with("0xec853c7d") {
+                if data.starts_with("0xec853c7d") && self.window_reverts {
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "jsonrpc":"2.0","id":1,
+                        "error": {"code": 3, "message": "execution reverted"}
+                    }))
+                } else if data.starts_with("0xec853c7d") {
                     ok(json!(format!("0x{}", word(self.window))))
                 } else if data.starts_with("0x53fff8ac") {
                     ok(json!(format!("0x{}", word(self.submitted_at))))
@@ -130,6 +137,7 @@ fn chain(keys: &Keys) -> Chain {
         state: 1,
         worker: keys.address,
         send: Send::Ok,
+        window_reverts: false,
     }
 }
 
@@ -338,18 +346,26 @@ fn submit_args(keys: Option<&Keys>) -> task::SubmitArgs {
 }
 
 async fn mount_submit(server: &MockServer, status: u16) {
+    mount_hand_in(server, "submit", status, "under_review").await;
+}
+
+async fn mount_hand_in(server: &MockServer, verb: &str, status: u16, task_status: &str) {
     Mock::given(method("POST"))
-        .and(path(format!("/tasks/{TASK_ID}/submit")))
+        .and(path(format!("/tasks/{TASK_ID}/{verb}")))
         .respond_with(ResponseTemplate::new(status).set_body_json(json!({
             "success": status == 200,
             "task_id": TASK_ID,
-            "status": "under_review",
+            "status": task_status,
             "message": "submitted",
             "error": "invalid_status",
             "evaluation": {"passed": true, "criteria_results": [], "evaluated_at": "2026-04-13T21:00:00Z"},
         })))
         .mount(server)
         .await;
+}
+
+async fn run_remedy(server: &MockServer, keys: Option<&Keys>) -> Result<Envelope, CmdError> {
+    task::run(&ctx_for(server), task::Command::Remedy(submit_args(keys))).await
 }
 
 async fn run_submit(server: &MockServer, keys: Option<&Keys>) -> Result<Envelope, CmdError> {
@@ -460,4 +476,83 @@ async fn auto_approved_task_has_no_clock_to_start() {
     let v = val(&run_submit(&server, Some(&keys)).await.expect("submit"));
     assert_eq!(v["data"]["chain"]["action"], "skipped");
     assert_eq!(sends(&server).await, 0);
+}
+
+// ─── review-fix cases ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn pre_review_clock_contract_revert_is_a_legacy_escrow() {
+    // `reviewWindowOf` does not exist on a pre-v3 contract: the call reverts.
+    // Mutation: treat any read error as exit 8 → this fails on every legacy submit.
+    let server = MockServer::start().await;
+    let mut c = chain(&fresh_keys());
+    c.window_reverts = true;
+    serve(&server, "under_review", c).await;
+    mount_submit(&server, 200).await;
+    let v = val(&run_submit(&server, None).await.expect("legacy submit"));
+    assert_eq!(v["data"]["chain"]["action"], "no_review_clock");
+    assert_eq!(sends(&server).await, 0);
+}
+
+#[tokio::test]
+async fn remedy_also_starts_the_clock() {
+    // Mutation: send only for `task submit` → remedy sends nothing.
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    serve(&server, "under_review", chain(&keys)).await;
+    mount_hand_in(&server, "remedy", 200, "under_review").await;
+    let v = val(&run_remedy(&server, Some(&keys)).await.expect("remedy"));
+    assert_eq!(v["data"]["chain"]["action"], "submit_work_submitted");
+    assert_eq!(sends(&server).await, 1);
+}
+
+#[tokio::test]
+async fn remedy_that_ends_the_task_starts_no_clock() {
+    for end in ["complete", "cancelled"] {
+        let server = MockServer::start().await;
+        let keys = fresh_keys();
+        serve(&server, end, chain(&keys)).await;
+        mount_hand_in(&server, "remedy", 200, end).await;
+        let v = val(&run_remedy(&server, Some(&keys)).await.expect("remedy"));
+        assert_eq!(v["data"]["chain"]["action"], "skipped", "{end}");
+        assert!(rpc_bodies(&server).await.is_empty(), "{end}");
+    }
+}
+
+#[tokio::test]
+async fn missing_password_on_a_review_clock_escrow_reports_clock_not_started() {
+    // Keystore set, no password file and no env password.
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    serve(&server, "under_review", chain(&keys)).await;
+    mount_submit(&server, 200).await;
+    let mut args = submit_args(Some(&keys));
+    args.wallet_password_file = None;
+    let err = task::run(&ctx_for(&server), task::Command::Submit(args))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, CmdError::HandedInClockNotStarted(_)),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("escrow submit-work"));
+    assert_eq!(sends(&server).await, 0);
+}
+
+#[tokio::test]
+async fn escrow_without_a_settlement_domain_is_not_silently_skipped() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/tasks/{TASK_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": TASK_ID, "status": "under_review", "escrow_id": ESCROW_ID,
+        })))
+        .mount(&server)
+        .await;
+    mount_submit(&server, 200).await;
+    let err = run_submit(&server, None).await.unwrap_err();
+    assert!(
+        matches!(err, CmdError::HandedInClockNotStarted(_)),
+        "{err:?}"
+    );
 }
