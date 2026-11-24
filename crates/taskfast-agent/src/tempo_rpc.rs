@@ -724,11 +724,10 @@ mod tests {
             .parse()
             .unwrap();
         // Real-looking ERC-20 transfer calldata: selector 0xa9059cbb + 32b addr + 32b amount.
-        let calldata = Bytes::from_iter(
-            [0xa9u8, 0x05, 0x9c, 0xbb]
-                .into_iter()
-                .chain(vec![0u8; 32 + 32]),
-        );
+        let calldata: Bytes = [0xa9u8, 0x05, 0x9c, 0xbb]
+            .into_iter()
+            .chain(vec![0u8; 32 + 32])
+            .collect();
         let raw = sign_erc20_transfer(&rpc, &signer, token, calldata)
             .await
             .expect("sign");
