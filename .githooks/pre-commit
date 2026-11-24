@@ -16,6 +16,12 @@ if command -v bd >/dev/null 2>&1; then
 fi
 # --- END BEADS INTEGRATION v0.59.0 ---
 
+# bd's pre-commit integration stages its JSONL export as a root-level
+# `issues.jsonl` (force-added, so .gitignore cannot stop it). It is a beads
+# artifact, not project source — keep it out of the commit. It rode into
+# gh#245 this way; see also aa24e6b / 81cfe87.
+git rm --cached --quiet -- issues.jsonl 2>/dev/null || true
+
 # Jump to repo root so cargo finds the workspace manifest regardless of cwd.
 cd "$(git rev-parse --show-toplevel)"
 
