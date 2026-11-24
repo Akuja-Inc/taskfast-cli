@@ -22,7 +22,7 @@ cargo clippy --all-targets --all-features --workspace --locked -- -D warnings
 cargo xtask sync-spec
 ```
 
-MSRV is **Rust 1.95** (pinned in `rust-toolchain.toml`). CI tests on stable and `1.95`; do not use features newer than 1.95 without bumping `rust-version` in `Cargo.toml`.
+MSRV is **Rust 1.97** (pinned in `rust-toolchain.toml`). CI tests on stable and `1.97`; do not use features newer than 1.97 without bumping `rust-version` in `Cargo.toml`.
 
 ## Git hooks (opt-in)
 
