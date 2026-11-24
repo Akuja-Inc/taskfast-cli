@@ -36,8 +36,7 @@
 //!   when the URL isn't supplied so callers who prefer a separate
 //!   `taskfast webhook register` step still get the pre-am-iit flow.
 //!
-//! Deferred to separate beads so this slice stays reviewable:
-//! * `am-c74` — balance polling after faucet dispense.
+//! Deferred so this slice stays reviewable: balance polling after faucet dispense.
 //!
 //! # Scope (gh#142 extension)
 //!

@@ -13,6 +13,11 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Removed
+
+- Removed beads issue tracking and its git hook integrations. Opt-in hooks
+  still run the repository checks without exporting or staging `issues.jsonl`.
+
 ## [0.27.0] - 2026-11-24
 
 ### Added

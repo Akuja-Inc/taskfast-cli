@@ -10,8 +10,7 @@
 //! network context of its own.
 //!
 //! Scope is narrow on purpose — we POST, parse enough to surface tx hashes
-//! to the caller, and return. Balance polling is the caller's concern
-//! (am-c74 is the beads ticket tracking the polling side).
+//! to the caller, and return. Balance polling is the caller's concern.
 
 use serde::Deserialize;
 

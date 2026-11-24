@@ -31,7 +31,7 @@ _Avoid_: placeholder, mock.
 ## Example dialogue
 
 > **Dev:** "Why does `Avalanche` exist if it does nothing?"
-> **Domain expert:** "It's a **Stub chain** — keeps the `--features avalanche` build path live in CI so a future implementation drops in without surprising compile failures. Mirrors the Elixir `TaskFast.Chain` behaviour split (beads am-6v7b.1 / am-6v7b.2)."
+> **Domain expert:** "It's a **Stub chain** — keeps the `--features avalanche` build path live in CI so a future implementation drops in without surprising compile failures. Mirrors the Elixir `TaskFast.Chain` behaviour split."
 
 > **Dev:** "Can I add `sign_distribution` to the `Chain` trait so call sites don't have to know they're on Tempo?"
 > **Domain expert:** "Not yet — see ADR-0001. With one real impl we'd be freezing a shape from one data point. When the second chain ships signing, lift the common surface into a `ChainSigner` trait without disturbing `Chain`."

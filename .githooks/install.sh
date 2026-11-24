@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 # Opt-in installer: point git at the repo's .githooks/ directory.
 # Idempotent — safe to run multiple times.
-#
-# Note: .githooks/* chain to beads via `bd hooks run` so `bd init` is
-# not required after running this. If you later run `bd hooks install`,
-# it will repoint core.hooksPath back to .beads/hooks and skip repo
-# gates — re-run this script to restore.
 
 set -euo pipefail
 
@@ -15,10 +10,7 @@ git config core.hooksPath .githooks
 chmod +x \
     .githooks/pre-commit \
     .githooks/commit-msg \
-    .githooks/prepare-commit-msg \
     .githooks/pre-push \
-    .githooks/post-merge \
-    .githooks/post-checkout \
     .githooks/install.sh
 
 echo "hooks: core.hooksPath -> .githooks"
@@ -51,10 +43,6 @@ if [[ "${TASKFAST_FULL_GATE:-0}" == "1" ]]; then
             echo "hooks:        cargo install $bin"
         fi
     done
-fi
-
-if ! command -v bd >/dev/null 2>&1; then
-    echo "hooks: note — 'bd' not installed; beads chain in hooks will be skipped."
 fi
 
 echo "hooks: done. Bypass any hook with --no-verify."
