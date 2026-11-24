@@ -16,6 +16,7 @@
 // ponytail: process-global "last seen" cell — one process == one command, so
 // no per-task keying needed. Revisit only if the CLI ever runs concurrent ops.
 
+use std::future::Future;
 use std::sync::Mutex;
 
 static LAST_CORR: Mutex<Option<String>> = Mutex::new(None);
@@ -60,13 +61,17 @@ pub fn record_corr_response(resp: &reqwest::Response) {
 /// before `&Client` — so every generated request reports its response here.
 /// Same contract the 0.16 `with_post_hook` setting gave us.
 impl progenitor_client::ClientHooks<()> for crate::api::Client {
-    async fn post<E>(
+    // The trait declares `async fn post`; written in its desugared form because
+    // there is nothing to await — clippy ≥1.98 (`unused_async_trait_impl`) flags
+    // an `async fn` spelling of exactly this. `ready` is what `async fn` would
+    // have produced anyway.
+    fn post<E>(
         &self,
         result: &Result<reqwest::Response, reqwest::Error>,
         _info: &progenitor_client::OperationInfo,
-    ) -> Result<(), progenitor_client::Error<E>> {
+    ) -> impl Future<Output = Result<(), progenitor_client::Error<E>>> {
         record_corr(result);
-        Ok(())
+        std::future::ready(Ok(()))
     }
 }
 

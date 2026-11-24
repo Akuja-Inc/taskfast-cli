@@ -398,13 +398,21 @@ mod tests {
         let f = parse_function("setSlashRecipient(address,bool)").unwrap();
         assert_eq!(f.name, "setSlashRecipient");
         assert_eq!(f.inputs.len(), 2);
-        assert!(f.outputs.is_empty());
+        assert!(
+            f.outputs.is_empty(),
+            "expected no outputs, got {:?}",
+            f.outputs
+        );
     }
 
     #[test]
     fn parses_cast_style_return_shorthand() {
         let f = parse_function("paused()(bool)").unwrap();
-        assert!(f.inputs.is_empty());
+        assert!(
+            f.inputs.is_empty(),
+            "expected no inputs, got {:?}",
+            f.inputs
+        );
         assert_eq!(f.outputs.len(), 1);
         assert_eq!(f.outputs[0].ty, "bool");
     }

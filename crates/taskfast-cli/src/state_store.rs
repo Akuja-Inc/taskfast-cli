@@ -391,7 +391,8 @@ mod tests {
         store.write_cursor(None).unwrap();
         assert_eq!(store.read_cursor(), Some("c1".into()));
 
-        assert!(store.load_seen_lines().unwrap().is_empty());
+        let seen = store.load_seen_lines().unwrap();
+        assert!(seen.is_empty(), "expected no seen lines, got {seen:?}");
         store.append_seen_line("evt_1").unwrap();
         store.append_seen_line("evt_2").unwrap();
         assert_eq!(store.load_seen_lines().unwrap(), vec!["evt_1", "evt_2"]);

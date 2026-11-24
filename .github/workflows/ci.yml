@@ -30,6 +30,11 @@ jobs:
   clippy:
     name: clippy (${{ matrix.toolchain }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # rust-toolchain.toml pins 1.97 and would otherwise override the toolchain
+    # dtolnay/rust-toolchain installs — RUSTUP_TOOLCHAIN outranks the file, so the
+    # "stable" leg really runs stable (before this it silently ran the pin too).
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     strategy:
       fail-fast: false
       matrix:
@@ -47,6 +52,11 @@ jobs:
   test:
     name: test (${{ matrix.toolchain }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # rust-toolchain.toml pins 1.97 and would otherwise override the toolchain
+    # dtolnay/rust-toolchain installs — RUSTUP_TOOLCHAIN outranks the file, so the
+    # "stable" leg really runs stable (before this it silently ran the pin too).
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     strategy:
       fail-fast: false
       matrix:

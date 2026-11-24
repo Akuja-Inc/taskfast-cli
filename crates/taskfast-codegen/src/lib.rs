@@ -964,7 +964,11 @@ components:
         let (out1, _) = normalize_spec_with_report(BASE_SPEC).unwrap();
         let (out2, report2) = normalize_spec_with_report(&out1).unwrap();
         assert_eq!(out1, out2);
-        assert!(report2.folded_aliases.is_empty());
+        assert!(
+            report2.folded_aliases.is_empty(),
+            "no aliases to fold on the second pass, got {:?}",
+            report2.folded_aliases
+        );
         assert_eq!(report2.refs_rewritten, 0);
     }
 
@@ -1525,13 +1529,12 @@ components:
         let required = |node: &Value| -> Vec<String> {
             node.get("required")
                 .and_then(Value::as_sequence)
-                .map(|seq| {
+                .map_or_else(Default::default, |seq| {
                     seq.iter()
                         .filter_map(Value::as_str)
                         .map(str::to_owned)
                         .collect()
                 })
-                .unwrap_or_default()
         };
         assert_eq!(required(&schemas["WebhookConfig"]), ["url"]);
         assert!(schemas["WebhookConfig"]["properties"]["nested"]
