@@ -13,9 +13,36 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Added
+
+- **Webhook event `payout_approval_required`.** Fired when the worker's payout
+  needs a new poster approval: the escrow is not refunded, the platform keeps
+  the payout pending and re-checks hourly. The `WebhookPayoutApprovalRequired`
+  payload carries `data.task_id`, `title`, `status`, `data.payment
+  { payment_id, amount, status }` and an optional `signing_url`. Subscribe with
+  `webhook subscribe --event payout_approval_required`; it is not part of
+  `--default-events`.
+
 ### Changed
 
-- **Re-vendored the OpenAPI spec** (fetched 2026-11-23). PLACEHOLDER_REWORD
+- **Re-vendored the OpenAPI spec** (fetched 2026-11-23). No operations added
+  or removed. `assignment_type` is `open` only now on `TaskCreateRequest`,
+  `TaskDraftPrepareRequest`, `TaskSummaryItem` and the `GET /tasks` filter:
+  the server dropped `direct` from the contract outright instead of documenting
+  it as refused (`422 scoped_invite_unavailable`). `DisputeDetail.disputed_at`
+  documents its source (the mirrored `EscrowDisputed` block time, else the
+  dispute row's chain time, else row creation). The contract-first hand-copied
+  hunks from taskfast#2044 4c are now served by staging, so the provenance note
+  is gone; `server_commit` reads `unknown` because the bot's token cannot read
+  the private server repo (`sha256` pins the fetch).
+- **BREAKING (`taskfast-client`): `TaskDraftPrepareRequestAssignmentType`,
+  `TaskCreateRequestAssignmentType` and `ListOpenTasksAssignmentType` lose
+  their `Direct` variant, and `WebhookEvent` gains a `PayoutApprovalRequired`
+  variant.** Downstream exhaustive matches and `Direct` literals break; the
+  client needs a minor bump on its 0.x line (CI's semver job checks only
+  `taskfast-cli` and `taskfast-agent`). The CLI is unaffected: it only uses
+  `TaskDraftPrepareRequestAssignmentType::default()` and never matches on
+  `WebhookEvent`.
 
 ## [0.26.0] - 2026-11-24
 

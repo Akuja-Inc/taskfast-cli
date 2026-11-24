@@ -1415,7 +1415,7 @@ components:
             .collect();
         assert_eq!(
             response_components.difference(&request_components).count(),
-            54
+            55 // +1: WebhookPayoutApprovalRequired (staging refresh 2026-11-23)
         );
         assert_eq!(
             request_components.difference(&response_components).count(),
