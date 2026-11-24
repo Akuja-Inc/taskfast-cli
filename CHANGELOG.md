@@ -13,6 +13,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+## [0.27.0] - 2026-11-24
+
 ### Added
 
 - **Webhook event `payout_approval_required`.** Fired when the worker's payout
@@ -22,8 +24,33 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   { payment_id, amount, status }` and an optional `signing_url`. Subscribe with
   `webhook subscribe --event payout_approval_required`; it is not part of
   `--default-events`.
+- **`task submit` and `task remedy` start the on-chain review clock by
+  themselves (taskfast#2044).** After the server accepts the hand-in, and only
+  then, the CLI reads the escrow's review window from the chain. A window of 0
+  (legacy escrow) means no wallet prompt and no transaction: the output is as
+  before, with `data.chain.action == "no_review_clock"`. Otherwise it sends
+  `submitWork(escrowId)` from your wallet (same keystore and password sources
+  as `escrow sign` / `settle`; new `--keystore`, `--wallet-password-file`,
+  `--wallet-address`, `--rpc-url`, `--receipt-timeout` flags with the same env
+  vars) and reports `data.chain.tx_hash`. It never sends the same hand-in
+  twice. A failure after a good hand-in exits **8** with code
+  `handed_in_clock_not_started`: the work IS handed in, the clock did not start,
+  and the message names the retry command. Do not submit again.
+- **`taskfast escrow submit-work <task_id>` (worker).** The retry path for exit
+  8, and a manual way to send `submitWork`. Safe to run more than once: it
+  sends nothing on an escrow without a review clock, or when this hand-in is
+  already on chain. It refuses before any transaction when the task is not
+  `under_review`, the escrow is not `Open`, or your wallet is not the escrow's
+  worker.
 
 ### Changed
+
+- **BREAKING (`taskfast-cli` library, minor bump on 0.x):**
+  `cmd::escrow::Command` gains `SubmitWork`, `cmd::task::SubmitArgs` gains
+  wallet/RPC fields (and `Default`), `cmd::CmdError` gains
+  `HandedInClockNotStarted`, and `exit::ExitCode` gains
+  `HandedInClockNotStarted = 8`. `taskfast-agent` gains
+  `chain::decode_escrow_worker`.
 
 - **Re-vendored the OpenAPI spec** (fetched 2026-11-23). No operations added
   or removed. `assignment_type` is `open` only now on `TaskCreateRequest`,

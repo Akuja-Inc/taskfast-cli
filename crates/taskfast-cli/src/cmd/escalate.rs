@@ -407,28 +407,30 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     Ok(Envelope::success(ctx.environment, ctx.dry_run, data).with_warnings(warnings))
 }
 
-fn chain_read_err(what: &str, e: impl std::fmt::Display) -> CmdError {
-    CmdError::Server(format!("chain read `{what}` failed: {e}"))
+/// Chain coordinates of a task's escrow, validated against the server's
+/// `settlement_domain` (venue-scoped, so a zone escrow is addressed correctly, gh#111).
+pub(super) struct ChainTarget {
+    pub contract: Address,
+    pub escrow_id: B256,
+    pub chain_id: i64,
+    pub chain_id_u64: u64,
 }
 
-async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
-    let task_id = parse_task_id(&args.task_id)?;
-    let client = ctx.client()?;
-
-    // 1. The task's own escrow id + venue domain (party-gated: null for non-parties).
-    let task = match client.inner().get_task(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(refusal(map_api_error(e).await)),
-    };
+/// `what_next` finishes the `escrow_not_initialized` message ("nothing to resolve").
+pub(super) fn chain_target(
+    task: &taskfast_client::api::types::TaskDetail,
+    what_next: &str,
+) -> Result<ChainTarget, CmdError> {
     let raw_escrow_id = task
         .escrow_id
         .as_ref()
         .map(|e| e.to_string())
         .ok_or_else(|| CmdError::Validation {
             code: "escrow_not_initialized".into(),
-            message: "task has no escrow_id (escrow not initialized, or you are not a party \
-                      to this task); nothing to resolve"
-                .into(),
+            message: format!(
+                "task has no escrow_id (escrow not initialized, or you are not a party \
+                 to this task); {what_next}"
+            ),
         })?;
     // No readiness fallback: the global domain is the L1 venue, wrong for a zone task.
     let domain = task
@@ -460,23 +462,24 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
             "server escrow_id `{raw_escrow_id}` not a 0x-prefixed 32-byte hex: {e}"
         ))
     })?;
+    Ok(ChainTarget {
+        contract,
+        escrow_id,
+        chain_id,
+        chain_id_u64,
+    })
+}
 
-    // 2. Signer + wallet-address preflight. Any wallet may send this call, so
-    //    there is no "must be the worker" guard.
-    let keystore_path = super::wallet_args::resolve_keystore_path(
-        args.keystore.as_deref(),
-        ctx.keystore_path.as_deref(),
-    );
-    let signer = super::wallet_args::load_signer_and_validate(
-        keystore_path.as_deref(),
-        args.wallet_password_file.as_deref(),
-        args.wallet_address
-            .as_deref()
-            .or(ctx.wallet_address.as_deref()),
-        "escrow timeout-resolve",
-    )?;
-
-    // 3. Chain id vs the configured network, then RPC url.
+/// Configured-network chain-id check, RPC url choice (override or the
+/// deployment's same-host proxy), then the node's own chain id, so a wrong node
+/// is never trusted for later state reads.
+pub(super) async fn connect_rpc(
+    ctx: &Ctx,
+    client: &taskfast_client::TaskFastClient,
+    target: &ChainTarget,
+    rpc_override: Option<&str>,
+) -> Result<(TempoRpcClient, String), CmdError> {
+    let (chain_id, chain_id_u64) = (target.chain_id, target.chain_id_u64);
     let cfg = client.fetch_network_config().await.map_err(|e| {
         CmdError::Server(format!("fetch network config from {}: {e}", ctx.base_url()))
     })?;
@@ -498,13 +501,13 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
             ),
         });
     }
-    let rpc_url = if let Some(ref url) = args.rpc_url {
+    let rpc_url = if let Some(url) = rpc_override {
         validate_override_rpc_url(
             url,
             network_policy_for_chain_id(chain_id_u64),
             ctx.allow_custom_endpoints,
         )?;
-        url.clone()
+        url.to_string()
     } else {
         if !is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
             return Err(CmdError::Server(format!(
@@ -516,10 +519,7 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
         }
         entry.rpc_url.clone()
     };
-
-    // 4. Chain reads (also under --dry-run: read-only). Node chain id first, so
-    //    a wrong node is never trusted for the state reads below.
-    let http = ctx.rpc_http_client(&client, &rpc_url);
+    let http = ctx.rpc_http_client(client, &rpc_url);
     let rpc = TempoRpcClient::new(http, rpc_url.clone());
     let node_chain = rpc
         .chain_id()
@@ -533,6 +533,44 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
             ),
         });
     }
+    Ok((rpc, rpc_url))
+}
+
+pub(super) fn chain_read_err(what: &str, e: impl std::fmt::Display) -> CmdError {
+    CmdError::Server(format!("chain read `{what}` failed: {e}"))
+}
+
+async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
+    let task_id = parse_task_id(&args.task_id)?;
+    let client = ctx.client()?;
+
+    // 1. The task's own escrow id + venue domain (party-gated: null for non-parties).
+    let task = match client.inner().get_task(&task_id).await {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(refusal(map_api_error(e).await)),
+    };
+    let target = chain_target(&task, "nothing to resolve")?;
+    let (contract, escrow_id, chain_id) = (target.contract, target.escrow_id, target.chain_id);
+
+    // 2. Signer + wallet-address preflight. Any wallet may send this call, so
+    //    there is no "must be the worker" guard.
+    let keystore_path = super::wallet_args::resolve_keystore_path(
+        args.keystore.as_deref(),
+        ctx.keystore_path.as_deref(),
+    );
+    let signer = super::wallet_args::load_signer_and_validate(
+        keystore_path.as_deref(),
+        args.wallet_password_file.as_deref(),
+        args.wallet_address
+            .as_deref()
+            .or(ctx.wallet_address.as_deref()),
+        "escrow timeout-resolve",
+    )?;
+
+    // 3 + 4. Chain id vs the configured network, RPC url, node chain id. Reads
+    //    below also run under --dry-run (read-only).
+    let (rpc, _rpc_url) = connect_rpc(ctx, &client, &target, args.rpc_url.as_deref()).await?;
+    let chain_id_u64 = target.chain_id_u64;
     let read = |what: &'static str, data: Vec<u8>| {
         let rpc = &rpc;
         async move {

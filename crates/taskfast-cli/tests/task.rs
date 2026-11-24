@@ -331,12 +331,23 @@ async fn submit_zero_artifact_happy_path() {
         .mount(&server)
         .await;
 
+    // Legacy task: no escrow, so the automatic chain step has nothing to do.
+    Mock::given(method("GET"))
+        .and(path(format!("/tasks/{TASK_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": TASK_ID,
+            "status": "under_review",
+        })))
+        .mount(&server)
+        .await;
+
     let envelope = run(
         &ctx_for(&server, Some("test-key")),
         Command::Submit(SubmitArgs {
             id: TASK_ID.into(),
             summary: "done".into(),
             artifact: vec![],
+            ..Default::default()
         }),
     )
     .await
@@ -410,12 +421,23 @@ async fn submit_with_artifacts_uploads_each_then_submits() {
         .mount(&server)
         .await;
 
+    // Legacy task: no escrow, so the automatic chain step has nothing to do.
+    Mock::given(method("GET"))
+        .and(path(format!("/tasks/{TASK_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": TASK_ID,
+            "status": "under_review",
+        })))
+        .mount(&server)
+        .await;
+
     let envelope = run(
         &ctx_for(&server, Some("test-key")),
         Command::Submit(SubmitArgs {
             id: TASK_ID.into(),
             summary: "two files".into(),
             artifact: vec![p1.clone(), p2.clone()],
+            ..Default::default()
         }),
     )
     .await
@@ -437,6 +459,7 @@ async fn submit_missing_artifact_file_is_usage_error_without_hitting_server() {
             id: TASK_ID.into(),
             summary: "x".into(),
             artifact: vec![std::path::PathBuf::from("/definitely/not/a/real/path.json")],
+            ..Default::default()
         }),
     )
     .await
@@ -456,6 +479,7 @@ async fn submit_bad_uuid_is_usage_error_without_hitting_server() {
             id: "not-a-uuid".into(),
             summary: "x".into(),
             artifact: vec![],
+            ..Default::default()
         }),
     )
     .await
@@ -479,6 +503,7 @@ async fn submit_dry_run_short_circuits_without_uploading() {
             id: TASK_ID.into(),
             summary: "dry".into(),
             artifact: vec![p1.clone()],
+            ..Default::default()
         }),
     )
     .await
@@ -513,6 +538,7 @@ async fn submit_upload_401_surfaces_as_auth_error() {
             id: TASK_ID.into(),
             summary: "x".into(),
             artifact: vec![p1],
+            ..Default::default()
         }),
     )
     .await
