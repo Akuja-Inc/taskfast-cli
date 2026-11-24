@@ -15,6 +15,7 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Changed
 
+- **Package metadata: `homepage` dropped** from the workspace crates. It was identical to `repository`, which cargo 1.100 now flags (`cargo::redundant_homepage`). crates.io and docs.rs fall back to `repository`.
 - **MSRV bumped to Rust 1.97** (from 1.95). `rust-version` in `Cargo.toml`, `rust-toolchain.toml`, and the CI matrix's MSRV leg now use 1.97. Required by `progenitor` 0.17 (#248, #250). `taskfast-client` users on Rust 1.95/1.96 need to stay on the previous release.
 - **`taskfast-client` is generated with progenitor 0.17 (#248, #250).** The generator API changed — `Generator::build(&settings, &spec)` + `generate_sdk()` replace `Generator::new` / `generate_tokens` — and request hooks moved from `GenerationSettings::with_post_hook` to the `progenitor_client::ClientHooks` trait. `taskfast-client` now implements `ClientHooks<()> for api::Client`, so the `x-request-id` capture (`record_corr`) still fires for every generated call (`corr_capture.rs` proves it). `MIT-0` joins the license allow list (`borrow-or-share`, a transitive of progenitor 0.17).
 
