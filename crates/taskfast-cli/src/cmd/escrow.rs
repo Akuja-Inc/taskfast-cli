@@ -781,7 +781,7 @@ pub(super) async fn submit_work(
         Err(e) => return Err(map_api_error(e).await.into()),
     };
     let skipped = |reason: &str| json!({ "action": "skipped", "reason": reason });
-    if auto && (task.escrow_id.is_none() || task.settlement_domain.is_none()) {
+    if auto && task.escrow_id.is_none() {
         return Ok(skipped("task has no escrow to start a review clock on"));
     }
     let target = super::escalate::chain_target(&task, "nothing to submit")?;
@@ -796,8 +796,20 @@ pub(super) async fn submit_work(
         }
     };
 
-    let window = decode_u256(&read("reviewWindowOf", view_calldata(escrow_id, true)).await?)
-        .map_err(|e| super::escalate::chain_read_err("reviewWindowOf", e))?;
+    // A contract from before the review clock has no `reviewWindowOf`: the call
+    // reverts (JSON-RPC execution error) or returns nothing. That is a legacy
+    // escrow, not a failure; transport and decode errors still are.
+    let window = match rpc
+        .eth_call(contract, &view_calldata(escrow_id, true))
+        .await
+    {
+        Ok(b) if b.is_empty() => U256::ZERO,
+        Ok(b) => {
+            decode_u256(&b).map_err(|e| super::escalate::chain_read_err("reviewWindowOf", e))?
+        }
+        Err(taskfast_agent::tempo_rpc::RpcError::Rpc { .. }) => U256::ZERO,
+        Err(e) => return Err(super::escalate::chain_read_err("reviewWindowOf", e)),
+    };
     if window.is_zero() {
         return Ok(json!({
             "action": "no_review_clock",

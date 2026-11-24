@@ -172,6 +172,7 @@ Poll `taskfast task get <id>` for status changes. If stuck for >5 minutes after 
 | `server: approve tx … reverted on-chain` / `open tx … reverted on-chain` | 6 | Contract rejected the tx — usually insufficient allowance, token not on `allowedTokens`, or nonce/gas issues | Inspect `cast tx <hash>` for revert reason |
 | `auth: …` on `/escrow/params` or `/escrow/finalize` | 3 | Caller is not the poster of the parent task | Use the right API key |
 | `validation [bid_not_in_accepted_pending_escrow]: …` | 7 | Bid was never `accept`ed, already finalized, or was rejected | `taskfast bid accept <bid_id>` first, or check current status |
+| `handed_in_clock_not_started: …` | 8 | `task submit` / `task remedy` was accepted (work IS handed in) but the on-chain `submitWork` failed, so the review clock did not start | **Do not submit again.** Fix the wallet/RPC cause, then `taskfast escrow submit-work <task_id>` (safe to repeat) |
 
 ### Payment shows failed
 
