@@ -38,7 +38,6 @@ schemars = "0.8.22"
 openapiv3 = { version = "2.2.0", default-features = false }
 prettyplease = "0.3.0"
 syn = { version = "3.0.6", features = ["full"] }
-quote = "1.0.47"
 serde_yaml.workspace = true
 taskfast-codegen.workspace = true
 

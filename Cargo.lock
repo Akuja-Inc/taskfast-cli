@@ -4485,7 +4485,6 @@ dependencies = [
  "prettyplease 0.3.0",
  "progenitor",
  "progenitor-client 0.16.1",
- "quote",
  "rand 0.8.8",
  "regress",
  "reqwest",

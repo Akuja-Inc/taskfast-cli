@@ -65,12 +65,13 @@ fn main() {
     let spec: openapiv3::OpenAPI = serde_yaml::from_str(&normalized)
         .unwrap_or_else(|e| panic!("parse normalized spec as OpenAPI: {e}"));
 
-    // Wire a post-hook so every generated request reports its response to
-    // `crate::record_corr`, which stashes the server `x-request-id` for the
-    // CLI trace (gh#85). The hook is `(crate::record_corr)(&result)` injected
-    // after each `exec`; see crates/taskfast-client/src/corr.rs.
-    let mut settings = progenitor::GenerationSettings::default();
-    settings.with_post_hook(quote::quote! { crate::record_corr });
+    // Request hooks are not generator settings in progenitor 0.17+: the
+    // generated `api` module emits a no-op `impl ClientHooks<()> for &Client`,
+    // and the hand-written `impl ClientHooks<()> for api::Client` in
+    // crates/taskfast-client/src/corr.rs wins method resolution. That `post`
+    // hands every response to `record_corr`, which stashes the server
+    // `x-request-id` for the CLI trace (gh#85).
+    //
     // Map OpenAPI `date-time`/`date` strings to jiff (gh#235) — chrono is
     // unmaintained (RUSTSEC-2026-0543). typify matches conversions by exact
     // `SchemaObject` equality (metadata ignored); progenitor's
@@ -79,6 +80,7 @@ fn main() {
     // date ever grows extra constraints (pattern, enum, x-extension), its
     // schema stops matching and the generated file silently reverts to
     // chrono — the `generated_client_maps_dates_to_jiff` test catches drift.
+    let mut settings = progenitor::GenerationSettings::default();
     for (format, rust_type) in [
         ("date-time", "::jiff::Timestamp"),
         ("date", "::jiff::civil::Date"),
@@ -95,10 +97,11 @@ fn main() {
             [progenitor::TypeImpl::Display, progenitor::TypeImpl::FromStr].into_iter(),
         );
     }
-    let mut generator = progenitor::Generator::new(&settings);
-    let tokens = generator
-        .generate_tokens(&spec)
-        .unwrap_or_else(|e| panic!("progenitor generate_tokens: {e}"));
+    let generator = progenitor::Generator::build(&settings, &spec)
+        .unwrap_or_else(|e| panic!("progenitor build: {e}"));
+    // 0.17 renders the whole SDK (client + `types`/`builder`/`prelude`
+    // submodules) as one token stream; previously `generate_tokens(&spec)`.
+    let tokens = generator.generate_sdk().into_stream();
 
     // Format via syn + prettyplease so the generated file is human-readable
     // when inspecting via `cargo expand` or target/.
