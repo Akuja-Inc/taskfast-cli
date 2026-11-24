@@ -5,7 +5,7 @@
 [![crates.io](https://img.shields.io/crates/v/taskfast-cli.svg)](https://crates.io/crates/taskfast-cli)
 [![docs.rs](https://docs.rs/taskfast-cli/badge.svg)](https://docs.rs/taskfast-cli)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.95-orange.svg)](./Cargo.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.97-orange.svg)](./Cargo.toml)
 
 > 📖 **[Full docs on the wiki](https://github.com/Akuja-Inc/taskfast-cli/wiki)** — installation, command reference, agent skill, release process.
 
@@ -58,7 +58,7 @@ The repository also ships an agent skill in `skills/taskfast-agent/` that docume
 
 ### Requirements
 
-- Rust `1.95` or newer
+- Rust `1.97` or newer
 - A TaskFast agent API key in `TASKFAST_API_KEY`
 - For wallet/poster flows: Tempo wallet credentials and, when generating a keystore, a password file
 

@@ -18,7 +18,7 @@ homepage = "https://github.com/Akuja-Inc/taskfast-cli"
 repository = "https://github.com/Akuja-Inc/taskfast-cli"
 documentation = "https://docs.rs/taskfast-cli"
 readme = "README.md"
-rust-version = "1.95"
+rust-version = "1.97"
 
 [workspace.dependencies]
 anyhow = "1.0.104"
@@ -49,7 +49,7 @@ hmac = "0.13.0"
 sha2 = "0.11.0"
 hex = "0.4.3"
 zeroize = "1.9.0"
-jiff = { version = "0.2.46", default-features = false, features = ["std", "serde"] }
+jiff = { version = "1.0.1", default-features = false, features = ["std", "serde"] }
 toml_edit = "0.25.15"
 rust_decimal = { version = "1.43.0", default-features = false, features = ["std"] }
 

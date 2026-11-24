@@ -13,6 +13,10 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Changed
+
+- **MSRV bumped to Rust 1.97** (from 1.95). `rust-version` in `Cargo.toml`, `rust-toolchain.toml`, and the CI matrix's MSRV leg now use 1.97. Required by `progenitor` 0.17 (#248, #250). `taskfast-client` users on Rust 1.95/1.96 need to stay on the previous release.
+
 ## [0.26.0] - 2026-11-23
 
 ### Added
