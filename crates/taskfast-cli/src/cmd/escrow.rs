@@ -10,12 +10,13 @@
 //!     task_escrow_contract) — the venue's escrow for zone-bound tasks.
 //!  3. ERC-20 `allowance` preflight; `approve` if short.
 //!  4. Random 32-byte salt → `compute_escrow_id` (matches Solidity).
-//!  5. EIP-712 `DistributionApproval(escrowId, deadline)` — `sign_distribution`.
+//!  5. EIP-712 `DistributionApproval(escrowId, deadline)` — `sign_distribution`;
+//!     skipped when the params carry `review_window_seconds` (v3 venue).
 //!  6. `TaskEscrow.open` / `openWithMemo` — or `openWithReview` when the params
 //!     carry `review_window_seconds` (v3 venue) — broadcast + wait for receipt.
-//!  7. `POST /bids/:id/escrow/finalize` with voucher + sig + deadline.
+//!  7. `POST /bids/:id/escrow/finalize` with voucher (+ sig + deadline without a review window).
 //!
-//! The params request always sends `review_clock=1`: a v3 venue refuses it
+//! The params request always sends `review_clock=2`: a v3 venue refuses it
 //! otherwise (409 `review_clock_client_required`).
 //!
 //! Memo is server-driven: `memo_hash` in the params payload selects
@@ -181,21 +182,6 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                         .into(),
                 });
             }
-            // Same version-skew shape for the server-issued deadline: a server
-            // predating the deadline-floor rollout omits `poster_approval_*`,
-            // which this CLI now requires (it no longer computes a deadline).
-            if matches!(&mapped, taskfast_client::Error::Decode(_))
-                && (mapped.to_string().contains("poster_approval_deadline")
-                    || mapped.to_string().contains("poster_approval_min_lifetime"))
-            {
-                return Err(CmdError::Validation {
-                    code: "server_missing_approval_deadline".into(),
-                    message: "server omitted `poster_approval_deadline`; this deployment predates \
-                              the server-issued escrow deadline — upgrade the server or use a CLI \
-                              version that matches it"
-                        .into(),
-                });
-            }
             // Any other undecodable body (e.g. a non-integer or oversized
             // `review_window_seconds`): say plainly that nothing was sent.
             if let taskfast_client::Error::Decode(m) = &mapped {
@@ -298,6 +284,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     // 5b. Review window (v3 venue). Validated here, before the keystore, any
     //     approve tx or the dry-run envelope: a bad window must send nothing.
     let review_window = review_window_from(&params)?;
+    let open_deadline = open_approval_deadline(&params)?;
 
     // 6. Load signer + preflight address equality.
     let keystore_path = super::wallet_args::resolve_keystore_path(
@@ -336,9 +323,9 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     //    than `poster_approval_min_lifetime` remaining, abort *before* any tx so
     //    we never strand funds behind an approval the server would reject at
     //    finalize (gh#118 / taskfast#935).
-    let mut deadline_unix = server_deadline_or_abort(&params)?;
-    let mut signature_hex =
-        sign_distribution(&signer, &domain, escrow_id, U256::from(deadline_unix))?;
+    let mut approval = open_deadline
+        .map(|d| sign_distribution(&signer, &domain, escrow_id, U256::from(d)).map(|sig| (d, sig)))
+        .transpose()?;
 
     // 9. Build open / openWithMemo calldata up front — we reuse it for the
     //    dry-run envelope and the live broadcast.
@@ -407,8 +394,8 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                 "escrow_id": format!("{escrow_id:#x}"),
                 "arbitrator": format!("{arbitrator:#x}"),
                 "salt": format!("{salt:#x}"),
-                "deadline": deadline_unix,
-                "signature": signature_hex,
+                "deadline": approval.as_ref().map(|(d, _)| *d),
+                "signature": approval.as_ref().map(|(_, s)| s),
                 "open_calldata": format!("0x{}", hex::encode(&open_calldata)),
                 "memo_hash": params.memo_hash,
                 "rpc_url": rpc_url,
@@ -474,30 +461,40 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         // Checked back to i64 at the API boundary — `deadline_unix` originates as
         // the i64 `poster_approval_deadline`, so this always fits, but an explicit
         // conversion refuses to silently wrap if the generated type ever widens.
-        let deadline_i64 = i64::try_from(deadline_unix)
-            .map_err(|_| CmdError::Decode(format!("deadline {deadline_unix} exceeds i64 range")))?;
+        let (poster_approval_signature, poster_approval_deadline) = match &approval {
+            Some((d, sig)) => {
+                let deadline_i64 = i64::try_from(*d)
+                    .map_err(|_| CmdError::Decode(format!("deadline {d} exceeds i64 range")))?;
+                (
+                    Some(sig.clone()),
+                    Some(BidEscrowFinalizeRequestPosterApprovalDeadline::Integer(
+                        deadline_i64,
+                    )),
+                )
+            }
+            None => (None, None),
+        };
         let body = BidEscrowFinalizeRequest {
             voucher: voucher_hex.clone(),
-            poster_approval_signature: signature_hex.clone(),
-            poster_approval_deadline: BidEscrowFinalizeRequestPosterApprovalDeadline::Integer(
-                deadline_i64,
-            ),
+            poster_approval_signature,
+            poster_approval_deadline,
             memo_hash: params.memo_hash.clone(),
         };
         match client.inner().finalize_bid_escrow(&bid_id, &body).await {
             Ok(r) => break r.into_inner(),
             Err(e) => {
                 let mapped = map_api_error(e).await;
-                if attempts == 0 && is_deadline_below_minimum(&mapped) {
+                if attempts == 0 && approval.is_some() && is_deadline_below_minimum(&mapped) {
                     attempts += 1;
                     let fresh = fetch_params(&client, &bid_id).await?;
-                    deadline_unix = server_deadline_or_abort(&fresh)?;
-                    signature_hex = sign_distribution(
+                    let deadline = server_deadline_or_abort(&fresh)?;
+                    let sig = sign_distribution(
                         session.signer(),
                         &domain,
                         escrow_id,
-                        U256::from(deadline_unix),
+                        U256::from(deadline),
                     )?;
+                    approval = Some((deadline, sig));
                     continue;
                 }
                 return Err(mapped.into());
@@ -516,7 +513,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             "escrow_id": format!("{escrow_id:#x}"),
             "voucher_tx_hash": voucher_hex,
             "approval_tx_hash": approval_tx_hex,
-            "deadline": deadline_unix,
+            "deadline": approval.as_ref().map(|(d, _)| *d),
         }),
     ))
 }
@@ -530,7 +527,7 @@ async fn fetch_params(
 ) -> Result<BidEscrowParamsResponse, taskfast_client::Error> {
     match client
         .inner()
-        .get_bid_escrow_params(bid_id, Some(GetBidEscrowParamsReviewClock::X1))
+        .get_bid_escrow_params(bid_id, Some(GetBidEscrowParamsReviewClock::X2))
         .await
     {
         Ok(v) => Ok(v.into_inner()),
@@ -643,16 +640,26 @@ fn open_calldata(f: &OpenFields, memo: Option<B256>, review_window: Option<U256>
 /// never fire when params are fetched immediately before signing — it catches a
 /// stale fetch, clock skew, or a retry.
 fn server_deadline_or_abort(params: &BidEscrowParamsResponse) -> Result<u64, CmdError> {
-    let deadline = u64::try_from(params.poster_approval_deadline).map_err(|_| {
+    let (Some(raw_deadline), Some(raw_min_lifetime)) = (
+        params.poster_approval_deadline,
+        params.poster_approval_min_lifetime,
+    ) else {
+        return Err(CmdError::Validation {
+            code: "server_missing_approval_deadline".into(),
+            message: "server omitted `poster_approval_deadline`; this deployment predates \
+                      the server-issued escrow deadline — upgrade the server or use a CLI \
+                      version that matches it"
+                .into(),
+        });
+    };
+    let deadline = u64::try_from(raw_deadline).map_err(|_| {
         CmdError::Decode(format!(
-            "server poster_approval_deadline={} is negative",
-            params.poster_approval_deadline
+            "server poster_approval_deadline={raw_deadline} is negative"
         ))
     })?;
-    let min_lifetime = u64::try_from(params.poster_approval_min_lifetime).map_err(|_| {
+    let min_lifetime = u64::try_from(raw_min_lifetime).map_err(|_| {
         CmdError::Decode(format!(
-            "server poster_approval_min_lifetime={} is negative",
-            params.poster_approval_min_lifetime
+            "server poster_approval_min_lifetime={raw_min_lifetime} is negative"
         ))
     })?;
     let now = u64::try_from(jiff::Timestamp::now().as_second())
@@ -669,6 +676,13 @@ fn server_deadline_or_abort(params: &BidEscrowParamsResponse) -> Result<u64, Cmd
         });
     }
     Ok(deadline)
+}
+
+fn open_approval_deadline(params: &BidEscrowParamsResponse) -> Result<Option<u64>, CmdError> {
+    if params.review_window_seconds.is_some() {
+        return Ok(None);
+    }
+    server_deadline_or_abort(params).map(Some)
 }
 
 /// True when the API surfaced the server's `deadline_below_minimum` finalize

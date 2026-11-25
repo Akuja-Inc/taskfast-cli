@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
 use serde_json::{json, Value};
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{body_partial_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use taskfast_cli::cmd::escrow::{run, Command, SignArgs};
@@ -135,7 +135,7 @@ async fn mount_params(server: &MockServer, body: Value, status: u16) {
         .and(path(format!("/bids/{BID_ID}/escrow/params")))
         // Every caller must declare the review clock (taskfast#2044 4c): a v3
         // venue answers 409 `review_clock_client_required` without it.
-        .and(query_param("review_clock", "1"))
+        .and(query_param("review_clock", "2"))
         .respond_with(ResponseTemplate::new(status).set_body_json(body))
         .mount(server)
         .await;
@@ -592,7 +592,7 @@ async fn review_clock_required_409_surfaces_server_code() {
     let keys = fresh_keys();
     mount_params(
         &server,
-        json!({"error": "review_clock_client_required", "message": "Upgrade your CLI; send review_clock=1"}),
+        json!({"error": "review_clock_client_required", "message": "Upgrade your CLI; send review_clock=2"}),
         409,
     )
     .await;
@@ -613,7 +613,137 @@ async fn review_clock_required_409_surfaces_server_code() {
 
 #[tokio::test]
 async fn params_request_sends_review_clock_flag() {
-    // mount_params requires `review_clock=1`; an unmatched request is a 404,
+    // mount_params requires `review_clock=2`; an unmatched request is a 404,
     // so a successful dry-run proves the flag was sent.
     let _ = dry_run_calldata(escrow_params_json()).await;
+}
+
+fn v3_params() -> Value {
+    let mut params = escrow_params_json();
+    params["review_window_seconds"] = json!(86_400);
+    let obj = params.as_object_mut().unwrap();
+    obj.remove("poster_approval_deadline");
+    obj.remove("poster_approval_min_lifetime");
+    params
+}
+
+#[tokio::test]
+async fn v3_dry_run_signs_no_approval() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    mount_params(&server, v3_params(), 200).await;
+    mount_readiness(&server).await;
+
+    let mut ctx = ctx_for(&server, Some("k"));
+    ctx.dry_run = true;
+    let env = run(&ctx, Command::Sign(base_args(&keys)))
+        .await
+        .expect("v3 dry-run without approval fields");
+    let v = envelope_value(&env);
+    assert_eq!(v["data"]["deadline"], Value::Null);
+    assert_eq!(v["data"]["signature"], Value::Null);
+}
+
+#[tokio::test]
+async fn v3_opens_with_review_signs_no_approval_and_finalize_omits_it() {
+    let api = MockServer::start().await;
+    let rpc = MockServer::start().await;
+    let keys = fresh_keys();
+    let tx_hash = format!("0x{}", "bb".repeat(32));
+    mount_params(&api, v3_params(), 200).await;
+    mount_readiness(&api).await;
+    let rpc_ok = |result: Value| {
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": result}))
+    };
+    for (m, result) in [
+        ("eth_chainId", json!(format!("{CHAIN_ID:#x}"))),
+        ("eth_getTransactionCount", json!("0x0")),
+        ("eth_gasPrice", json!("0x3b9aca00")),
+        ("eth_estimateGas", json!("0x4b094")),
+        ("eth_sendRawTransaction", json!(tx_hash)),
+        ("eth_getTransactionReceipt", json!({"status": "0x1"})),
+    ] {
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": m})))
+            .respond_with(rpc_ok(result))
+            .mount(&rpc)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path(format!("/bids/{BID_ID}/escrow/finalize")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "bid_id": BID_ID,
+            "task_id": TASK_ID,
+            "status": "accepted",
+            "task_status": "payment_pending",
+        })))
+        .expect(1)
+        .mount(&api)
+        .await;
+
+    let mut args = base_args(&keys);
+    args.rpc_url = Some(rpc.uri());
+    args.skip_allowance_check = true;
+    let env = run(&ctx_for(&api, Some("k")), Command::Sign(args))
+        .await
+        .expect("v3 live open");
+    assert_eq!(envelope_value(&env)["data"]["deadline"], Value::Null);
+
+    let sent: Vec<_> = rpc
+        .received_requests()
+        .await
+        .expect("requests")
+        .into_iter()
+        .filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok())
+        .filter(|b| b["method"] == "eth_sendRawTransaction")
+        .collect();
+    assert_eq!(sent.len(), 1);
+    let raw = sent[0]["params"][0].as_str().expect("raw tx");
+    let bytes = hex::decode(raw.trim_start_matches("0x")).expect("hex");
+    use alloy_consensus::{Transaction, TxEnvelope};
+    use alloy_eips::eip2718::Decodable2718;
+    let tx = TxEnvelope::decode_2718(&mut bytes.as_slice()).expect("2718");
+    assert_eq!(
+        &tx.input()[..4],
+        hex::decode("f1e32bb8").unwrap().as_slice()
+    );
+
+    let finalize: Vec<Value> = api
+        .received_requests()
+        .await
+        .expect("requests")
+        .into_iter()
+        .filter(|r| r.url.path().ends_with("/escrow/finalize"))
+        .map(|r| serde_json::from_slice(&r.body).expect("finalize json"))
+        .collect();
+    assert_eq!(finalize.len(), 1);
+    let body = finalize[0].as_object().unwrap();
+    assert!(!body.contains_key("poster_approval_signature"), "{body:?}");
+    assert!(!body.contains_key("poster_approval_deadline"), "{body:?}");
+    assert!(body.contains_key("voucher"));
+}
+
+#[tokio::test]
+async fn v2_missing_only_min_lifetime_is_version_skew() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    let mut params = escrow_params_json();
+    params
+        .as_object_mut()
+        .unwrap()
+        .remove("poster_approval_min_lifetime");
+    mount_params(&server, params, 200).await;
+    mount_readiness(&server).await;
+
+    let err = run(
+        &ctx_for(&server, Some("k")),
+        Command::Sign(base_args(&keys)),
+    )
+    .await
+    .expect_err("v2 missing min_lifetime must fail");
+    match err {
+        CmdError::Validation { code, .. } => assert_eq!(code, "server_missing_approval_deadline"),
+        other => panic!("expected Validation(server_missing_approval_deadline), got {other:?}"),
+    }
 }

@@ -13,6 +13,21 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Changed
+
+- `taskfast escrow sign` accepts a review-clock (v3) escrow with no open-time
+  approval: it sends `review_clock=2`, signs no `DistributionApproval` when the
+  params carry `review_window_seconds`, and finalize omits the signature and
+  deadline. Without a window the v2 behaviour is unchanged, including the
+  `server_missing_approval_deadline` abort. The dry-run and success envelopes
+  report `deadline` and `signature` as `null` on v3.
+- BREAKING (`taskfast-client`): `BidEscrowParamsResponse.poster_approval_deadline`
+  and `poster_approval_min_lifetime`, and
+  `BidEscrowFinalizeRequest.poster_approval_signature` and
+  `poster_approval_deadline`, are now `Option`. `GetBidEscrowParamsReviewClock`
+  gains `X2`, and `record_payout_approval` is new. Spec copied from server
+  d90bb3c9.
+
 ### Removed
 
 - Removed beads issue tracking and its git hook integrations. Opt-in hooks

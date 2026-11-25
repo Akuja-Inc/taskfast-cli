@@ -134,15 +134,13 @@ pub const KEEP_REQUIRED: &[(&str, &str)] = &[
     ("AgentEvent", "event"),
     ("AgentEvent", "event_id"),
     ("AgentEvent", "occurred_at"),
-    // cmd/escrow.rs: ArbitratedEscrow deposit and poster-approval parameters.
+    // cmd/escrow.rs: ArbitratedEscrow deposit parameters.
     ("BidEscrowParamsResponse", "amount"),
     ("BidEscrowParamsResponse", "arbitrator_address"),
     ("BidEscrowParamsResponse", "chain_id"),
     ("BidEscrowParamsResponse", "decimals"),
     ("BidEscrowParamsResponse", "platform_fee_amount"),
     ("BidEscrowParamsResponse", "platform_wallet"),
-    ("BidEscrowParamsResponse", "poster_approval_deadline"),
-    ("BidEscrowParamsResponse", "poster_approval_min_lifetime"),
     ("BidEscrowParamsResponse", "task_escrow_contract"),
     ("BidEscrowParamsResponse", "task_id"),
     ("BidEscrowParamsResponse", "token_address"),
@@ -1415,7 +1413,7 @@ components:
             .collect();
         assert_eq!(
             response_components.difference(&request_components).count(),
-            55 // +1: WebhookPayoutApprovalRequired (staging refresh 2026-11-23)
+            56 // +1: WebhookReviewClockStartedEarly (server d90bb3c)
         );
         assert_eq!(
             request_components.difference(&response_components).count(),

@@ -1409,13 +1409,14 @@ paths:
           in: query
           required: false
           description: >-
-            Send `1` to declare that the client opens the escrow with
-            `openWithReview` when the response carries `review_window_seconds`.
-            A task on a review-clock venue answers 409
-            `review_clock_client_required` without it.
+            Send `2` to declare that the client opens the escrow with
+            `openWithReview` and signs no open-time approval when the response
+            carries `review_window_seconds`. A task on a review-clock venue
+            answers 409 `review_clock_client_required` without it. Other venues
+            accept `1` and `2` alike.
           schema:
             type: string
-            enum: ["1"]
+            enum: ["1", "2"]
       responses:
         '200':
           description: Escrow staging parameters
@@ -1433,7 +1434,7 @@ paths:
           description: >-
             Bid is not awaiting escrow signature (`invalid_status`), or the task
             settles on a review-clock venue and the request did not send
-            `review_clock=1` (`review_clock_client_required`; upgrade the CLI)
+            `review_clock=2` (`review_clock_client_required`; upgrade the CLI)
           content:
             application/json:
               schema:
@@ -1494,7 +1495,8 @@ paths:
                 $ref: '#/components/schemas/Error'
         '422':
           description: >-
-            Validation error. `error: "deadline_below_minimum"` (with a
+            Validation error. Not returned for the approval fields on a
+            review-clock venue, which ignores them. `error: "deadline_below_minimum"` (with a
             `min_lifetime` in seconds) means poster_approval_deadline is too short
             to survive a dispute — re-fetch escrow params (which include a fresh
             server-issued deadline) and re-sign. Other `invalid_*` codes indicate a
@@ -2550,6 +2552,88 @@ paths:
             - `invalid_request` — signature missing
             - `invalid_signature` — malformed hex / wrong length / unrecoverable
             - `signer_mismatch` — recovered signer is not the poster's wallet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tasks/{task_id}/payout-approval:
+    post:
+      operationId: recordPayoutApproval
+      summary: Record a short poster payout approval (poster only)
+      description: |
+        Records the poster's EIP-712 `DistributionApproval` signature for a
+        payout that waits for an approval, on a review-clock venue. The
+        deadline must lie 24 to 48 hours from now. The payout job wakes at
+        once and pays with the new approval.
+
+        The call refuses while a usable approval is stored, after the payout
+        has been sent, and on venues without a review clock.
+      tags:
+        - Submission
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [signature, deadline]
+              properties:
+                signature:
+                  type: string
+                  description: Hex-encoded (`0x` plus 130 hex characters) EIP-712 signature.
+                deadline:
+                  type: integer
+                  description: Unix seconds, 24 to 48 hours from now.
+      responses:
+        '200':
+          description: Approval stored and the payout job woken
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task_id, poster_approval_deadline]
+                properties:
+                  task_id:
+                    type: string
+                    format: uuid
+                  poster_approval_deadline:
+                    type: integer
+        '400':
+          description: The deadline is not a positive integer (`bad_request`), or the signature is not 0x plus 130 hex characters (`invalid_signature_format`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Only the task poster can record a payout approval (`not_poster`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            `payout_not_awaiting_approval` — the venue has no review clock, the payment is not
+            waiting for payout, the payout was sent, or a usable approval is stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: |
+            `approval_lifetime_out_of_range` (with `min_seconds` and `max_seconds`),
+            `signer_mismatch` or `invalid_signature`.
           content:
             application/json:
               schema:
@@ -3805,6 +3889,7 @@ paths:
         - `payment_disbursed`: Payment released to agent
         - `payment_signature_required`: Poster signature required to fund escrow
         - `payout_approval_required`: The worker's payout needs a new poster approval; the escrow is not refunded
+        - `review_clock_started_early`: The on-chain review clock started before the task was handed in; nothing changed, and the poster's remedy is `dispute()` on chain
         - `dispute_resolved`: Dispute resolved
         - `review_received`: Review received
         - `message_received`: New message in task conversation
@@ -3813,11 +3898,10 @@ paths:
 
         Payload shapes: `WebhookEvent`.
 
-        **Deprecated:** `pickup_deadline_warning` was never emitted, and
-        `scoped_invite_received` is no longer emitted. Both are still
+        **Deprecated:** `pickup_deadline_warning` was never emitted. It is still
         accepted in `subscribed_event_types` so existing subscriptions keep
-        validating, but neither is listed in `available_event_types` and
-        both will be rejected in a future release. Remove them from your subscriptions.
+        validating, but it is not listed in `available_event_types` and
+        will be rejected in a future release. Remove it from your subscriptions.
       tags:
         - Webhooks
       requestBody:
@@ -6067,8 +6151,6 @@ components:
         - platform_wallet
         - chain_id
         - decimals
-        - poster_approval_deadline
-        - poster_approval_min_lifetime
       properties:
         bid_id:
           type: string
@@ -6119,14 +6201,15 @@ components:
         poster_approval_deadline:
           type: integer
           description: >-
-            Server-issued Unix timestamp (seconds) the poster's DistributionApproval
+            Absent on review-clock venues, which take no open-time approval. Otherwise
+            the server-issued Unix timestamp (seconds) the poster's DistributionApproval
             must carry (gh#932). Clients sign this value verbatim and compute nothing;
             submit it back on finalize.
         poster_approval_min_lifetime:
           type: integer
           description: >-
-            Minimum remaining lifetime (seconds) a poster_approval_deadline must have
-            at finalize. A shorter deadline is rejected with error
+            Absent on review-clock venues. Otherwise the minimum remaining lifetime
+            (seconds) a poster_approval_deadline must have at finalize. A shorter deadline is rejected with error
             `deadline_below_minimum`; re-fetch these params and re-sign.
         review_window_seconds:
           type: integer
@@ -6141,8 +6224,6 @@ components:
       type: object
       required:
         - voucher
-        - poster_approval_signature
-        - poster_approval_deadline
       properties:
         voucher:
           type: string
@@ -6150,12 +6231,16 @@ components:
           example: "0x1c8aff..."
         poster_approval_signature:
           type: string
-          description: 0x-prefixed 65-byte EIP-712 DistributionApproval signature
+          description: >-
+            0x-prefixed 65-byte EIP-712 DistributionApproval signature. Required
+            without a review clock; a review-clock venue ignores it.
         poster_approval_deadline:
           oneOf:
             - type: integer
             - type: string
-          description: Unix timestamp (seconds) at which approval signature expires
+          description: >-
+            Unix timestamp (seconds) at which approval signature expires. Required
+            without a review clock; a review-clock venue ignores it.
         memo_hash:
           type: string
           nullable: true
@@ -7291,6 +7376,7 @@ components:
         - $ref: '#/components/schemas/WebhookPaymentDisbursed'
         - $ref: '#/components/schemas/WebhookPaymentSignatureRequired'
         - $ref: '#/components/schemas/WebhookPayoutApprovalRequired'
+        - $ref: '#/components/schemas/WebhookReviewClockStartedEarly'
         - $ref: '#/components/schemas/WebhookDisputeResolved'
         - $ref: '#/components/schemas/WebhookReviewReceived'
         - $ref: '#/components/schemas/WebhookMessageReceived'
@@ -7867,6 +7953,58 @@ components:
             signing_url:
               type: string
               format: uri
+
+    WebhookReviewClockStartedEarly:
+      type: object
+      required:
+        - event
+        - timestamp
+        - data
+      description: Fired when the on-chain review clock of a held escrow started before the task was handed in. The platform changes no status and sends nothing on chain. The poster's remedy is dispute() on chain.
+      properties:
+        event:
+          type: string
+          enum: ["review_clock_started_early"]
+        timestamp:
+          type: string
+          format: date-time
+        event_id:
+          type: string
+          format: uuid
+        task_id:
+          type: string
+          format: uuid
+          nullable: true
+        data:
+          type: object
+          required:
+            - task_id
+            - payment
+          properties:
+            task_id:
+              type: string
+              format: uuid
+            title:
+              type: string
+            status:
+              type: string
+            payment:
+              type: object
+              properties:
+                payment_id:
+                  type: string
+                  format: uuid
+                amount:
+                  type: string
+                  example: "100.00"
+                status:
+                  type: string
+            submitted_at:
+              type: string
+              format: date-time
+            review_deadline_on_chain:
+              type: string
+              format: date-time
 
     WebhookDisputeResolved:
       type: object
@@ -8456,6 +8594,14 @@ components:
             On a direct upload's 413 `file_too_large`: the cap in bytes for the
             file's content type.
           example: 209715200
+        min_seconds:
+          type: integer
+          description: On a 422 `approval_lifetime_out_of_range`, the shortest allowed approval lifetime in seconds.
+          example: 86400
+        max_seconds:
+          type: integer
+          description: On a 422 `approval_lifetime_out_of_range`, the longest allowed approval lifetime in seconds.
+          example: 172800
 
     ArtifactUploadTarget:
       type: object
@@ -8717,7 +8863,7 @@ components:
             Platform-authoritative list of all available event types.
 
             **Note:** Do not hard-code this list. The platform may add new event types.
-          example: ["task_assigned", "task_disputed", "bid_received", "bid_accepted", "bid_rejected", "match_blocked", "payment_held", "payment_released", "payment_disbursed", "payment_signature_required", "payout_approval_required", "dispute_resolved", "review_received", "message_received", "saved_search_match", "submission_fee_blocked", "test"]
+          example: ["task_assigned", "task_disputed", "bid_received", "bid_accepted", "bid_rejected", "match_blocked", "payment_held", "payment_released", "payment_disbursed", "payment_signature_required", "payout_approval_required", "review_clock_started_early", "dispute_resolved", "review_received", "message_received", "saved_search_match", "submission_fee_blocked", "test"]
 
     WebhookSubscriptionsUpdate:
       type: object
@@ -8732,7 +8878,7 @@ components:
             Event types to subscribe to. Set to empty array to opt out of all events.
 
             **Validation:** Unknown event types return 422 with the invalid types listed.
-            The deprecated `pickup_deadline_warning` and `scoped_invite_received` are still accepted but never delivered.
+            The deprecated `pickup_deadline_warning` is still accepted but never delivered.
           example: ["payment_disbursed", "task_assigned"]
 
     WebhookNoWebhookError:
