@@ -2,7 +2,7 @@
 //! Fetch single pages of agent events using opaque server cursors.
 
 use taskfast_client::api::types::{AgentEvent, AgentEventListResponse, PaginatedMeta};
-use taskfast_client::{map_api_error, Error, Result, TaskFastClient};
+use taskfast_client::{Error, Result, TaskFastClient};
 
 /// One unparseable event carried alongside the decoded page so callers
 /// can surface partial success instead of failing the whole batch.
@@ -36,10 +36,7 @@ pub async fn list_events_page(
     // progenitor 0.14 / typify generates `limit` as `Option<NonZeroU64>`
     // (the spec's `minimum: 1` now lives in the type).
     let limit = limit.and_then(taskfast_client::page_limit);
-    match client.inner().list_agent_events(cursor, limit).await {
-        Ok(v) => Ok(v.into_inner()),
-        Err(e) => Err(map_api_error(e).await),
-    }
+    client.call(|c| c.list_agent_events(cursor, limit)).await
 }
 
 /// Decode a single event JSON value tolerantly into an [`AgentEvent`].

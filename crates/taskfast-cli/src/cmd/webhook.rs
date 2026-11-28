@@ -22,8 +22,7 @@ use serde_json::json;
 use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
-use taskfast_agent::webhooks;
-use taskfast_client::api::types::WebhookConfigRequest;
+use taskfast_client::api::types::{WebhookConfigRequest, WebhookSubscriptionsUpdate};
 
 /// Default subscription set for a fresh worker. Matches the list
 /// `scripts/webhook-setup.sh` hard-coded. Kept here only as a
@@ -143,7 +142,8 @@ pub async fn provision_webhook(
             CmdError::Usage(format!("cannot save secret to {}: {e}", path.display()))
         })?;
     }
-    let cfg = webhooks::configure_webhook(client, &body)
+    let cfg = client
+        .call(|c| c.configure_webhook(&body))
         .await
         .map_err(CmdError::from)?;
 
@@ -158,7 +158,9 @@ pub async fn provision_webhook(
     let subscribed = if events.is_empty() {
         None
     } else {
-        let subs = webhooks::update_subscriptions(client, events.to_vec())
+        let update = subscriptions_update(events);
+        let subs = client
+            .call(|c| c.update_webhook_subscriptions(&update))
             .await
             .map_err(CmdError::from)?;
         Some(subs.subscribed_event_types)
@@ -226,7 +228,8 @@ async fn test(ctx: &Ctx) -> CmdResult {
         ));
     }
     let client = ctx.client()?;
-    let receipt = webhooks::test_webhook(&client)
+    let receipt = client
+        .call(|c| c.test_webhook())
         .await
         .map_err(CmdError::from)?;
     Ok(Envelope::success(
@@ -240,11 +243,18 @@ async fn test(ctx: &Ctx) -> CmdResult {
     ))
 }
 
+fn subscriptions_update(events: &[String]) -> WebhookSubscriptionsUpdate {
+    WebhookSubscriptionsUpdate {
+        subscribed_event_types: events.to_vec(),
+    }
+}
+
 async fn subscribe(ctx: &Ctx, args: SubscribeArgs) -> CmdResult {
     let client = ctx.client()?;
 
     if args.list {
-        let subs = webhooks::get_subscriptions(&client)
+        let subs = client
+            .call(|c| c.get_webhook_subscriptions())
             .await
             .map_err(CmdError::from)?;
         return Ok(Envelope::success(
@@ -281,7 +291,9 @@ async fn subscribe(ctx: &Ctx, args: SubscribeArgs) -> CmdResult {
         ));
     }
 
-    let subs = webhooks::update_subscriptions(&client, events)
+    let update = subscriptions_update(&events);
+    let subs = client
+        .call(|c| c.update_webhook_subscriptions(&update))
         .await
         .map_err(CmdError::from)?;
     Ok(Envelope::success(
@@ -296,7 +308,8 @@ async fn subscribe(ctx: &Ctx, args: SubscribeArgs) -> CmdResult {
 
 async fn get(ctx: &Ctx) -> CmdResult {
     let client = ctx.client()?;
-    let cfg = webhooks::get_webhook(&client)
+    let cfg = client
+        .call(|c| c.get_webhook_config())
         .await
         .map_err(CmdError::from)?;
     Ok(Envelope::success(
@@ -320,7 +333,8 @@ async fn delete(ctx: &Ctx) -> CmdResult {
         ));
     }
     let client = ctx.client()?;
-    webhooks::delete_webhook(&client)
+    client
+        .call(|c| c.delete_webhook_config())
         .await
         .map_err(CmdError::from)?;
     Ok(Envelope::success(
