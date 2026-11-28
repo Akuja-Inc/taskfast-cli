@@ -18,6 +18,7 @@
 //! | 6    | server (5xx after retries) / network        |
 //! | 7    | validation (422, 4xx other)                 |
 //! | 8    | work handed in, on-chain review clock not started |
+//! | 9    | task approved, payout approval not recorded |
 //! | 70   | unimplemented (transitional, scaffold-only) |
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,8 @@ pub enum ExitCode {
     Validation = 7,
     /// `task submit`/`remedy` succeeded on the server; `submitWork` failed. Retry `escrow submit-work`.
     HandedInClockNotStarted = 8,
+    /// `task approve` succeeded on the server; the payout approval failed. Retry `escrow payout-approval`.
+    ApprovedPayoutNotSigned = 9,
     Unimplemented = 70,
 }
 

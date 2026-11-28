@@ -239,7 +239,7 @@ Task enters `under_review` on worker submission:
 # View task + artifacts.
 taskfast task get "$TASK_ID" | jq '.data.task.artifacts'
 
-# Approve (releases escrow — server-driven distribution, no client signature).
+# Approve (releases escrow). On a review-clock (v3) escrow it also signs and records a 24-48 h payout approval.
 taskfast task approve "$TASK_ID"
 
 # Dispute — --reason is required and cannot be empty.
@@ -301,7 +301,9 @@ stateDiagram-v2
 
 ### Distribution approval
 
-`taskfast task approve` is **unsigned** — the server owns the on-chain `distribute()` call and releases the escrow after approval. Finalizing the payout to `settled` is the poster's signed step: `taskfast settle <task_id>` loads the keystore, signs EIP-712 `DistributionApproval(bytes32 escrowId, uint256 deadline)`, and POSTs the signature to `/tasks/{id}/settle`, moving the task `:complete` (payment `:disbursement_pending`) → `:settled`. The task must have `escrow_id` + `settlement_deadline` populated (i.e. the escrow was created), and only the poster can call it.
+On a review-clock (v3) escrow, `taskfast task approve` signs a `DistributionApproval` valid for 36 h after the server accepts the approve and POSTs it to `/tasks/{id}/payout-approval`; the server accepts 24-48 h from its own clock. Pass `--keystore`, `--wallet-password-file` and `--wallet-address` (or set `TEMPO_KEY_SOURCE`, `TASKFAST_WALLET_PASSWORD_FILE`, `TEMPO_WALLET_ADDRESS`). It reads the escrow's review window on chain first: window 0 (a v2 escrow) signs nothing and reports `payout_approval.action = "no_review_clock"`. If the approve succeeded but the approval was not recorded, the command exits **9** (`approved_payout_not_signed`) and names the retry: `taskfast escrow payout-approval <task_id>`. Run that same command when the webhook `payout_approval_required` fires, or when a task was approved without `task approve` (auto-approve, review timeout). It is safe to repeat: `payout_approval.action = "not_needed"` means a payout is already underway or paid. Do not use `taskfast settle` on a v3 escrow.
+
+`taskfast task approve` on a v2 escrow is **unsigned** — the server owns the on-chain `distribute()` call and releases the escrow after approval. Finalizing the payout to `settled` is the poster's signed step: `taskfast settle <task_id>` loads the keystore, signs EIP-712 `DistributionApproval(bytes32 escrowId, uint256 deadline)`, and POSTs the signature to `/tasks/{id}/settle`, moving the task `:complete` (payment `:disbursement_pending`) → `:settled`. The task must have `escrow_id` + `settlement_deadline` populated (i.e. the escrow was created), and only the poster can call it.
 
 ```bash
 taskfast settle "$TASK_ID" \

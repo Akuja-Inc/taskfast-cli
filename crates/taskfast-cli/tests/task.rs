@@ -562,9 +562,50 @@ async fn approve_happy_path_returns_task_id_and_status() {
         })))
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/tasks/{TASK_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": TASK_ID,
+            "status": "complete",
+            "escrow_id": "0xabababababababababababababababababababababababababababababababab",
+            "settlement_domain": {
+                "chain_id": 42431,
+                "verifying_contract": "0x0000000000000000000000000000000000000001",
+            },
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/config/network"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "networks": {"testnet": {
+                "chain_id": 42431,
+                "rpc_url": format!("{}/rpc", server.uri()),
+                "wss_url": null,
+                "explorer_url": "https://explore.testnet.tempo.xyz",
+            }}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rpc"))
+        .respond_with(|req: &wiremock::Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            let result = match body["method"].as_str().unwrap() {
+                "eth_chainId" => json!("0xa5bf"),
+                _ => json!(format!("0x{:064x}", 0)),
+            };
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": result}))
+        })
+        .mount(&server)
+        .await;
     let envelope = run(
         &ctx_for(&server, Some("test-key")),
-        Command::Approve(ApproveArgs { id: TASK_ID.into() }),
+        Command::Approve(ApproveArgs {
+            id: TASK_ID.into(),
+            ..Default::default()
+        }),
     )
     .await
     .expect("approve ok");
@@ -572,6 +613,7 @@ async fn approve_happy_path_returns_task_id_and_status() {
     assert_eq!(v["ok"], true);
     assert_eq!(v["data"]["task_id"], TASK_ID);
     assert_eq!(v["data"]["status"], "complete");
+    assert_eq!(v["data"]["payout_approval"]["action"], "no_review_clock");
 }
 
 #[tokio::test]
@@ -579,9 +621,15 @@ async fn approve_dry_run_skips_http() {
     let server = MockServer::start().await; // no mocks
     let mut ctx = ctx_for(&server, Some("test-key"));
     ctx.dry_run = true;
-    let envelope = run(&ctx, Command::Approve(ApproveArgs { id: TASK_ID.into() }))
-        .await
-        .expect("dry-run ok");
+    let envelope = run(
+        &ctx,
+        Command::Approve(ApproveArgs {
+            id: TASK_ID.into(),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("dry-run ok");
     let v = envelope_value(&envelope);
     assert_eq!(v["dry_run"], true);
     assert_eq!(v["data"]["action"], "would_approve");
@@ -595,6 +643,7 @@ async fn approve_bad_uuid_is_usage_error_without_any_http() {
         &ctx_for(&server, Some("test-key")),
         Command::Approve(ApproveArgs {
             id: "not-a-uuid".into(),
+            ..Default::default()
         }),
     )
     .await
@@ -619,7 +668,10 @@ async fn approve_403_surfaces_as_auth() {
         .await;
     let err = run(
         &ctx_for(&server, Some("test-key")),
-        Command::Approve(ApproveArgs { id: TASK_ID.into() }),
+        Command::Approve(ApproveArgs {
+            id: TASK_ID.into(),
+            ..Default::default()
+        }),
     )
     .await
     .expect_err("403 must surface");
@@ -639,7 +691,10 @@ async fn approve_409_surfaces() {
         .await;
     let err = run(
         &ctx_for(&server, Some("test-key")),
-        Command::Approve(ApproveArgs { id: TASK_ID.into() }),
+        Command::Approve(ApproveArgs {
+            id: TASK_ID.into(),
+            ..Default::default()
+        }),
     )
     .await
     .expect_err("409 must surface");
@@ -662,7 +717,10 @@ async fn approve_401_surfaces_as_auth() {
         .await;
     let err = run(
         &ctx_for(&server, Some("test-key")),
-        Command::Approve(ApproveArgs { id: TASK_ID.into() }),
+        Command::Approve(ApproveArgs {
+            id: TASK_ID.into(),
+            ..Default::default()
+        }),
     )
     .await
     .expect_err("401 must surface");
@@ -674,7 +732,10 @@ async fn approve_missing_api_key_errors_before_any_http() {
     let server = MockServer::start().await;
     let err = run(
         &ctx_for(&server, None),
-        Command::Approve(ApproveArgs { id: TASK_ID.into() }),
+        Command::Approve(ApproveArgs {
+            id: TASK_ID.into(),
+            ..Default::default()
+        }),
     )
     .await
     .expect_err("no key");

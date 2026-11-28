@@ -46,6 +46,7 @@ pub mod init_tui;
 pub mod me;
 pub mod message;
 pub mod payment;
+pub mod payout_approval;
 pub mod ping;
 pub mod platform;
 pub mod post;
@@ -536,6 +537,10 @@ pub enum CmdError {
     #[error("{0}")]
     HandedInClockNotStarted(String),
 
+    /// The server accepted the approve; only the payout approval failed.
+    #[error("{0}")]
+    ApprovedPayoutNotSigned(String),
+
     #[error("not yet implemented: {0}")]
     Unimplemented(&'static str),
 
@@ -558,6 +563,7 @@ impl CmdError {
             Self::Keystore(_) => "keystore",
             Self::Signing(_) => "signing",
             Self::HandedInClockNotStarted(_) => "handed_in_clock_not_started",
+            Self::ApprovedPayoutNotSigned(_) => "approved_payout_not_signed",
             Self::Unimplemented(_) => "unimplemented",
             Self::Config(_) => "config",
         }
@@ -573,6 +579,7 @@ impl CmdError {
             Self::Server(_) | Self::Network(_) | Self::Decode(_) => ExitCode::Server,
             Self::Keystore(_) | Self::Signing(_) => ExitCode::Wallet,
             Self::HandedInClockNotStarted(_) => ExitCode::HandedInClockNotStarted,
+            Self::ApprovedPayoutNotSigned(_) => ExitCode::ApprovedPayoutNotSigned,
             Self::Unimplemented(_) => ExitCode::Unimplemented,
         }
     }
