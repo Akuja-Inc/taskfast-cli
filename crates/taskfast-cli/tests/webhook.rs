@@ -414,7 +414,7 @@ async fn register_checks_explicit_dev_secret_path_before_any_put() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn register_updates_url_with_existing_read_only_secret() {
+async fn register_refuses_read_only_existing_secret_even_when_webhook_exists() {
     use std::os::unix::fs::PermissionsExt;
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -436,7 +436,6 @@ async fn register_updates_url_with_existing_read_only_secret() {
             "events": [],
             "secret": null,
         })))
-        .expect(1)
         .mount(&server)
         .await;
 
@@ -461,6 +460,14 @@ async fn register_updates_url_with_existing_read_only_secret() {
     )
     .await;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
-    res.expect("update with a read-only existing secret must work");
+    assert!(res.is_err());
     assert_eq!(fs::read_to_string(&secret_path).unwrap(), "whsec_saved");
+    let puts = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.method.as_str() == "PUT")
+        .count();
+    assert_eq!(puts, 0);
 }

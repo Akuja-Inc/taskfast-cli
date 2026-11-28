@@ -210,7 +210,11 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
                 let _ = state_store.clear_pending_fee_retry(&task_id);
                 v.into_inner()
             }
-            Err(e) => return Err(map_api_error(e).await.into()),
+            Err(e) => {
+                let server_err = map_api_error(e).await;
+                clear_if_hash_reused(&state_store, &task_id, &voucher, &server_err);
+                return Err(server_err.into());
+            }
         };
         return Ok(Envelope::success(
             ctx.environment,
@@ -360,19 +364,11 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
         }
         Err(e) => {
             let server_err = map_api_error(e).await;
+            clear_if_hash_reused(&state_store, &task_id, &voucher_to_submit, &server_err);
             let mut replay = true;
             if let taskfast_client::Error::Validation { code, .. } = &server_err {
                 if code == "submission_fee_hash_reused" || code == "fee_executed_unmatched" {
                     replay = false;
-                }
-                if code == "submission_fee_hash_reused" {
-                    if let Err(clear_err) =
-                        state_store.clear_pending_fee_retry_matching(&task_id, &voucher_to_submit)
-                    {
-                        eprintln!(
-                            "taskfast: warning: could not clear the rejected saved voucher for task {task_id}: {clear_err}"
-                        );
-                    }
                 }
             }
             eprintln!(
@@ -398,6 +394,25 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
             "submission_fee_voucher": voucher_to_submit,
         }),
     ))
+}
+
+fn clear_if_hash_reused(
+    state_store: &crate::state_store::StateStore,
+    task_id: &uuid::Uuid,
+    voucher: &str,
+    server_err: &taskfast_client::Error,
+) {
+    let taskfast_client::Error::Validation { code, .. } = server_err else {
+        return;
+    };
+    if code != "submission_fee_hash_reused" {
+        return;
+    }
+    if let Err(e) = state_store.clear_pending_fee_retry_matching(task_id, voucher) {
+        eprintln!(
+            "taskfast: warning: could not clear the rejected saved voucher for task {task_id}: {e}"
+        );
+    }
 }
 
 fn broadcast_notice(voucher: &str, server_err: &str, replay: bool, saved: bool) -> String {

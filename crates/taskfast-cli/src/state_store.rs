@@ -328,15 +328,34 @@ impl StateStore {
         }
     }
 
+    fn with_ledger_lock<T>(&self, f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        let Some(dir) = self.root_dir() else {
+            return f();
+        };
+        self.ensure_dir()?;
+        let mut opts = fs::OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let lock = opts.open(dir.join("fee_retries.lock"))?;
+        fs4::FileExt::lock(&lock)?;
+        f()
+    }
+
     pub fn record_pending_fee_retry(&self, task_id: &uuid::Uuid, tx_hash: &str) -> io::Result<()> {
         let Some(path) = self.path_for(StateAsset::FeeRetries) else {
             return Ok(());
         };
-        let mut map = self.read_fee_ledger()?;
-        map.insert(task_id.to_string(), tx_hash.to_string());
-        let body = serde_json::to_vec_pretty(&map)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        Self::atomic_write_file(&path, &body)
+        self.with_ledger_lock(|| {
+            let mut map = self.read_fee_ledger()?;
+            map.insert(task_id.to_string(), tx_hash.to_string());
+            let body = serde_json::to_vec_pretty(&map)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            Self::atomic_write_file(&path, &body)
+        })
     }
 
     /// Clear any pending fee retry transaction hash for `task_id`.
@@ -349,27 +368,31 @@ impl StateStore {
         let Some(path) = self.path_for(StateAsset::FeeRetries) else {
             return Ok(());
         };
-        let mut map = self.read_fee_ledger()?;
-        if map.get(&task_id.to_string()).is_some_and(|v| v == voucher) {
-            map.remove(&task_id.to_string());
-            let body = serde_json::to_vec_pretty(&map)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Self::atomic_write_file(&path, &body)?;
-        }
-        Ok(())
+        self.with_ledger_lock(|| {
+            let mut map = self.read_fee_ledger()?;
+            if map.get(&task_id.to_string()).is_some_and(|v| v == voucher) {
+                map.remove(&task_id.to_string());
+                let body = serde_json::to_vec_pretty(&map)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                Self::atomic_write_file(&path, &body)?;
+            }
+            Ok(())
+        })
     }
 
     pub fn clear_pending_fee_retry(&self, task_id: &uuid::Uuid) -> io::Result<()> {
         let Some(path) = self.path_for(StateAsset::FeeRetries) else {
             return Ok(());
         };
-        let mut map = self.read_fee_ledger()?;
-        if map.remove(&task_id.to_string()).is_some() {
-            let body = serde_json::to_vec_pretty(&map)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Self::atomic_write_file(&path, &body)?;
-        }
-        Ok(())
+        self.with_ledger_lock(|| {
+            let mut map = self.read_fee_ledger()?;
+            if map.remove(&task_id.to_string()).is_some() {
+                let body = serde_json::to_vec_pretty(&map)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                Self::atomic_write_file(&path, &body)?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -792,6 +815,39 @@ mod tests {
             .clear_pending_fee_retry_matching(&id, "0xnew")
             .unwrap();
         assert_eq!(store.get_pending_fee_retry(&id), None);
+    }
+
+    #[test]
+    fn concurrent_record_and_clear_lose_no_entries() {
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join(".taskfast").join("config.json");
+        let kept: Vec<uuid::Uuid> = (0..120).map(|_| uuid::Uuid::new_v4()).collect();
+        let doomed = uuid::Uuid::new_v4();
+        StateStore::from_config_path(&config)
+            .record_pending_fee_retry(&doomed, "0xold")
+            .unwrap();
+        let mut handles = Vec::new();
+        for chunk in kept.chunks(15) {
+            let ids = chunk.to_vec();
+            let config = config.clone();
+            handles.push(std::thread::spawn(move || {
+                let store = StateStore::from_config_path(&config);
+                for id in ids {
+                    store.record_pending_fee_retry(&id, "0xkept").unwrap();
+                    store
+                        .clear_pending_fee_retry_matching(&doomed, "0xold")
+                        .unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let store = StateStore::from_config_path(&config);
+        for id in &kept {
+            assert_eq!(store.get_pending_fee_retry(id), Some("0xkept".into()));
+        }
+        assert_eq!(store.get_pending_fee_retry(&doomed), None);
     }
 
     #[test]

@@ -1056,3 +1056,29 @@ async fn fee_retry_unsaved_broadcast_in_ephemeral_mode_still_surfaces_the_server
     assert_eq!(node.sent_transactions().len(), 1);
     assert!(ctx.state_store().is_ephemeral());
 }
+
+#[tokio::test]
+async fn fee_retry_explicit_voucher_hash_reused_clears_the_matching_saved_hash() {
+    let api_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "submission_fee_hash_reused",
+            "message": "hash already used",
+        })))
+        .mount(&api_server)
+        .await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut ctx = ctx_for(&api_server);
+    ctx.config_path = tmp.path().join(".taskfast").join("config.json");
+    let task_uuid = uuid::Uuid::parse_str(TASK_ID).unwrap();
+    ctx.state_store()
+        .record_pending_fee_retry(&task_uuid, VOUCHER)
+        .unwrap();
+
+    run(&ctx, retry_with_voucher(VOUCHER))
+        .await
+        .expect_err("server rejects the reused hash");
+    assert_eq!(ctx.state_store().get_pending_fee_retry(&task_uuid), None);
+}
