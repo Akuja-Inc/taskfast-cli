@@ -112,14 +112,12 @@ mod tests {
 
     #[test]
     fn lock_failure_is_a_wallet_error_not_a_usage_error() {
-        use std::os::unix::fs::PermissionsExt;
+        // A lock file cannot be created beside a keystore whose directory
+        // does not exist; that fails on every OS and as any user.
         let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().join("read-only");
-        std::fs::create_dir(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let err = acquire(&dir.join("keystore.json"))
+        let err = acquire(&tmp.path().join("missing").join("keystore.json"))
             .err()
-            .expect("unwritable dir");
+            .expect("missing keystore directory");
         assert!(
             matches!(&err, CmdError::Keystore(m) if m.contains("wallet lock")),
             "got {err:?}"

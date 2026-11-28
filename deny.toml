@@ -40,6 +40,9 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# taskfast-cli dev-depends on itself (path-only) so its integration tests get
+# the `test-support` feature; cargo drops that dev-dependency when packaging.
+allow-wildcard-paths = true
 highlight = "all"
 
 [sources]

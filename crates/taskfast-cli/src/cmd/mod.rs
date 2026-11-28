@@ -25,7 +25,6 @@ use crate::{is_well_known_api_base, Environment, Network};
 
 use taskfast_agent::keystore::KeystoreError;
 use taskfast_chains::tempo::SigningError;
-use taskfast_chains::tempo::TEMPO_MAINNET_CHAIN_ID;
 use taskfast_client::{Error as ClientError, TaskFastClient};
 
 pub mod agent;
@@ -321,14 +320,6 @@ pub(crate) fn parse_wallet_address(raw: &str) -> Result<String, CmdError> {
         .parse()
         .map_err(|e| CmdError::Usage(format!("--wallet is not a valid EVM address: {e}")))?;
     Ok(trimmed.to_string())
-}
-
-pub(crate) fn network_policy_for_chain_id(chain_id: u64) -> Network {
-    if chain_id == TEMPO_MAINNET_CHAIN_ID {
-        Network::Mainnet
-    } else {
-        Network::Testnet
-    }
 }
 
 /// F2 endpoint-override guard. Refuses to run when the effective

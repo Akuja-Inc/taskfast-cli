@@ -228,9 +228,6 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
     let (conn, chain_id, default_stablecoin, task_bond_contract) =
         resolve_network(ctx, &client, &args).await?;
     let rpc_url = conn.rpc_url().to_string();
-    // Unlocks the wallet (validated under --dry-run too), then verifies the
-    // node's chain id unless --dry-run.
-    let session = conn.into_session(ctx, &wallet, "bond post").await?;
     let task_bond: Address = match task_bond_override {
         Some(a) => a,
         None => {
@@ -268,6 +265,12 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
             })?
         }
     };
+
+    // Flags and deployment fields are validated first, so a mistyped
+    // --token or a missing contract fails before the wallet is opened or
+    // the node is asked anything. Unlocks the wallet (validated under
+    // --dry-run too), then verifies the node's chain id unless --dry-run.
+    let session = conn.into_session(ctx, &wallet, "bond post").await?;
 
     // 7. Derive taskRef (server verifier layout) + a random salt.
     let task_ref = compute_task_ref(task_id);

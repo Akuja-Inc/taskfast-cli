@@ -15,6 +15,11 @@ categories = ["command-line-utilities", "api-bindings"]
 [lints]
 workspace = true
 
+[features]
+# In-memory `MockTempoRpc` + `register_mock_rpc` for integration tests; off in
+# release builds.
+test-support = []
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
@@ -53,6 +58,9 @@ url = "2.5.8"
 rust_decimal = { workspace = true }
 
 [dev-dependencies]
+# Integration tests run against the in-memory node. Path-only on purpose: a
+# version here would make `cargo publish` look the package up on crates.io.
+taskfast-cli = { path = ".", features = ["test-support"] }
 alloy-consensus = { workspace = true }
 alloy-eips = { workspace = true }
 wiremock = "0.6.5"

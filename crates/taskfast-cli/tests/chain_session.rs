@@ -42,6 +42,9 @@ const ARBITRATOR_ADDR: &str = "0x0000000000000000000000000000000000000005";
 const ESCROW_ID: &str = "0xabababababababababababababababababababababababababababababababab";
 const CHAIN_ID: u64 = 42_431;
 const ZONE_CHAIN_ID: u64 = 42_432;
+const MAINNET_CHAIN_ID: u64 = taskfast_chains::tempo::TEMPO_MAINNET_CHAIN_ID;
+/// A mainnet Tempo Zone: its own chain id, on neither L1.
+const MAINNET_ZONE_CHAIN_ID: u64 = 421_700_005;
 const FAR_FUTURE: i64 = 4_102_444_800; // 2100-01-01
 const MIN_LIFETIME: i64 = 10_368_000;
 const DISPUTED_AT: u64 = 1_800_000_000;
@@ -56,6 +59,14 @@ fn ctx_for(server: &MockServer) -> Ctx {
         quiet: true,
         allow_custom_endpoints: true,
         ..Default::default()
+    }
+}
+
+/// A `--env prod` run against the same mocked deployment.
+fn prod_ctx_for(server: &MockServer) -> Ctx {
+    Ctx {
+        environment: Environment::Prod,
+        ..ctx_for(server)
     }
 }
 
@@ -698,18 +709,17 @@ async fn escalate_sign_refuses_a_chain_the_deployment_does_not_advertise() {
 async fn escalate_sign_never_follows_a_chain_id_across_networks() {
     let server = MockServer::start().await;
     let keys = fresh_keys();
-    let mainnet = taskfast_chains::tempo::TEMPO_MAINNET_CHAIN_ID;
     mount_networks(
         &server,
         json!({
             "testnet": entry(&server, "testnet", CHAIN_ID),
-            "mainnet": entry(&server, "mainnet", mainnet),
+            "mainnet": entry(&server, "mainnet", MAINNET_CHAIN_ID),
         }),
     )
     .await;
     let mock = node(&format!("{}/rpc/mainnet", server.uri()));
-    mock.set_chain_id(mainnet);
-    mount_signing_params(&server, mainnet, keys.address).await;
+    mock.set_chain_id(MAINNET_CHAIN_ID);
+    mount_signing_params(&server, MAINNET_CHAIN_ID, keys.address).await;
 
     let err = taskfast_cli::cmd::escalate::run(
         &ctx_for(&server),
@@ -722,6 +732,90 @@ async fn escalate_sign_never_follows_a_chain_id_across_networks() {
         "{err:?}"
     );
     assert_eq!(mock.request_count(), 0, "no node I/O before the refusal");
+}
+
+/// A prod run follows a server-issued mainnet Tempo Zone chain id: a zone's
+/// chain id is on neither L1, so only "not the opposite L1" can be asked of
+/// it.
+#[tokio::test]
+async fn escalate_sign_on_prod_follows_a_mainnet_zone_chain_id() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    mount_networks(
+        &server,
+        json!({
+            "mainnet": entry(&server, "mainnet", MAINNET_CHAIN_ID),
+            "tempo-zone-prod": entry(&server, "tempo-zone-prod", MAINNET_ZONE_CHAIN_ID),
+        }),
+    )
+    .await;
+    let zone = node(&format!("{}/rpc/tempo-zone-prod", server.uri()));
+    zone.set_chain_id(MAINNET_ZONE_CHAIN_ID);
+    mount_signing_params(&server, MAINNET_ZONE_CHAIN_ID, keys.address).await;
+
+    taskfast_cli::cmd::escalate::run(
+        &prod_ctx_for(&server),
+        EscalateCommand::Sign(escalate_sign_args(&keys)),
+    )
+    .await
+    .expect("prod zone dispute submitted");
+    assert_eq!(zone.broadcast_chain_ids(), [Some(MAINNET_ZONE_CHAIN_ID)]);
+}
+
+/// A prod run still refuses the testnet L1's chain id, advertised or not.
+#[tokio::test]
+async fn escalate_sign_on_prod_refuses_the_testnet_chain_id() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    mount_networks(
+        &server,
+        json!({
+            "mainnet": entry(&server, "mainnet", MAINNET_CHAIN_ID),
+            "testnet": entry(&server, "testnet", CHAIN_ID),
+        }),
+    )
+    .await;
+    let testnet = node(&format!("{}/rpc/testnet", server.uri()));
+    mount_signing_params(&server, CHAIN_ID, keys.address).await;
+
+    let err = taskfast_cli::cmd::escalate::run(
+        &prod_ctx_for(&server),
+        EscalateCommand::Sign(escalate_sign_args(&keys)),
+    )
+    .await
+    .expect_err("testnet chain on prod");
+    assert!(
+        matches!(&err, CmdError::Validation { code, .. } if code == "chain_id_mismatch"),
+        "{err:?}"
+    );
+    assert_eq!(testnet.request_count(), 0, "no node I/O before the refusal");
+}
+
+/// A mainnet zone's chain id is not in the policy table; a prod run still
+/// enforces mainnet's HTTPS rule on an explicit `--rpc-url`.
+#[tokio::test]
+async fn escalate_sign_on_prod_refuses_a_plain_http_override_for_a_zone() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    mount_networks(
+        &server,
+        json!({
+            "mainnet": entry(&server, "mainnet", MAINNET_CHAIN_ID),
+            "tempo-zone-prod": entry(&server, "tempo-zone-prod", MAINNET_ZONE_CHAIN_ID),
+        }),
+    )
+    .await;
+    mount_signing_params(&server, MAINNET_ZONE_CHAIN_ID, keys.address).await;
+    let mut args = escalate_sign_args(&keys);
+    args.rpc_url = Some("http://rpc.invalid".into());
+
+    let err = taskfast_cli::cmd::escalate::run(&prod_ctx_for(&server), EscalateCommand::Sign(args))
+        .await
+        .expect_err("plain HTTP on prod");
+    assert!(
+        matches!(&err, CmdError::Usage(m) if m.contains("plain-HTTP mainnet")),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]

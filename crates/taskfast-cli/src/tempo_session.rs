@@ -11,14 +11,19 @@
 //! `--dry-run`) and picks the receipt timeout, yielding a [`TempoSession`]
 //! that serializes every broadcast under the exclusive [`wallet_lock`].
 //!
-//! [`MockTempoRpc`] is an in-memory node: register one for an RPC URL with
-//! [`register_mock_rpc`] and the real commands run against it end to end.
+//! `MockTempoRpc` (feature `test-support`, off in release builds) is an
+//! in-memory node: register one for an RPC URL with `register_mock_rpc` and
+//! the real commands run against it end to end.
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+
+#[cfg(any(test, feature = "test-support"))]
+use std::collections::{HashMap, HashSet};
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::{Arc, Mutex, OnceLock};
 
 use alloy_primitives::{Address, Bytes, TxHash, U256};
 use alloy_signer_local::PrivateKeySigner;
@@ -27,16 +32,16 @@ use serde_json::Value;
 
 use taskfast_agent::chain::{decode_u256, IERC20};
 use taskfast_agent::tempo_rpc::{
-    sign_and_broadcast_tx, sign_and_broadcast_tx_for_chain, sign_legacy_tx, signed_tx_chain_id,
-    RpcError, TempoRpcClient,
+    sign_and_broadcast_tx, sign_and_broadcast_tx_for_chain, RpcError, TempoRpcClient,
 };
-use taskfast_chains::tempo::{is_allowed_fee_token, is_known_network, TEMPO_MAINNET_CHAIN_ID};
+#[cfg(any(test, feature = "test-support"))]
+use taskfast_agent::tempo_rpc::{sign_legacy_tx, signed_tx_chain_id};
+use taskfast_chains::tempo::{
+    is_allowed_fee_token, is_known_network, TEMPO_MAINNET_CHAIN_ID, TEMPO_TESTNET_CHAIN_ID,
+};
 use taskfast_client::{NetworkConfigEntry, NetworkConfigResponse, TaskFastClient};
 
-use crate::cmd::{
-    network_policy_for_chain_id, resolve_duration, validate_override_rpc_url, wallet_args,
-    CmdError, Ctx,
-};
+use crate::cmd::{resolve_duration, validate_override_rpc_url, wallet_args, CmdError, Ctx};
 use crate::wallet_lock::{self, WalletGuard};
 use crate::{Environment, Network};
 
@@ -73,7 +78,10 @@ pub enum ChainTarget {
     /// that entry advertises.
     Network(Network),
     /// No server-issued chain: the environment's entry supplies the default
-    /// proxy route, and the node's own chain id is what gets signed for.
+    /// proxy route, and the node must be on the chain that entry advertises.
+    /// With a `--rpc-url` override nothing pins the chain, and the node's own
+    /// chain id is what gets signed for (the fee flow's allowlist is keyed by
+    /// it).
     Node,
 }
 
@@ -269,7 +277,8 @@ impl ChainConnection {
     ///   so it needs no TaskFast credentials.
     /// * [`ChainTarget::ChainId`] always consults the deployment, override or
     ///   not, `--dry-run` included: a server-issued chain id is only fit to
-    ///   sign for if the deployment advertises it, and dry-run still signs.
+    ///   sign for if the deployment advertises it, and never when it is (or
+    ///   is advertised as) the opposite L1 network; dry-run still signs.
     ///
     /// Makes no node request; [`Self::into_session`] verifies the node unless
     /// `--dry-run`.
@@ -282,9 +291,15 @@ impl ChainConnection {
         // The endpoint guard is pure: refuse an unvetted override before any
         // request to the deployment.
         if let Some(url) = rpc_override {
+            // Mainnet rules (HTTPS off loopback) whenever the run itself is
+            // mainnet or the chain is the mainnet L1: a mainnet Tempo Zone's
+            // chain id is not in the policy table, so the run's network has
+            // to vouch for it.
             let policy = match target {
-                ChainTarget::ChainId(chain_id) => {
-                    network_policy_for_chain_id(chain_id_u64(chain_id, "server-issued")?)
+                ChainTarget::ChainId(chain_id)
+                    if chain_id_u64(chain_id, "server-issued")? == TEMPO_MAINNET_CHAIN_ID =>
+                {
+                    Network::Mainnet
                 }
                 _ => ctx.environment.network(),
             };
@@ -303,31 +318,54 @@ impl ChainConnection {
                         enforce_network_invariant(ctx, cfg)?;
                         let expected = chain_id_u64(chain_id, "server-issued")?;
                         let network = ctx.environment.network();
-                        let own_entry = cfg
-                            .entry(network.as_str())
-                            .is_ok_and(|e| e.chain_id == chain_id);
-                        // The lookup never falls back across networks: a
-                        // server-issued chain id may only leave the configured
-                        // network's own entry for a chain of that same network
-                        // (testnet vs mainnet).
-                        if !own_entry && network_policy_for_chain_id(expected) != network {
+                        // Never the opposite L1 network, by chain id or by
+                        // the name of the entry advertising it. That is all
+                        // the CLI can tell apart: a Tempo Zone venue has its
+                        // own chain id that says which L1 it sits on only
+                        // through the deployment's entry for it.
+                        let opposite_l1 = match network {
+                            Network::Mainnet => ("testnet", TEMPO_TESTNET_CHAIN_ID),
+                            Network::Testnet => ("mainnet", TEMPO_MAINNET_CHAIN_ID),
+                        };
+                        if expected == opposite_l1.1 {
                             return Err(chain_id_mismatch(format!(
-                                "the server issued chain_id={chain_id}, which is not a {} \
-                                 chain; refusing to sign or send",
+                                "the server issued chain_id={chain_id}, the opposite L1 \
+                                 network's chain, for a `{}` run; refusing to sign or send",
                                 network.as_str()
                             )));
                         }
-                        let (name, entry) = cfg.entry_by_chain_id(chain_id).map_err(|_| {
-                            chain_id_mismatch(format!(
-                                "the server issued chain_id={chain_id} but the deployment at {} \
-                                 advertises no such chain; refusing to sign or send",
-                                ctx.base_url()
-                            ))
-                        })?;
-                        Some(Selected {
-                            entry: entry.clone(),
-                            name: name.to_string(),
-                            expected: Some(expected),
+                        // The configured network's own entry when it is the one
+                        // on that chain; otherwise whoever advertises the chain.
+                        Some(match cfg.entry(network.as_str()) {
+                            Ok(entry) if entry.chain_id == chain_id => Selected {
+                                entry: entry.clone(),
+                                name: network.as_str().to_string(),
+                                expected: Some(expected),
+                            },
+                            _ => {
+                                let (name, entry) =
+                                    cfg.entry_by_chain_id(chain_id).map_err(|_| {
+                                        chain_id_mismatch(format!(
+                                        "the server issued chain_id={chain_id} but the deployment \
+                                         at {} advertises no such chain; refusing to sign or send",
+                                        ctx.base_url()
+                                    ))
+                                    })?;
+                                if name == opposite_l1.0 {
+                                    return Err(chain_id_mismatch(format!(
+                                        "the server issued chain_id={chain_id}, advertised as \
+                                         `{name}` by the deployment at {}: the opposite L1 network \
+                                         for a `{}` run; refusing to sign or send",
+                                        ctx.base_url(),
+                                        network.as_str()
+                                    )));
+                                }
+                                Selected {
+                                    entry: entry.clone(),
+                                    name: name.to_string(),
+                                    expected: Some(expected),
+                                }
+                            }
                         })
                     }
                     ChainTarget::Network(network) => {
@@ -338,10 +376,18 @@ impl ChainConnection {
                             ..s
                         })
                     }
-                    // Only the proxy route is consulted; the node's own chain
-                    // id is what gets signed for (the fee flow's allowlist is
-                    // keyed by it).
-                    ChainTarget::Node => Some(network_entry(ctx, cfg, ctx.environment.network())?),
+                    // Only the proxy route is consulted, but through it the
+                    // node must still be on the chain the entry advertises:
+                    // a proxy misrouted to another network's node (same token
+                    // addresses, real funds) must not pass.
+                    ChainTarget::Node => {
+                        let s = network_entry(ctx, cfg, ctx.environment.network())?;
+                        let expected = chain_id_u64(s.entry.chain_id, "advertised")?;
+                        Some(Selected {
+                            expected: Some(expected),
+                            ..s
+                        })
+                    }
                 }
             }
         };
@@ -366,13 +412,7 @@ impl ChainConnection {
                 ));
             }
         };
-        let backend = match registered_mock(&rpc_url) {
-            Some(mock) => TempoRpcBackend::Mock(mock),
-            None => TempoRpcBackend::Client(TempoRpcClient::new(
-                ctx.rpc_http_client(client, &rpc_url),
-                rpc_url.clone(),
-            )),
-        };
+        let backend = TempoRpcBackend::for_url(ctx, client, &rpc_url);
         Ok(Self {
             backend,
             rpc_url,
@@ -399,19 +439,7 @@ impl ChainConnection {
     /// TaskFast credentials, and nothing server-side pins the chain.
     pub fn open_override(ctx: &Ctx, url: &str) -> Result<Self, CmdError> {
         validate_override_rpc_url(url, ctx.environment.network(), ctx.allow_custom_endpoints)?;
-        let backend = match registered_mock(url) {
-            Some(mock) => TempoRpcBackend::Mock(mock),
-            None => {
-                // The proxy needs the `X-API-Key` header; a bare upstream node
-                // must not receive it.
-                let http = if is_proxy_rpc_url(url, ctx.base_url()) {
-                    ctx.client()?.http_client()
-                } else {
-                    reqwest::Client::new()
-                };
-                TempoRpcBackend::Client(TempoRpcClient::new(http, url))
-            }
-        };
+        let backend = TempoRpcBackend::for_override(ctx, url)?;
         Ok(Self {
             backend,
             rpc_url: url.to_string(),
@@ -651,10 +679,23 @@ impl TempoSession {
         decode_u256(&raw).map_err(CmdError::Decode)
     }
 
-    /// Send a mutating transaction under the exclusive wallet lock without waiting for receipt.
+    /// Send a mutating transaction under the exclusive wallet lock without
+    /// waiting for receipt, signed for the pinned chain id.
     pub async fn send_transaction(&self, to: Address, calldata: Bytes) -> Result<TxHash, CmdError> {
+        self.send_transaction_for(self.chain.chain_id, to, calldata)
+            .await
+    }
+
+    /// [`Self::send_transaction`] signed for `chain_id` when the caller
+    /// checked something against it (the fee flow's allowlist).
+    async fn send_transaction_for(
+        &self,
+        chain_id: Option<u64>,
+        to: Address,
+        calldata: Bytes,
+    ) -> Result<TxHash, CmdError> {
         let _guard = self.acquire_lock()?;
-        self.broadcast(to, calldata)
+        self.broadcast(to, calldata, chain_id)
             .await
             .map_err(|e| CmdError::Server(format!("tempo rpc: {e}")))
     }
@@ -682,7 +723,7 @@ impl TempoSession {
             )
         };
         let tx_hash = self
-            .broadcast(to, calldata)
+            .broadcast(to, calldata, self.chain.chain_id)
             .await
             .map_err(|e| CmdError::Server(format!("{broadcast_msg}: {e}")))?;
         let ok = self
@@ -779,7 +820,10 @@ impl TempoSession {
             token_address_str, chain_id, self.chain.rpc_url
         );
 
-        self.send_transaction(token_address, calldata).await
+        // Signed for the chain id the allowlist was checked against, even on
+        // the unpinned (`TempoSession::new`) path.
+        self.send_transaction_for(Some(chain_id), token_address, calldata)
+            .await
     }
 
     /// Acquire the exclusive wallet lock for the keystore path, if configured.
@@ -791,10 +835,15 @@ impl TempoSession {
         }
     }
 
-    async fn broadcast(&self, to: Address, calldata: Bytes) -> Result<TxHash, String> {
+    async fn broadcast(
+        &self,
+        to: Address,
+        calldata: Bytes,
+        chain_id: Option<u64>,
+    ) -> Result<TxHash, String> {
         self.chain
             .backend
-            .broadcast(&self.signer, to, calldata, self.chain.chain_id)
+            .broadcast(&self.signer, to, calldata, chain_id)
             .await
             .map_err(|e| e.to_string())
     }
@@ -812,13 +861,44 @@ impl TempoSession {
 #[derive(Clone, Debug)]
 pub(crate) enum TempoRpcBackend {
     Client(TempoRpcClient),
+    #[cfg(any(test, feature = "test-support"))]
     Mock(Arc<MockTempoRpc>),
 }
 
 impl TempoRpcBackend {
+    /// A registered in-memory node (test support), else a live client with
+    /// the client the URL's origin calls for.
+    fn for_url(ctx: &Ctx, client: &TaskFastClient, rpc_url: &str) -> Self {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(mock) = registered_mock(rpc_url) {
+            return Self::Mock(mock);
+        }
+        Self::Client(TempoRpcClient::new(
+            ctx.rpc_http_client(client, rpc_url),
+            rpc_url,
+        ))
+    }
+
+    /// [`Self::for_url`] for an explicit `--rpc-url` with no deployment
+    /// behind it. The proxy needs the `X-API-Key` header; a bare upstream
+    /// node must not receive it.
+    fn for_override(ctx: &Ctx, url: &str) -> Result<Self, CmdError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(mock) = registered_mock(url) {
+            return Ok(Self::Mock(mock));
+        }
+        let http = if is_proxy_rpc_url(url, ctx.base_url()) {
+            ctx.client()?.http_client()
+        } else {
+            reqwest::Client::new()
+        };
+        Ok(Self::Client(TempoRpcClient::new(http, url)))
+    }
+
     async fn chain_id(&self) -> Result<u64, RpcError> {
         match self {
             Self::Client(client) => client.chain_id().await,
+            #[cfg(any(test, feature = "test-support"))]
             Self::Mock(mock) => {
                 mock.touch();
                 Ok(mock.chain_id.load(Ordering::SeqCst))
@@ -837,6 +917,7 @@ impl TempoRpcBackend {
                 Some(from) => client.eth_call_from(from, to, calldata).await,
                 None => client.eth_call(to, calldata).await,
             },
+            #[cfg(any(test, feature = "test-support"))]
             Self::Mock(mock) => mock.eth_call(to, calldata),
         }
     }
@@ -844,6 +925,7 @@ impl TempoRpcBackend {
     async fn raw_call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         match self {
             Self::Client(client) => client.raw_call(method, params).await,
+            #[cfg(any(test, feature = "test-support"))]
             Self::Mock(mock) => mock.raw_call(method, params),
         }
     }
@@ -862,6 +944,7 @@ impl TempoRpcBackend {
                 }
                 None => sign_and_broadcast_tx(client, signer, to, calldata).await,
             },
+            #[cfg(any(test, feature = "test-support"))]
             Self::Mock(mock) => mock.broadcast(signer, to, calldata, chain_id).await,
         }
     }
@@ -873,6 +956,7 @@ impl TempoRpcBackend {
                     .wait_for_receipt(tx_hash, timeout, RECEIPT_POLL_INTERVAL)
                     .await
             }
+            #[cfg(any(test, feature = "test-support"))]
             Self::Mock(mock) => {
                 mock.touch();
                 Ok(mock
@@ -895,21 +979,25 @@ impl TempoRpcBackend {
 /// of HTTP, so the real signing commands run end to end without a JSON-RPC
 /// wiremock.
 /// A scripted `eth_call` answer: `Ok(bytes)` or a revert message.
+#[cfg(any(test, feature = "test-support"))]
 type ScriptedCall = Result<Vec<u8>, String>;
 
+/// In-memory node for tests; not built unless the `test-support` feature is on.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 #[derive(Debug)]
 pub struct MockTempoRpc {
     /// Chain the node reports from `eth_chainId`.
-    pub chain_id: AtomicU64,
-    pub balances: Mutex<HashMap<(Address, Address), U256>>,
-    pub allowances: Mutex<HashMap<(Address, Address, Address), U256>>,
-    pub broadcast_delay: Mutex<Option<Duration>>,
-    pub active_broadcasts: AtomicUsize,
-    pub max_concurrent_broadcasts: AtomicUsize,
+    chain_id: AtomicU64,
+    balances: Mutex<HashMap<(Address, Address), U256>>,
+    allowances: Mutex<HashMap<(Address, Address, Address), U256>>,
+    broadcast_delay: Mutex<Option<Duration>>,
+    active_broadcasts: AtomicUsize,
+    max_concurrent_broadcasts: AtomicUsize,
     /// Receipt status per tx hash; a hash with no entry succeeded.
-    pub receipts: Mutex<HashMap<TxHash, bool>>,
+    receipts: Mutex<HashMap<TxHash, bool>>,
     /// Every broadcast, in order: `(to, calldata)`.
-    pub sent_transactions: Mutex<Vec<(Address, Bytes)>>,
+    sent_transactions: Mutex<Vec<(Address, Bytes)>>,
     nonce: AtomicU64,
     /// `eth_call` results by calldata selector: `Ok(bytes)` or a revert message.
     calls: Mutex<HashMap<[u8; 4], ScriptedCall>>,
@@ -933,6 +1021,7 @@ pub struct MockTempoRpc {
     signed_chain_ids: Mutex<Vec<Option<u64>>>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Default for MockTempoRpc {
     fn default() -> Self {
         Self {
@@ -958,6 +1047,7 @@ impl Default for MockTempoRpc {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl MockTempoRpc {
     pub fn new() -> Self {
         Self::default()
@@ -1129,12 +1219,6 @@ impl MockTempoRpc {
         if let Some(d) = delay {
             tokio::time::sleep(d).await;
         }
-        if let Ok(call) = IERC20::approveCall::abi_decode(&calldata) {
-            self.allowances
-                .lock()
-                .unwrap()
-                .insert((to, from, call.spender), call.amount);
-        }
         self.sent_transactions
             .lock()
             .unwrap()
@@ -1146,6 +1230,7 @@ impl MockTempoRpc {
                 message: message.clone(),
             });
         }
+        let approve = IERC20::approveCall::abi_decode(&calldata).ok();
         let nonce = self.nonce.fetch_add(1, Ordering::SeqCst);
         let node_chain = self.chain_id.load(Ordering::SeqCst);
         let (hash, raw) = sign_legacy_tx(
@@ -1164,12 +1249,23 @@ impl MockTempoRpc {
         self.tx_hashes.lock().unwrap().push(hash);
         let reverted = self.receipt_reverts.lock().unwrap().contains(&selector);
         self.receipts.lock().unwrap().insert(hash, !reverted);
+        // An approve only takes effect if it mined; a reverted one changes
+        // nothing.
+        if !reverted {
+            if let Some(call) = approve {
+                self.allowances
+                    .lock()
+                    .unwrap()
+                    .insert((to, from, call.spender), call.amount);
+            }
+        }
 
         self.active_broadcasts.fetch_sub(1, Ordering::SeqCst);
         Ok(hash)
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn selector_of(calldata: &[u8]) -> [u8; 4] {
     let mut selector = [0u8; 4];
     let n = calldata.len().min(4);
@@ -1179,12 +1275,15 @@ fn selector_of(calldata: &[u8]) -> [u8; 4] {
 
 /// In-memory nodes by RPC URL. Tests register one under a unique URL and
 /// point the command at it; nothing else ever reads this.
+#[cfg(any(test, feature = "test-support"))]
 static MOCK_RPCS: OnceLock<Mutex<HashMap<String, Arc<MockTempoRpc>>>> = OnceLock::new();
 
 /// Serve every connection to `rpc_url` from `mock` instead of HTTP. Test
 /// support: each test registers its node under its own URL (or under the proxy
 /// URL its mocked `/config/network` advertises), so parallel tests never share
 /// a node.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn register_mock_rpc(rpc_url: &str, mock: Arc<MockTempoRpc>) {
     MOCK_RPCS
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -1193,6 +1292,7 @@ pub fn register_mock_rpc(rpc_url: &str, mock: Arc<MockTempoRpc>) {
         .insert(rpc_url.to_string(), mock);
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn registered_mock(rpc_url: &str) -> Option<Arc<MockTempoRpc>> {
     MOCK_RPCS
         .get()
@@ -1359,6 +1459,61 @@ mod tests {
             "it was handed to the node"
         );
         assert_eq!(mock.active_broadcasts.load(Ordering::SeqCst), 0);
+    }
+
+    /// An `approve` the node refused, or that reverted, changed nothing.
+    #[tokio::test]
+    async fn mock_approve_updates_the_allowance_only_when_it_mined() {
+        let mock = Arc::new(MockTempoRpc::new());
+        let session =
+            TempoSession::from_mock(test_signer(), None, mock.clone(), Duration::from_secs(1));
+        let token = Address::repeat_byte(0x01);
+        let spender = Address::repeat_byte(0x02);
+        let approve: Bytes = IERC20::approveCall {
+            spender,
+            amount: U256::from(100),
+        }
+        .abi_encode()
+        .into();
+        let selector = selector_of(&approve);
+        let allowance = || async {
+            session
+                .erc20_allowance(token, session.address(), spender)
+                .await
+                .unwrap()
+        };
+
+        mock.reject_broadcast(selector, "nonce too low");
+        session
+            .send_transaction(token, approve.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(allowance().await, U256::ZERO, "refused by the node");
+
+        mock.broadcast_rejects.lock().unwrap().remove(&selector);
+        mock.revert_receipt(selector);
+        session
+            .send_transaction_and_wait(token, approve, "approve", None)
+            .await
+            .unwrap_err();
+        assert_eq!(allowance().await, U256::ZERO, "reverted on chain");
+
+        mock.receipt_reverts.lock().unwrap().remove(&selector);
+        session
+            .send_transaction_and_wait(
+                token,
+                IERC20::approveCall {
+                    spender,
+                    amount: U256::from(100),
+                }
+                .abi_encode()
+                .into(),
+                "approve",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowance().await, U256::from(100));
     }
 
     #[test]
@@ -1543,6 +1698,137 @@ mod tests {
             matches!(&err, CmdError::Validation { code, .. } if code == "chain_id_mismatch"),
             "{err:?}"
         );
+    }
+
+    /// The live path over real HTTP (nothing registered): the proxy call
+    /// carries the API key, `eth_chainId` is asked exactly once and the tx
+    /// is signed for that chain, the receipt is polled; an off-host override
+    /// never sees the key.
+    #[tokio::test]
+    async fn live_path_pins_the_verified_chain_and_routes_the_api_key() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+        /// `(method, api key, first param)` of every JSON-RPC request.
+        type Seen = Arc<Mutex<Vec<(String, Option<String>, String)>>>;
+        async fn rpc_node(mount: &MockServer, route: &str, seen: Seen) {
+            Mock::given(method("POST"))
+                .and(path(route))
+                .respond_with(move |req: &Request| {
+                    let body: Value = serde_json::from_slice(&req.body).unwrap();
+                    let name = body["method"].as_str().unwrap().to_string();
+                    let key = req
+                        .headers
+                        .get("x-api-key")
+                        .map(|v| v.to_str().unwrap().to_string());
+                    let first = body["params"][0]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_default();
+                    seen.lock().unwrap().push((name.clone(), key, first));
+                    let result = match name.as_str() {
+                        "eth_chainId" => serde_json::json!("0xa5bf"),
+                        "eth_getTransactionCount" => serde_json::json!("0x0"),
+                        "eth_gasPrice" => serde_json::json!("0x1"),
+                        "eth_estimateGas" => serde_json::json!("0x10000"),
+                        "eth_sendRawTransaction" => {
+                            serde_json::json!(format!("{:#x}", TxHash::repeat_byte(0xab)))
+                        }
+                        "eth_getTransactionReceipt" => serde_json::json!({ "status": "0x1" }),
+                        _ => serde_json::Value::Null,
+                    };
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1, "result": result,
+                    }))
+                })
+                .mount(mount)
+                .await;
+        }
+
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/config/network"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "networks": { "testnet": { "chain_id": 42431, "rpc_url": format!("{uri}/rpc/testnet"), "wss_url": null, "explorer_url": null } }
+            })))
+            .mount(&server)
+            .await;
+        let proxy_seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        rpc_node(&server, "/rpc/testnet", proxy_seen.clone()).await;
+        let ctx = Ctx {
+            api_key: Some("k".into()),
+            environment: Environment::Local,
+            api_base: Some(uri.clone()),
+            ..Default::default()
+        };
+        let client = ctx.client().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keystore_path = tmp.path().join("wallet.json");
+        taskfast_agent::keystore::save_signer(&test_signer(), &keystore_path, "pw").unwrap();
+        let password = tmp.path().join("pw");
+        std::fs::write(&password, b"pw").unwrap();
+        let wallet = WalletOpts {
+            keystore: Some(keystore_path.to_str().unwrap()),
+            password_file: Some(&password),
+            ..Default::default()
+        };
+        let session =
+            ChainConnection::resolve(&ctx, &client, None, ChainTarget::Network(Network::Testnet))
+                .await
+                .unwrap()
+                .into_session(&ctx, &wallet, "test")
+                .await
+                .unwrap();
+        let tx = session
+            .send_transaction_and_wait(
+                Address::repeat_byte(0x05),
+                Bytes::from_static(&[0xaa, 0xbb, 0xcc, 0xdd]),
+                "test",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(tx, TxHash::repeat_byte(0xab));
+
+        let seen = proxy_seen.lock().unwrap().clone();
+        let methods: Vec<&str> = seen.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(
+            methods,
+            [
+                "eth_chainId",
+                "eth_getTransactionCount",
+                "eth_gasPrice",
+                "eth_estimateGas",
+                "eth_sendRawTransaction",
+                "eth_getTransactionReceipt",
+            ],
+            "verified once, then signed without asking again"
+        );
+        assert!(
+            seen.iter().all(|r| r.1.as_deref() == Some("k")),
+            "the deployment's proxy always carries the API key: {seen:?}"
+        );
+        let raw = hex::decode(seen[4].2.trim_start_matches("0x")).unwrap();
+        assert_eq!(signed_tx_chain_id(&raw).unwrap(), Some(42431));
+
+        // An off-host node with --allow-custom-endpoints: verified, but the
+        // key never leaves the deployment.
+        let other = MockServer::start().await;
+        let other_seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        rpc_node(&other, "/", other_seen.clone()).await;
+        let ctx = Ctx {
+            allow_custom_endpoints: true,
+            ..ctx
+        };
+        ChainConnection::open_override(&ctx, &other.uri())
+            .unwrap()
+            .verify_node()
+            .await
+            .unwrap();
+        let seen = other_seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "eth_chainId");
+        assert!(seen[0].1.is_none(), "off-host node saw the API key");
     }
 
     #[tokio::test]

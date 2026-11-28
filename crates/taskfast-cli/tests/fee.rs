@@ -291,11 +291,17 @@ async fn fee_retry_sends_nothing_when_server_reports_retry_not_needed() {
 }
 
 async fn mount_network_config_mock(server: &MockServer) -> Arc<MockTempoRpc> {
+    mount_network_config_mock_on(server, 42431).await
+}
+
+/// Advertise a `testnet` entry on `chain_id`, served by a node on the same
+/// chain registered under the proxy URL.
+async fn mount_network_config_mock_on(server: &MockServer, chain_id: u64) -> Arc<MockTempoRpc> {
     let uri = server.uri();
     let payload = json!({
         "networks": {
             "testnet": {
-                "chain_id": 42431,
+                "chain_id": chain_id,
                 "rpc_url": format!("{uri}/rpc/testnet"),
                 "wss_url": "wss://testnet.example.invalid",
                 "explorer_url": "https://explorer-testnet.example.invalid",
@@ -309,18 +315,20 @@ async fn mount_network_config_mock(server: &MockServer) -> Arc<MockTempoRpc> {
         .mount(server)
         .await;
     let node = Arc::new(MockTempoRpc::new());
-    node.set_chain_id(42431);
+    node.set_chain_id(chain_id);
     register_mock_rpc(&format!("{uri}/rpc/testnet"), node.clone());
     node
 }
 
+/// Through the proxy the node must be on the entry's chain, so an unknown chain
+/// there is a `chain_id_mismatch`; the allowlist guard covers a deployment
+/// that advertises the unknown chain itself.
 #[tokio::test]
 async fn fee_retry_guards_unknown_chain_id() {
     let api_server = MockServer::start().await;
     let wallet = create_test_wallet();
 
-    let node = mount_network_config_mock(&api_server).await;
-    node.set_chain_id(999_999);
+    let node = mount_network_config_mock_on(&api_server, 999_999).await;
     mock_task_status(&api_server, Some("retry_submission_fee"), None).await;
     mock_payment_data(&api_server, TOKEN_ADDR).await;
 
@@ -342,6 +350,38 @@ async fn fee_retry_guards_unknown_chain_id() {
         }
         other => panic!("expected Validation unknown_chain, got {other:?}"),
     }
+    assert!(node.sent_transactions().is_empty(), "never signed");
+}
+
+/// PathUSD has the same address on both L1s, so a proxy misrouted to the
+/// other network's node passes the allowlist; the proxy route pins the
+/// entry's chain id so it fails before anything is signed.
+#[tokio::test]
+async fn fee_retry_refuses_a_proxy_node_on_another_chain() {
+    let api_server = MockServer::start().await;
+    let wallet = create_test_wallet();
+
+    let node = mount_network_config_mock(&api_server).await;
+    node.set_chain_id(4217);
+    mock_task_status(&api_server, Some("retry_submission_fee"), None).await;
+    mock_payment_data(&api_server, TOKEN_ADDR).await;
+
+    let cmd = retry_wallet(
+        &wallet.keystore_path,
+        &wallet.password_path,
+        &wallet.address,
+        None,
+    );
+    let mut ctx = ctx_for(&api_server);
+    ctx.environment = Environment::Local;
+
+    let err = run(&ctx, cmd)
+        .await
+        .expect_err("mainnet node behind a testnet proxy");
+    assert!(
+        matches!(&err, CmdError::Validation { code, .. } if code == "chain_id_mismatch"),
+        "{err:?}"
+    );
     assert!(node.sent_transactions().is_empty(), "never signed");
 }
 
