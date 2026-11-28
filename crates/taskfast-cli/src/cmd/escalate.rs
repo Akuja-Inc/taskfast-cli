@@ -58,7 +58,6 @@ use taskfast_agent::chain::{
     decode_escrow_state, decode_u256, dispute_calldata, dispute_timeout_calldata,
     disputed_at_calldata, get_escrow_calldata, timeout_resolve_calldata, ESCROW_STATE_DISPUTED,
 };
-use taskfast_client::map_api_error;
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
@@ -196,10 +195,10 @@ async fn reject_remedy(ctx: &Ctx, args: RejectRemedyArgs) -> CmdResult {
         ));
     }
     let client = ctx.client()?;
-    let resp = match client.inner().reject_remedy(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(refusal(map_api_error(e).await)),
-    };
+    let resp = client
+        .call(|c| c.reject_remedy(&task_id))
+        .await
+        .map_err(refusal)?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -220,10 +219,10 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     let client = ctx.client()?;
 
     // 1. Server-derived params. Nothing below is computed locally.
-    let params = match client.inner().get_dispute_signing_params(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(refusal(map_api_error(e).await)),
-    };
+    let params = client
+        .call(|c| c.get_dispute_signing_params(&task_id))
+        .await
+        .map_err(refusal)?;
     let chain_id = params.chain_id.ok_or_else(|| missing("chain_id"))?;
     let raw_contract = params
         .task_escrow_contract
@@ -414,10 +413,10 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
     let client = ctx.client()?;
 
     // 1. The task's own escrow id + venue domain (party-gated: null for non-parties).
-    let task = match client.inner().get_task(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(refusal(map_api_error(e).await)),
-    };
+    let task = client
+        .call(|c| c.get_task(&task_id))
+        .await
+        .map_err(refusal)?;
     let target = chain_target(&task, "nothing to resolve")?;
     let (contract, escrow_id, chain_id) = (target.contract, target.escrow_id, target.chain_id);
 

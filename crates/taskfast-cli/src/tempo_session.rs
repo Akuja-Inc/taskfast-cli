@@ -170,11 +170,11 @@ pub(crate) fn rpc_http_client(
     ctx: &Ctx,
     client: &TaskFastClient,
     rpc_url: &str,
-) -> reqwest::Client {
+) -> Result<reqwest::Client, CmdError> {
     if is_proxy_rpc_url(rpc_url, ctx.base_url()) {
-        client.http_client()
+        Ok(client.rpc_client(rpc_url)?)
     } else {
-        reqwest::Client::new()
+        Ok(reqwest::Client::new())
     }
 }
 
@@ -474,7 +474,7 @@ impl ChainConnection {
                 ));
             }
         };
-        let backend = TempoRpcBackend::for_url(ctx, client, &rpc_url);
+        let backend = TempoRpcBackend::for_url(ctx, client, &rpc_url)?;
         Ok(Self {
             backend,
             rpc_url,
@@ -928,15 +928,15 @@ pub(crate) enum TempoRpcBackend {
 impl TempoRpcBackend {
     /// A registered in-memory node (test support), else a live client with
     /// the client the URL's origin calls for.
-    fn for_url(ctx: &Ctx, client: &TaskFastClient, rpc_url: &str) -> Self {
+    fn for_url(ctx: &Ctx, client: &TaskFastClient, rpc_url: &str) -> Result<Self, CmdError> {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(mock) = registered_mock(rpc_url) {
-            return Self::Mock(mock);
+            return Ok(Self::Mock(mock));
         }
-        Self::Client(TempoRpcClient::new(
-            rpc_http_client(ctx, client, rpc_url),
+        Ok(Self::Client(TempoRpcClient::new(
+            rpc_http_client(ctx, client, rpc_url)?,
             rpc_url,
-        ))
+        )))
     }
 
     /// [`Self::for_url`] for an explicit `--rpc-url` with no deployment
@@ -948,7 +948,7 @@ impl TempoRpcBackend {
             return Ok(Self::Mock(mock));
         }
         let http = if is_proxy_rpc_url(url, ctx.base_url()) {
-            ctx.client()?.http_client()
+            ctx.client()?.rpc_client(url)?
         } else {
             reqwest::Client::new()
         };

@@ -16,7 +16,7 @@
 //! `POST /tasks/{id}/settle`. Dry-run skips the final POST but still signs
 //! so the envelope carries a real signature the caller can audit.
 //!
-//! Error mapping delegates to the shared `map_api_error` (401|403→Auth,
+//! Error mapping delegates to the shared `TaskFastClient::call` (401|403→Auth,
 //! 409|422→Validation); signing/keystore failures surface as `Wallet`
 //! (exit 5) via `SigningError`/`KeystoreError` → `CmdError`.
 
@@ -34,7 +34,6 @@ use crate::tempo_session::{load_wallet, WalletOpts};
 
 use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
 use taskfast_client::api::types::SettleTaskBody;
-use taskfast_client::map_api_error;
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -82,10 +81,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     let client = ctx.client()?;
 
     // 2. Fetch task detail — we need escrow_id + settlement_deadline.
-    let task = match client.inner().get_task(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let task = client.call(|c| c.get_task(&task_id)).await?;
 
     // Fail-closed budget gate before keystore prompt or signing — a
     // fat-finger settle on a huge task should die immediately.
@@ -230,10 +226,9 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     let body = SettleTaskBody {
         signature: signature_hex,
     };
-    let resp = match client.inner().settle_task(&task_id, &body).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => {
-            let err = map_api_error(e).await;
+    let resp = match client.call(|c| c.settle_task(&task_id, &body)).await {
+        Ok(v) => v,
+        Err(err) => {
             // gh#143: auto-disburse can win the race between our preflight
             // GET and this signed POST — a 409 `task_not_eligible` /
             // `escrow_not_ready` then describes a task that already settled.
@@ -243,8 +238,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
             if matches!(&err, taskfast_client::Error::Validation { code, .. }
                 if matches!(code.as_str(), "task_not_eligible" | "escrow_not_ready"))
             {
-                if let Ok(advanced) = client.inner().get_task(&task_id).await {
-                    let advanced = advanced.into_inner();
+                if let Ok(advanced) = client.call(|c| c.get_task(&task_id)).await {
                     if let Some(note) = advanced.status.as_deref().and_then(settlement_note) {
                         return Ok(Envelope::success(
                             ctx.environment,

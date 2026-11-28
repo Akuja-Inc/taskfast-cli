@@ -39,7 +39,6 @@ use taskfast_client::api::types::{
     TaskDraftPrepareRequestPickupDeadlineHours, TaskDraftSubmitRequest,
     TaskDraftSubmitRequestSignature,
 };
-use taskfast_client::map_api_error;
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -206,10 +205,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     let conn = ChainConnection::resolve(ctx, &client, wallet.rpc_url, ChainTarget::Node).await?;
 
     // Phase 1 — prepare. Server returns ERC-20 transfer calldata + draft_id.
-    let prep = match client.inner().prepare_task_draft(&prep_body).await {
-        Ok(r) => r.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let prep = client.call(|c| c.prepare_task_draft(&prep_body)).await?;
 
     let calldata = decode_0x_bytes(&prep.payload_to_sign)
         .map_err(|e| CmdError::Server(format!("server returned invalid payload_to_sign: {e}")))?;
@@ -230,14 +226,9 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         .parse()
         .map_err(|e| CmdError::Server(format!("tx hash rejected by schema pattern: {e}")))?;
     let submit_body = TaskDraftSubmitRequest { signature };
-    let submitted = match client
-        .inner()
-        .submit_task_draft(&prep.draft_id, &submit_body)
-        .await
-    {
-        Ok(r) => r.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let submitted = client
+        .call(|c| c.submit_task_draft(&prep.draft_id, &submit_body))
+        .await?;
 
     // gh#156: a task created at `blocked_on_submission_fee_debt` looks like a
     // stalled post unless the envelope says otherwise. The draft-submit

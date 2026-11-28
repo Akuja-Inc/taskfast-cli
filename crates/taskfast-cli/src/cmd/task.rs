@@ -4,7 +4,7 @@
 //! Read (am-e3u.4): `list` + `get`. Worker mutation (am-edc): `submit`.
 //! Poster mutations (am-plyy): `approve` / `dispute` / `cancel` — all
 //! unsigned per spec; server owns the state-machine gates and returns
-//! 403/409 for role/state violations, which we surface via `map_api_error`.
+//! 403/409 for role/state violations, which we surface via `TaskFastClient::call`.
 //! The client-signed settle step (am-e3u.7, server bead am-iyp6) lives at
 //! top-level `taskfast settle` — it's a separate verb because it signs an
 //! EIP-712 `DistributionApproval`, not just an auth-gated state transition.
@@ -36,7 +36,6 @@ use crate::envelope::Envelope;
 use taskfast_client::api::types::{
     CompletionSubmission, DisputeRequest, ListMyTasksStatusItem, TaskEditRequest,
 };
-use taskfast_client::map_api_error;
 use taskfast_client::TaskFastClient;
 
 #[derive(Debug, Subcommand)]
@@ -313,10 +312,7 @@ async fn approve(ctx: &Ctx, args: ApproveArgs) -> CmdResult {
         ));
     }
     let client = ctx.client()?;
-    let resp = match client.inner().approve_task(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.approve_task(&task_id)).await?;
     let payout_approval = if resp.status.as_deref() == Some("complete") {
         super::escrow::payout_approval_after_approve(
             ctx,
@@ -367,10 +363,7 @@ async fn dispute(ctx: &Ctx, args: DisputeArgs) -> CmdResult {
     let body = DisputeRequest {
         reason: args.reason.clone(),
     };
-    let resp = match client.inner().raise_dispute(&task_id, &body).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.raise_dispute(&task_id, &body)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -397,10 +390,7 @@ async fn cancel(ctx: &Ctx, args: CancelArgs) -> CmdResult {
         ));
     }
     let client = ctx.client()?;
-    let resp = match client.inner().cancel_task(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.cancel_task(&task_id)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -465,18 +455,16 @@ async fn submit(ctx: &Ctx, args: SubmitArgs, kind: SubmitKind) -> CmdResult {
         metadata: serde_json::Map::new(),
     };
     let result = match kind {
-        SubmitKind::Completion => match client.inner().submit_completion(&task_id, &body).await {
-            Ok(v) => {
-                serde_json::to_value(v.into_inner()).map_err(|e| CmdError::Decode(e.to_string()))?
-            }
-            Err(e) => return Err(map_api_error(e).await.into()),
-        },
-        SubmitKind::Remedy => match client.inner().submit_remedy(&task_id, &body).await {
-            Ok(v) => {
-                serde_json::to_value(v.into_inner()).map_err(|e| CmdError::Decode(e.to_string()))?
-            }
-            Err(e) => return Err(map_api_error(e).await.into()),
-        },
+        SubmitKind::Completion => {
+            let v = client
+                .call(|c| c.submit_completion(&task_id, &body))
+                .await?;
+            serde_json::to_value(v).map_err(|e| CmdError::Decode(e.to_string()))?
+        }
+        SubmitKind::Remedy => {
+            let v = client.call(|c| c.submit_remedy(&task_id, &body)).await?;
+            serde_json::to_value(v).map_err(|e| CmdError::Decode(e.to_string()))?
+        }
     };
 
     // Server hand-in is done. Only now start the on-chain review clock
@@ -523,10 +511,9 @@ async fn claim(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
         ));
     }
     let client = ctx.client()?;
-    let resp = match client.inner().claim_task(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => {
-            let err = map_api_error(e).await;
+    let resp = match client.call(|c| c.claim_task(&task_id)).await {
+        Ok(v) => v,
+        Err(err) => {
             // gh#143: dev work-start receipts auto-advance `assigned` →
             // `in_progress`, racing the documented explicit claim. A 409
             // `invalid_status` then means "already claimed" — confirm via a
@@ -590,7 +577,7 @@ async fn current_status_if(
     task_id: &Uuid,
     keep: fn(&str) -> bool,
 ) -> Option<String> {
-    let task = client.inner().get_task(task_id).await.ok()?.into_inner();
+    let task = client.call(|c| c.get_task(task_id)).await.ok()?;
     let status = task.status?;
     keep(&status).then_some(status)
 }
@@ -606,10 +593,7 @@ async fn refuse(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
         ));
     }
     let client = ctx.client()?;
-    let resp = match client.inner().refuse_task(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.refuse_task(&task_id)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -628,10 +612,7 @@ async fn concede(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
         ));
     }
     let client = ctx.client()?;
-    let resp = match client.inner().concede_dispute(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.concede_dispute(&task_id)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -650,10 +631,7 @@ async fn abort(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
         ));
     }
     let client = ctx.client()?;
-    let resp = match client.inner().abort_task(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.abort_task(&task_id)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -672,10 +650,7 @@ async fn reopen(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
         ));
     }
     let client = ctx.client()?;
-    let resp = match client.inner().reopen_task(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.reopen_task(&task_id)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -694,10 +669,7 @@ async fn open(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
         ));
     }
     let client = ctx.client()?;
-    let resp = match client.inner().open_task(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.open_task(&task_id)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -747,10 +719,7 @@ async fn edit(ctx: &Ctx, args: EditArgs) -> CmdResult {
         ));
     }
     let client = ctx.client()?;
-    let resp = match client.inner().edit_task(&task_id, &body).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.edit_task(&task_id, &body)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -762,18 +731,15 @@ async fn bids(ctx: &Ctx, args: BidsArgs) -> CmdResult {
     let task_id = Uuid::parse_str(&args.id)
         .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
     let client = ctx.client()?;
-    let resp = match client
-        .inner()
-        .list_task_bids(
-            &task_id,
-            args.cursor.as_deref(),
-            taskfast_client::page_limit(args.limit),
-        )
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| {
+            c.list_task_bids(
+                &task_id,
+                args.cursor.as_deref(),
+                taskfast_client::page_limit(args.limit),
+            )
+        })
+        .await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -859,18 +825,15 @@ async fn list_mine(
     // supplied `--status` narrows within it (taskfast#941). One page in, one
     // page out — no client-side filtering or re-paging.
     let status = args.status.map(|s| vec![ListMyTasksStatusItem::from(s)]);
-    let resp = match client
-        .inner()
-        .list_my_tasks(
-            args.cursor.as_deref(),
-            taskfast_client::page_limit(args.limit),
-            status.as_ref(),
-        )
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| {
+            c.list_my_tasks(
+                args.cursor.as_deref(),
+                taskfast_client::page_limit(args.limit),
+                status.as_ref(),
+            )
+        })
+        .await?;
     Ok(json!({
         "kind": "mine",
         "tasks": resp.data,
@@ -882,17 +845,14 @@ async fn list_queue(
     client: &TaskFastClient,
     args: &ListArgs,
 ) -> Result<serde_json::Value, CmdError> {
-    let resp = match client
-        .inner()
-        .get_agent_queue(
-            args.cursor.as_deref(),
-            taskfast_client::page_limit(args.limit),
-        )
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| {
+            c.get_agent_queue(
+                args.cursor.as_deref(),
+                taskfast_client::page_limit(args.limit),
+            )
+        })
+        .await?;
     Ok(json!({
         "kind": "queue",
         "tasks": resp.data,
@@ -904,17 +864,14 @@ async fn list_posted(
     client: &TaskFastClient,
     args: &ListArgs,
 ) -> Result<serde_json::Value, CmdError> {
-    let resp = match client
-        .inner()
-        .get_agent_posted_tasks(
-            args.cursor.as_deref(),
-            taskfast_client::page_limit(args.limit),
-        )
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| {
+            c.get_agent_posted_tasks(
+                args.cursor.as_deref(),
+                taskfast_client::page_limit(args.limit),
+            )
+        })
+        .await?;
     Ok(json!({
         "kind": "posted",
         "tasks": resp.data,
@@ -927,10 +884,7 @@ async fn get(ctx: &Ctx, args: GetArgs) -> CmdResult {
     let id = Uuid::parse_str(&args.id)
         .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
     let client = ctx.client()?;
-    let task = match client.inner().get_task(&id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let task = client.call(|c| c.get_task(&id)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
