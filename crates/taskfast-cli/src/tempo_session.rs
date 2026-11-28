@@ -41,7 +41,7 @@ use taskfast_chains::tempo::{
 };
 use taskfast_client::{NetworkConfigEntry, NetworkConfigResponse, TaskFastClient};
 
-use crate::cmd::{resolve_duration, validate_override_rpc_url, wallet_args, CmdError, Ctx};
+use crate::cmd::{resolve_duration, wallet_args, CmdError, Ctx};
 use crate::wallet_lock::{self, WalletGuard};
 use crate::{Environment, Network};
 
@@ -88,10 +88,15 @@ pub enum ChainTarget {
 /// Wallet + RPC flags every signing command shares (flag, env, then `Ctx` config).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WalletOpts<'a> {
+    /// Keystore reference (path, or the form `wallet_args` accepts).
     pub keystore: Option<&'a str>,
+    /// File holding the keystore password.
     pub password_file: Option<&'a Path>,
+    /// Preflight: fail if the keystore's address differs.
     pub wallet_address: Option<&'a str>,
+    /// Explicit RPC override instead of the deployment's proxy.
     pub rpc_url: Option<&'a str>,
+    /// How long to wait for a receipt (flag > config > chain-aware default).
     pub receipt_timeout: Option<Duration>,
 }
 
@@ -113,6 +118,63 @@ pub(crate) fn is_proxy_rpc_url(rpc_url: &str, base_url: &str) -> bool {
         // genuine same-host tuple origin.
         (Ok(rpc), Ok(base)) => rpc.origin() == base.origin(),
         _ => false,
+    }
+}
+
+fn is_loopback_url(url: &str) -> bool {
+    match url::Url::parse(url) {
+        Ok(u) => matches!(
+            u.host_str(),
+            Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+        ),
+        Err(_) => false,
+    }
+}
+
+/// Guard on an explicit RPC override: needs `--allow-custom-endpoints`,
+/// and never plain HTTP off loopback when the target is mainnet (MITM on a
+/// mainnet RPC can observe the poster wallet and inflate gas price).
+pub(crate) fn validate_override_rpc_url(
+    url: &str,
+    network: Network,
+    allow_custom: bool,
+) -> Result<&str, CmdError> {
+    if !allow_custom {
+        return Err(CmdError::Usage(format!(
+            "refusing to use custom tempo_rpc_url {url:?}: pass \
+             --allow-custom-endpoints (or set \
+             TASKFAST_ALLOW_CUSTOM_ENDPOINTS=1) to override. The default \
+             path routes RPC through `{{api_base}}/rpc/{{network}}` \
+             which inherits the api_base endpoint guard."
+        )));
+    }
+
+    let is_plain_http_mainnet =
+        matches!(network, Network::Mainnet) && url.starts_with("http://") && !is_loopback_url(url);
+    if is_plain_http_mainnet {
+        return Err(CmdError::Usage(format!(
+            "refusing plain-HTTP mainnet tempo_rpc_url {url:?}: MITM on a \
+             mainnet RPC can observe the poster wallet and inflate gas \
+             price. Use HTTPS or point at loopback for local testing."
+        )));
+    }
+
+    Ok(url)
+}
+
+/// The reqwest client for a JSON-RPC URL: this deployment's authenticated
+/// client (carrying `X-API-Key`) when the URL's origin is `api_base`'s, a
+/// bare client otherwise, so the key never leaves the deployment. Selected
+/// by origin, not by how the URL was resolved.
+pub(crate) fn rpc_http_client(
+    ctx: &Ctx,
+    client: &TaskFastClient,
+    rpc_url: &str,
+) -> reqwest::Client {
+    if is_proxy_rpc_url(rpc_url, ctx.base_url()) {
+        client.http_client()
+    } else {
+        reqwest::Client::new()
     }
 }
 
@@ -495,16 +557,11 @@ impl ChainConnection {
         wallet: &WalletOpts<'_>,
         purpose: &str,
     ) -> Result<TempoSession, CmdError> {
-        let (signer, keystore_path) = load_wallet(ctx, wallet, purpose)?;
-        let this = if ctx.dry_run || self.chain_id.is_some() {
-            self
-        } else {
-            self.verify_node().await?
-        };
-        Ok(this.session(ctx, wallet, signer, keystore_path))
+        self.into_session_unless(ctx, wallet, purpose, ctx.dry_run)
+            .await
     }
 
-    /// Like [`Self::into_session`], but the node is always verified — under
+    /// Like [`Self::into_session`], but the node is verified under
     /// `--dry-run` too. For flows that read the chain before signing: the
     /// reads must see a verified node, yet the wallet still comes first.
     pub async fn into_verified_session(
@@ -513,8 +570,20 @@ impl ChainConnection {
         wallet: &WalletOpts<'_>,
         purpose: &str,
     ) -> Result<TempoSession, CmdError> {
+        self.into_session_unless(ctx, wallet, purpose, false).await
+    }
+
+    /// Wallet first, then verify the node unless `skip_verify` or it was
+    /// already verified by [`Self::verify_node`].
+    async fn into_session_unless(
+        self,
+        ctx: &Ctx,
+        wallet: &WalletOpts<'_>,
+        purpose: &str,
+        skip_verify: bool,
+    ) -> Result<TempoSession, CmdError> {
         let (signer, keystore_path) = load_wallet(ctx, wallet, purpose)?;
-        let this = if self.chain_id.is_some() {
+        let this = if skip_verify || self.chain_id.is_some() {
             self
         } else {
             self.verify_node().await?
@@ -623,16 +692,6 @@ impl TempoSession {
         self.signer.address()
     }
 
-    /// RPC URL this session talks to.
-    pub fn rpc_url(&self) -> &str {
-        &self.chain.rpc_url
-    }
-
-    pub fn chain_id(&self) -> Option<u64> {
-        self.chain.chain_id
-    }
-
-    /// Read-only call impersonating an explicit sender (TIP-20 privacy compliance).
     /// View call on the session's verified chain (`eth_call`, no sender).
     pub async fn eth_call(&self, to: Address, calldata: &Bytes) -> Result<Vec<u8>, RpcError> {
         self.chain.eth_call(to, calldata).await
@@ -643,6 +702,7 @@ impl TempoSession {
         self.chain.raw_call(method, params).await
     }
 
+    /// Read-only call impersonating an explicit sender (TIP-20 privacy compliance).
     pub async fn eth_call_from(
         &self,
         from: Address,
@@ -874,7 +934,7 @@ impl TempoRpcBackend {
             return Self::Mock(mock);
         }
         Self::Client(TempoRpcClient::new(
-            ctx.rpc_http_client(client, rpc_url),
+            rpc_http_client(ctx, client, rpc_url),
             rpc_url,
         ))
     }
@@ -973,16 +1033,15 @@ impl TempoRpcBackend {
 
 // ─── In-memory node for tests ─────────────────────────────────────────────
 
-/// In-memory node: balances, allowances, scripted `eth_call`s and raw
-/// results, broadcast receipts. Register one for an RPC URL with
-/// [`register_mock_rpc`] and every connection to that URL talks to it instead
-/// of HTTP, so the real signing commands run end to end without a JSON-RPC
-/// wiremock.
 /// A scripted `eth_call` answer: `Ok(bytes)` or a revert message.
 #[cfg(any(test, feature = "test-support"))]
 type ScriptedCall = Result<Vec<u8>, String>;
 
-/// In-memory node for tests; not built unless the `test-support` feature is on.
+/// In-memory node: balances, allowances, scripted `eth_call`s and raw
+/// results, broadcast receipts. Register one for an RPC URL with
+/// [`register_mock_rpc`] and every connection to that URL talks to it instead
+/// of HTTP, so the real signing commands run end to end without a JSON-RPC
+/// wiremock. Not built unless the `test-support` feature is on.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 #[derive(Debug)]
@@ -1049,6 +1108,7 @@ impl Default for MockTempoRpc {
 
 #[cfg(any(test, feature = "test-support"))]
 impl MockTempoRpc {
+    /// A node on chain 42427 with no state.
     pub fn new() -> Self {
         Self::default()
     }
@@ -1058,6 +1118,7 @@ impl MockTempoRpc {
         self.chain_id.store(chain_id, Ordering::SeqCst);
     }
 
+    /// `token.balanceOf(account)` answers `balance`.
     pub fn set_balance(&self, token: Address, account: Address, balance: U256) {
         self.balances
             .lock()
@@ -1065,6 +1126,7 @@ impl MockTempoRpc {
             .insert((token, account), balance);
     }
 
+    /// `token.allowance(owner, spender)` answers `allowance`.
     pub fn set_allowance(&self, token: Address, owner: Address, spender: Address, allowance: U256) {
         self.allowances
             .lock()
@@ -1072,6 +1134,7 @@ impl MockTempoRpc {
             .insert((token, owner, spender), allowance);
     }
 
+    /// Make every broadcast take `delay` (to exercise the wallet lock).
     pub fn set_broadcast_delay(&self, delay: Duration) {
         *self.broadcast_delay.lock().unwrap() = Some(delay);
     }

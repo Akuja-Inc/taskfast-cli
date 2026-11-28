@@ -32,8 +32,9 @@ use alloy_primitives::{Address, Bytes};
 use clap::Parser;
 use serde_json::{json, Value};
 
-use super::{parse_duration, validate_override_rpc_url, CmdError, CmdResult, Ctx};
+use super::{parse_duration, CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
+use crate::tempo_session::validate_override_rpc_url;
 use crate::tempo_session::{load_wallet, ChainConnection, ChainTarget, WalletOpts};
 
 #[derive(Debug, clap::Subcommand)]

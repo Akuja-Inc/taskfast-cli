@@ -21,7 +21,7 @@ use thiserror::Error;
 use crate::config::{Config, ConfigError};
 use crate::envelope::Envelope;
 use crate::exit::ExitCode;
-use crate::{is_well_known_api_base, Environment, Network};
+use crate::{is_well_known_api_base, Environment};
 
 use taskfast_agent::keystore::KeystoreError;
 use taskfast_chains::tempo::SigningError;
@@ -216,18 +216,11 @@ impl Ctx {
         TaskFastClient::from_api_key(self.base_url(), key).map_err(CmdError::from)
     }
 
-    /// Pick the reqwest client to use for a JSON-RPC URL.
-    ///
-    /// Any URL whose origin matches `{api_base}` is this deployment's
-    /// authenticated proxy and **must** be hit with the X-API-Key-bearing
-    /// client; anything else gets a fresh client with no TaskFast headers.
-    /// Selected by origin, not by how the URL was resolved.
+    /// Pick the reqwest client to use for a JSON-RPC URL: the deployment's
+    /// authenticated proxy client when the URL shares `api_base`'s origin,
+    /// a bare client otherwise.
     pub fn rpc_http_client(&self, client: &TaskFastClient, rpc_url: &str) -> reqwest::Client {
-        if crate::tempo_session::is_proxy_rpc_url(rpc_url, self.base_url()) {
-            client.http_client()
-        } else {
-            reqwest::Client::new()
-        }
+        crate::tempo_session::rpc_http_client(self, client, rpc_url)
     }
 
     /// Fail-closed budget gate. When `confirm_above_budget` is set in the
@@ -269,44 +262,6 @@ impl Ctx {
         }
         Ok(())
     }
-}
-
-fn is_loopback_url(url: &str) -> bool {
-    match url::Url::parse(url) {
-        Ok(u) => matches!(
-            u.host_str(),
-            Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
-        ),
-        Err(_) => false,
-    }
-}
-
-pub(crate) fn validate_override_rpc_url(
-    url: &str,
-    network: Network,
-    allow_custom: bool,
-) -> Result<&str, CmdError> {
-    if !allow_custom {
-        return Err(CmdError::Usage(format!(
-            "refusing to use custom tempo_rpc_url {url:?}: pass \
-             --allow-custom-endpoints (or set \
-             TASKFAST_ALLOW_CUSTOM_ENDPOINTS=1) to override. The default \
-             path routes RPC through `{{api_base}}/rpc/{{network}}` \
-             which inherits the api_base endpoint guard."
-        )));
-    }
-
-    let is_plain_http_mainnet =
-        matches!(network, Network::Mainnet) && url.starts_with("http://") && !is_loopback_url(url);
-    if is_plain_http_mainnet {
-        return Err(CmdError::Usage(format!(
-            "refusing plain-HTTP mainnet tempo_rpc_url {url:?}: MITM on a \
-             mainnet RPC can observe the poster wallet and inflate gas \
-             price. Use HTTPS or point at loopback for local testing."
-        )));
-    }
-
-    Ok(url)
 }
 
 /// Trim and validate a user-supplied EVM wallet address, returning the

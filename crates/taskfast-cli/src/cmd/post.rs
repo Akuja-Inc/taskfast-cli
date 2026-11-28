@@ -29,8 +29,9 @@ use clap::Parser;
 use serde_json::json;
 
 use super::wallet_args::decode_0x_bytes;
-use super::{validate_override_rpc_url, CmdError, CmdResult, Ctx};
+use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
+use crate::tempo_session::validate_override_rpc_url;
 use crate::tempo_session::{ChainConnection, ChainTarget, WalletOpts};
 
 use taskfast_client::api::types::{

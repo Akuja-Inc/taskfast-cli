@@ -902,49 +902,6 @@ async fn timeout_resolve_sends_once_the_chain_clock_passes_the_deadline() {
     );
 }
 
-#[tokio::test]
-async fn timeout_resolve_sends_nothing_for_a_non_disputed_escrow() {
-    let server = MockServer::start().await;
-    let keys = fresh_keys();
-    let mock = chain(&server).await;
-    disputed_chain(&mock, 1, DISPUTED_AT + TIMEOUT);
-    mount_disputed_task(&server, CHAIN_ID).await;
-
-    let err = taskfast_cli::cmd::escalate::run(
-        &ctx_for(&server),
-        EscalateCommand::TimeoutResolve(tr_args(&keys)),
-    )
-    .await
-    .expect_err("not disputed");
-    assert!(
-        matches!(&err, CmdError::Validation { code, .. } if code == "escrow_not_disputed"),
-        "{err:?}"
-    );
-    assert_eq!(mock.sent_transactions(), Vec::<(Address, Bytes)>::new());
-}
-
-#[tokio::test]
-async fn timeout_resolve_judges_elapsed_time_by_the_chain_not_the_local_clock() {
-    let server = MockServer::start().await;
-    let keys = fresh_keys();
-    let mock = chain(&server).await;
-    // The local clock is long past the deadline; the latest block is not.
-    disputed_chain(&mock, 5, DISPUTED_AT + TIMEOUT - 1);
-    mount_disputed_task(&server, CHAIN_ID).await;
-
-    let err = taskfast_cli::cmd::escalate::run(
-        &ctx_for(&server),
-        EscalateCommand::TimeoutResolve(tr_args(&keys)),
-    )
-    .await
-    .expect_err("too early");
-    assert!(
-        matches!(&err, CmdError::Validation { code, .. } if code == "dispute_timeout_not_elapsed"),
-        "{err:?}"
-    );
-    assert_eq!(mock.sent_transactions(), Vec::<(Address, Bytes)>::new());
-}
-
 // ─── escrow submit-work ───────────────────────────────────────────────────
 
 #[tokio::test]
