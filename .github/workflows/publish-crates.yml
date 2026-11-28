@@ -137,17 +137,7 @@ jobs:
           # is intentionally absent (internal, never published).
           crates="taskfast-codegen taskfast-client taskfast-chains taskfast-agent taskfast-cli"
           if [ "${DRY_RUN}" = "true" ]; then
-            unbumped=0
-            for crate in ${crates}; do
-              ver="$(pkg_version "$crate")"
-              if already_published "$crate" "$ver"; then
-                echo "::error::${crate} ${ver} is already on crates.io; the release would skip it and ship the registry copy. Run the dry-run after the version bump."
-                unbumped=1
-              fi
-            done
-            [ "${unbumped}" = "0" ] || exit 1
-            cargo publish --workspace --exclude xtask --locked --dry-run
-            exit 0
+            exec scripts/publish-dry-run.sh
           fi
           for crate in ${crates}; do
             ver="$(pkg_version "$crate")"

@@ -94,6 +94,7 @@ jobs:
           # tagged version's Release notes.
           git add Cargo.toml Cargo.lock crates/taskfast-client/Cargo.toml crates/taskfast-codegen/Cargo.toml crates/taskfast-chains/Cargo.toml CHANGELOG.md
           git commit -m "chore(release): v$VERSION"
+          scripts/publish-dry-run.sh
           # Annotated tag (-a) — `git push --follow-tags` silently skips
           # lightweight tags, which previously caused release.yml to never
           # fire and left an orphaned commit on main. See 0.2.2 postmortem.
