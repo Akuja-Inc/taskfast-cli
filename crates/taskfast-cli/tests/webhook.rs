@@ -358,3 +358,27 @@ async fn register_refuses_directory_at_secret_path_before_any_put() {
     assert!(err.to_string().contains("directory"), "{err}");
     assert!(server.received_requests().await.unwrap().is_empty());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn register_refuses_unwritable_parent_before_any_put() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("ro");
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+
+    let res = webhook::run(
+        &ctx_for(&server, false),
+        Command::Register(RegisterArgs {
+            url: "https://example.com/hook".into(),
+            secret_file: Some(dir.join("hook.secret")),
+            events: vec![],
+        }),
+    )
+    .await;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(res.is_err());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}

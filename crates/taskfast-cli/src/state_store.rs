@@ -124,7 +124,7 @@ impl StateStore {
             {
                 fs::create_dir_all(dir)?;
             }
-            ensure_dir_gitignore(dir);
+            ensure_dir_gitignore(dir)?;
         } else {
             fs::create_dir_all(dir)?;
         }
@@ -141,12 +141,6 @@ impl StateStore {
         if let Some(parent) = path.parent() {
             Self::ensure_dir_path(parent)?;
         }
-        if fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{} is a directory, not a file", path.display()),
-            ));
-        }
         let probe = path.with_file_name(format!(
             "{}.probe.{}",
             path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
@@ -159,8 +153,11 @@ impl StateStore {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        opts.open(&probe)?;
-        fs::remove_file(&probe)
+        let probe_file = opts.open(&probe)?;
+        let verdict = replaceable(path, &probe_file);
+        drop(probe_file);
+        fs::remove_file(&probe)?;
+        verdict
     }
 
     /// [`Self::preflight_file`] for a state asset; a no-op when ephemeral.
@@ -289,26 +286,31 @@ impl StateStore {
     }
 
     /// Read any pending fee retry transaction hash for `task_id`.
-    pub fn get_pending_fee_retry(&self, task_id: &uuid::Uuid) -> Option<String> {
-        let path = self.path_for(StateAsset::FeeRetries)?;
-        let raw = fs::read_to_string(path).ok()?;
-        let map: std::collections::HashMap<String, String> = serde_json::from_str(&raw).ok()?;
-        map.get(&task_id.to_string()).cloned()
+    pub fn get_pending_fee_retry(&self, task_id: &uuid::Uuid) -> io::Result<Option<String>> {
+        Ok(self.read_fee_ledger()?.get(&task_id.to_string()).cloned())
     }
 
-    /// Record a pending fee retry transaction hash for `task_id`.
+    fn read_fee_ledger(&self) -> io::Result<std::collections::HashMap<String, String>> {
+        let Some(path) = self.path_for(StateAsset::FeeRetries) else {
+            return Ok(std::collections::HashMap::new());
+        };
+        match fs::read_to_string(&path) {
+            Ok(raw) => serde_json::from_str(&raw).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("fee retry ledger {} is unreadable: {e}", path.display()),
+                )
+            }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(std::collections::HashMap::new()),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn record_pending_fee_retry(&self, task_id: &uuid::Uuid, tx_hash: &str) -> io::Result<()> {
         let Some(path) = self.path_for(StateAsset::FeeRetries) else {
             return Ok(());
         };
-        let mut map: std::collections::HashMap<String, String> = if path.exists() {
-            fs::read_to_string(&path)
-                .ok()
-                .and_then(|raw| serde_json::from_str(&raw).ok())
-                .unwrap_or_default()
-        } else {
-            std::collections::HashMap::new()
-        };
+        let mut map = self.read_fee_ledger()?;
         map.insert(task_id.to_string(), tx_hash.to_string());
         let body = serde_json::to_vec_pretty(&map)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -320,12 +322,7 @@ impl StateStore {
         let Some(path) = self.path_for(StateAsset::FeeRetries) else {
             return Ok(());
         };
-        if !path.exists() {
-            return Ok(());
-        }
-        let raw = fs::read_to_string(&path)?;
-        let mut map: std::collections::HashMap<String, String> =
-            serde_json::from_str(&raw).unwrap_or_default();
+        let mut map = self.read_fee_ledger()?;
         if map.remove(&task_id.to_string()).is_some() {
             let body = serde_json::to_vec_pretty(&map)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -354,22 +351,65 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
     handle.set_permissions(fs::Permissions::from_mode(0o700))
 }
 
-fn ensure_dir_gitignore(dir: &Path) {
-    let gitignore = dir.join(".gitignore");
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&gitignore)
+fn replaceable(path: &Path, probe: &fs::File) -> io::Result<()> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if meta.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is a directory, not a file", path.display()),
+        ));
+    }
+    if !meta.is_file() && !meta.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    #[cfg(unix)]
     {
-        Ok(mut f) => {
-            if let Err(e) = f.write_all(b"*\n") {
-                tracing::warn!(path = %gitignore.display(), error = %e, "could not write .taskfast/.gitignore");
-            }
+        use std::os::unix::fs::MetadataExt;
+        let me = probe.metadata()?.uid();
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+        let parent_meta = fs::metadata(parent.unwrap_or_else(|| Path::new(".")))?;
+        if me != 0
+            && parent_meta.mode() & 0o1000 != 0
+            && parent_meta.uid() != me
+            && meta.uid() != me
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is owned by another user in a sticky directory and cannot be replaced",
+                    path.display()
+                ),
+            ));
         }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => {
-            tracing::warn!(path = %gitignore.display(), error = %e, "could not create .taskfast/.gitignore");
+    }
+    #[cfg(not(unix))]
+    let _ = probe;
+    Ok(())
+}
+
+fn ensure_dir_gitignore(dir: &Path) -> io::Result<()> {
+    let gitignore = dir.join(".gitignore");
+    match fs::symlink_metadata(&gitignore) {
+        Ok(m) if m.is_file() => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", gitignore.display()),
+        )),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&gitignore)?;
+            f.write_all(b"*\n")
         }
+        Err(e) => Err(e),
     }
 }
 
@@ -590,6 +630,52 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_fee_ledger_is_an_error_and_left_untouched() {
+        let tmp = TempDir::new().unwrap();
+        let store = StateStore::from_config_path(&tmp.path().join("config.json"));
+        let ledger = tmp.path().join("fee_retries.json");
+        fs::write(&ledger, "{ not json").unwrap();
+        let id = uuid::Uuid::new_v4();
+        assert!(store.get_pending_fee_retry(&id).is_err());
+        assert!(store.record_pending_fee_retry(&id, "0xabc").is_err());
+        assert!(store.clear_pending_fee_retry(&id).is_err());
+        assert_eq!(fs::read_to_string(&ledger).unwrap(), "{ not json");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gitignore_that_is_a_directory_is_refused() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".taskfast");
+        fs::create_dir_all(dir.join(".gitignore")).unwrap();
+        let err = StateStore::ensure_dir_path(&dir).unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gitignore_that_is_a_symlink_is_refused() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".taskfast");
+        fs::create_dir(&dir).unwrap();
+        std::os::unix::fs::symlink("/nonexistent", dir.join(".gitignore")).unwrap();
+        assert!(StateStore::ensure_dir_path(&dir).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_rejects_unwritable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("ro");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let res = StateStore::preflight_file(&dir.join("hook.secret"));
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(res.is_err());
+    }
+
+    #[test]
     fn atomic_write_file_into_other_dir_writes_no_gitignore() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("secrets");
@@ -604,16 +690,16 @@ mod tests {
         let store = StateStore::from_config_path(&config_path);
         let task_id = uuid::Uuid::new_v4();
 
-        assert_eq!(store.get_pending_fee_retry(&task_id), None);
+        assert_eq!(store.get_pending_fee_retry(&task_id).unwrap(), None);
         store
             .record_pending_fee_retry(&task_id, "0xabcdef123456")
             .unwrap();
         assert_eq!(
-            store.get_pending_fee_retry(&task_id),
+            store.get_pending_fee_retry(&task_id).unwrap(),
             Some("0xabcdef123456".into())
         );
 
         store.clear_pending_fee_retry(&task_id).unwrap();
-        assert_eq!(store.get_pending_fee_retry(&task_id), None);
+        assert_eq!(store.get_pending_fee_retry(&task_id).unwrap(), None);
     }
 }

@@ -53,7 +53,7 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   `taskfast config` had not run first. A symlinked `.taskfast/` is refused
   rather than followed, `fee retry` and `webhook register` check the directory
   before broadcasting or registering, and a failed save is never reported as
-  saved (gh#269). Trace files are still written outside this path. `init`, `fee retry` and `webhook register` now prove the destination can be saved (not a directory, temp file creatable) before minting an agent, broadcasting or registering, and `fee retry` no longer advises a plain retry when the voucher was not saved or the server reported `retry_not_needed`. `.taskfast/` is created `0700` and hardened through a no-follow handle.
+  saved (gh#269). Trace writes bypass `StateStore` and stay out of scope here. `init`, `fee retry` and `webhook register` run a best-effort check (destination not a directory or other non-file, replaceable, temp file creatable; a corrupt fee ledger stops `fee retry`) before minting an agent, broadcasting or registering. It narrows the window; it does not guarantee the later save. `fee retry` no longer prints a plain retry command, always reports the broadcast hash, and a `.gitignore` that is not a regular file is refused. `.taskfast/` is created `0700` and hardened through a no-follow handle.
 
 - `escalate sign` resolved the deployment's proxy by the environment's network
   entry instead of the server-issued chain id, so a Tempo Zone task failed
