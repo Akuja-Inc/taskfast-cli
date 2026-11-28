@@ -220,15 +220,11 @@ mod tests {
 
     #[test]
     fn known_vector_matches_platform_elixir_impl() {
-        // HMAC-SHA256(secret="whsec_test_1234567890", "2026-03-23T12:00:00Z.BODY")
-        // hex-encoded — captured from a cross-check against the Elixir
-        // :crypto.mac/4 |> Base.encode16(case: :lower) pipeline.
-        let sig = sign_payload(SECRET, TS, BODY);
-        // 64 lowercase hex chars
-        assert_eq!(sig.len(), 64);
-        assert!(sig
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        // Expected digest from Elixir's :crypto.mac/4 on the timestamp and raw body.
+        assert_eq!(
+            sign_payload(SECRET, TS, BODY),
+            "4e7a86210e3e640bf1bbd677e03d97ab826a131fac66117b924e08fbcd3b1614"
+        );
     }
 
     #[test]

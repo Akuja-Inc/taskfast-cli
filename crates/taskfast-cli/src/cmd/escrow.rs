@@ -1153,14 +1153,8 @@ mod tests {
         assert!(!already_recorded(U256::ZERO, w, U256::ZERO)); // never submitted, even at deadline 0
     }
     use super::*;
+    use crate::tempo_session::default_receipt_timeout_for_chain_id;
     use taskfast_chains::tempo::TEMPO_MAINNET_CHAIN_ID;
-
-    fn default_receipt_timeout(chain_id: i64) -> Duration {
-        match u64::try_from(chain_id) {
-            Ok(id) => crate::tempo_session::default_receipt_timeout_for_chain_id(id),
-            _ => crate::tempo_session::DEFAULT_RECEIPT_TIMEOUT_TESTNET,
-        }
-    }
 
     #[test]
     fn decimal_to_u256_scales_basic() {
@@ -1176,13 +1170,13 @@ mod tests {
     #[test]
     fn decimal_to_u256_rejects_excess_fractional_digits() {
         let err = decimal_to_u256("1.1234567", 6).expect_err("7 > 6 must fail");
-        matches!(err, CmdError::Decode(_));
+        assert!(matches!(err, CmdError::Decode(_)), "got {err:?}");
     }
 
     #[test]
     fn decimal_to_u256_rejects_negative() {
         let err = decimal_to_u256("-1.00", 6).expect_err("negative must fail");
-        matches!(err, CmdError::Decode(_));
+        assert!(matches!(err, CmdError::Decode(_)), "got {err:?}");
     }
 
     #[test]
@@ -1197,18 +1191,27 @@ mod tests {
 
     #[test]
     fn default_receipt_timeout_mainnet_is_three_minutes() {
-        assert_eq!(default_receipt_timeout(4_217), Duration::from_mins(3));
+        assert_eq!(
+            default_receipt_timeout_for_chain_id(4_217),
+            Duration::from_mins(3)
+        );
     }
 
     #[test]
     fn default_receipt_timeout_testnet_is_one_minute() {
-        assert_eq!(default_receipt_timeout(42_431), Duration::from_mins(1));
+        assert_eq!(
+            default_receipt_timeout_for_chain_id(42_431),
+            Duration::from_mins(1)
+        );
     }
 
     #[test]
     fn default_receipt_timeout_unknown_chain_falls_back_to_testnet_budget() {
         // Dev / anvil chains get the shorter budget — mirrors `default_rpc_for`.
-        assert_eq!(default_receipt_timeout(31_337), Duration::from_mins(1));
+        assert_eq!(
+            default_receipt_timeout_for_chain_id(31_337),
+            Duration::from_mins(1)
+        );
     }
 
     #[test]

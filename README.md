@@ -258,8 +258,7 @@ A few design choices are important if you are extending the Rust codebase:
 - Stable `CmdError` codes and exit-code buckets are treated as part of the CLI contract, not just internal details.
 - `taskfast-cli` depends on `taskfast-client` for API access and pulls reusable wallet/bootstrap/signing logic from `taskfast-agent` instead of duplicating it in each command.
 - The poster path in `taskfast post` is one of the clearest examples of that reuse: it resolves keystore input, uses Tempo RPC helpers from `taskfast-agent`, signs and broadcasts the ERC-20 transfer locally, then submits the draft with the resulting transaction hash.
-- Event access is currently exposed as one-shot polling in the CLI even though the underlying libraries already separate page reads from longer-running event stream concerns.
-- `taskfast-agent` ships a `retry.rs` module with back-off helpers reusable across bootstrap, event, and webhook flows.
+- `taskfast events poll` reads one page through `taskfast-agent`. Use `taskfast events stream` to follow live events over WebSocket.
 - `taskfast init` persists agent state to `./.taskfast/config.json` (mode 0600, atomic temp + rename); every subcommand loads it via `Config::load` and layers CLI/env overrides on top.
 
 ## `taskfast-agent` skill

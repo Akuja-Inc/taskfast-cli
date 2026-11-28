@@ -6,7 +6,7 @@
 //! tokens, contract addresses) needed before composing EIP-712 payloads
 //! locally.
 
-use clap::{Parser, Subcommand};
+use clap::Subcommand;
 use serde_json::json;
 
 use super::{CmdResult, Ctx};
@@ -19,9 +19,6 @@ pub enum Command {
     /// Fetch the platform configuration snapshot.
     Config,
 }
-
-#[derive(Debug, Parser)]
-pub struct Args;
 
 pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
     match cmd {

@@ -705,17 +705,10 @@ async fn open(ctx: &Ctx, args: IdOnlyArgs) -> CmdResult {
     ))
 }
 
-/// Redirect only. Since 2026-11-01 `POST /tasks/{id}/retry-fee` requires the
-/// poster's freshly signed fee transfer (or the hash of one already
-/// broadcast) in the body; the original voucher cannot be reused. Changing
-/// this subcommand's args would break the library API without a version bump,
-/// so the voucher-carrying command is `taskfast fee retry`. Makes no HTTP
-/// call, in `--dry-run` or otherwise.
 fn retry_fee(args: &IdOnlyArgs) -> CmdResult {
     Err(CmdError::Usage(format!(
-        "`task retry-fee` no longer sends a request: since 2026-11-01 the server requires the \
-         poster's freshly signed fee transfer (or the hash of one the poster already \
-         broadcast) for a retry. Use `taskfast fee retry {} --submission-fee-voucher <0x...>`.",
+        "`task retry-fee` no longer sends a request. Use `taskfast fee retry {}` to sign and \
+         submit a fresh fee transfer with your local wallet.",
         args.id
     )))
 }
