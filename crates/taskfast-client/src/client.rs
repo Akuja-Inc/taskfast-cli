@@ -380,6 +380,20 @@ impl TaskFastClient {
         Ok(serde_json::from_slice::<serde_json::Value>(&bytes)?)
     }
 
+    /// Run one generated call once: unwrap its body, or map its error to [`Error`].
+    pub async fn call<'a, T, F, Fut>(&'a self, op: F) -> Result<T>
+    where
+        F: FnOnce(&'a api::Client) -> Fut,
+        Fut: Future<
+            Output = std::result::Result<progenitor_client::ResponseValue<T>, api::Error<()>>,
+        >,
+    {
+        match op(&self.inner).await {
+            Ok(v) => Ok(v.into_inner()),
+            Err(e) => Err(map_api_error(e).await),
+        }
+    }
+
     async fn send(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
         let result = req.send().await;
         crate::corr::record_corr(&result);

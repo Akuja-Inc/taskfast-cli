@@ -85,7 +85,7 @@ use crate::config::Config;
 use crate::envelope::Envelope;
 
 use alloy_signer_local::PrivateKeySigner;
-use taskfast_agent::bootstrap::{create_agent_headless, get_readiness, validate_auth};
+use taskfast_agent::bootstrap::create_agent_headless;
 use taskfast_agent::faucet::{request_testnet_funds, FaucetDrop};
 use taskfast_agent::keystore;
 use taskfast_agent::wallet;
@@ -340,7 +340,7 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
     //    On Auth failure with a PreExisting key, rewrite the error with a
     //    remediation hint — the common cause is a stale api_key left over in
     //    the config from a prior init run whose agent was deleted server-side.
-    let profile = match validate_auth(&client).await {
+    let profile = match client.call(|c| c.get_agent_profile()).await {
         Ok(p) => p,
         Err(taskfast_client::Error::Auth(msg))
             if matches!(agent_outcome, AgentOutcome::PreExisting) =>
@@ -364,7 +364,10 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
     if !ctx.dry_run {
         super::enforce_server_network_invariant(&effective_ctx, &client).await?;
     }
-    let readiness = get_readiness(&client).await.map_err(CmdError::from)?;
+    let readiness = client
+        .call(|c| c.get_agent_readiness())
+        .await
+        .map_err(CmdError::from)?;
 
     // 3. Wallet provisioning.
     let wallet_outcome = if args.skip_wallet {
@@ -462,7 +465,10 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
 
     // 5. Final readiness check — surfaces any remaining gates (webhook,
     //    funding) the caller still has to clear.
-    let final_readiness = get_readiness(&client).await.map_err(CmdError::from)?;
+    let final_readiness = client
+        .call(|c| c.get_agent_readiness())
+        .await
+        .map_err(CmdError::from)?;
 
     // 5b. Funding sanity check (gh#142): a faucet failure or zero wallet
     //     balance gets a prominent stderr warning with the manual fallback,
