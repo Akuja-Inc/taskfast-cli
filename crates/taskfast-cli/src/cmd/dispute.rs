@@ -12,8 +12,6 @@ use uuid::Uuid;
 use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
-use taskfast_client::map_api_error;
-
 #[derive(Debug, Parser)]
 pub struct Args {
     pub task_id: String,
@@ -23,10 +21,7 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     let task_id = Uuid::parse_str(&args.task_id)
         .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
     let client = ctx.client()?;
-    let resp = match client.inner().get_task_dispute(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.get_task_dispute(&task_id)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,

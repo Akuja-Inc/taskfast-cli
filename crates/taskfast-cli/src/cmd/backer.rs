@@ -21,7 +21,7 @@ use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_client::api::types::OperatorBackerCreateRequest;
-use taskfast_client::{map_api_error, TaskFastClient};
+use taskfast_client::TaskFastClient;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -99,10 +99,9 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
     // A read — `--dry-run` only short-circuits mutations, so this always runs.
     let operator_id = parse_operator(&args.operator)?;
     let client = pat_client(ctx, args.human_api_key.as_deref())?;
-    let resp = match client.inner().list_operator_backers(&operator_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| c.list_operator_backers(&operator_id))
+        .await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -137,14 +136,9 @@ async fn add(ctx: &Ctx, args: AddArgs) -> CmdResult {
         backer_account_id,
         backer_wallet_address: wallet_address,
     };
-    let resp = match client
-        .inner()
-        .approve_operator_backer(&operator_id, &body)
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| c.approve_operator_backer(&operator_id, &body))
+        .await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -170,14 +164,9 @@ async fn revoke(ctx: &Ctx, args: RevokeArgs) -> CmdResult {
     }
 
     let client = pat_client(ctx, args.human_api_key.as_deref())?;
-    let resp = match client
-        .inner()
-        .revoke_operator_backer(&operator_id, &backer_id)
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| c.revoke_operator_backer(&operator_id, &backer_id))
+        .await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,

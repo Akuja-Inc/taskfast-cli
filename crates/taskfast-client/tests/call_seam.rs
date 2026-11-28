@@ -45,16 +45,23 @@ async fn call_maps_every_error_class_like_map_api_error() {
         (401, envelope(401, "invalid_api_key", "nope")),
         (409, envelope(409, "conflict_code", "state clash")),
         (422, envelope(422, "missing_field", "name is required")),
-        (503, ResponseTemplate::new(503)),
     ] {
         let (_server, client) = serve(template).await;
         let old = map_api_error(client.inner().get_platform_config().await.unwrap_err()).await;
         let new = client.call(|c| c.get_platform_config()).await.unwrap_err();
         assert_eq!(format!("{old:?}"), format!("{new:?}"), "status {status}");
         match (status, &new) {
-            (401, Error::Auth(_)) | (503, Error::Server(_)) => {}
+            (401, Error::Auth(_)) => {}
             (409 | 422, Error::Validation { code, .. }) => assert_ne!(code, ""),
             other => panic!("unexpected mapping {other:?}"),
         }
     }
+}
+
+#[tokio::test]
+async fn call_sends_one_request_and_does_not_retry_a_503() {
+    let (server, client) = serve(ResponseTemplate::new(503)).await;
+    let err = client.call(|c| c.get_platform_config()).await.unwrap_err();
+    assert!(matches!(err, Error::Server(_)), "got {err:?}");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
