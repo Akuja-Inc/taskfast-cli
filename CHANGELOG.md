@@ -62,6 +62,15 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   `cargo install taskfast-cli` refused it. `taskfast-chains` now publishes
   with the next release.
 
+- The `x-request-id` that joins a command's trace line to the server log is now
+  recorded through one send path for the hand-written `taskfast-client` methods
+  (`users/me`, artifact upload, `config/network`, `agents/me`, the events page).
+  A transport failure on those now clears the id instead of leaving an earlier
+  request's id on the failure line. A 404 from `users/me` or the upload-initiate
+  call now keeps its id. An error response from the artifact storage host no
+  longer overwrites it. Generated calls are unchanged, and JSON-RPC proxy calls
+  still bypass the id.
+
 - `escalate sign` resolved the deployment's proxy by the environment's network
   entry instead of the server-issued chain id, so a Tempo Zone task failed
   with `chain_id_mismatch`. It now selects the entry (L1 or Zone) by chain id
