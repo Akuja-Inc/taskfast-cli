@@ -4,11 +4,7 @@
 
 Releases are triggered by pushing a git tag of the form `taskfast-cli-vX.Y.Z`. The tag push fires `.github/workflows/release.yml` (cargo-dist), which builds artifacts, pushes the Homebrew formula, and creates the GitHub Release with notes generated from Conventional Commits.
 
-`cargo xtask bump <level>` keeps the **three synced version sites** in lockstep:
-
-- `[workspace.package].version`
-- the inline `taskfast-agent` dep ref
-- the inline `xtask` build-dep ref in `taskfast-client`
+`cargo xtask bump <level>` bumps every version group in lockstep. The groups are listed in the canonical guide linked above.
 
 ## Option A — CI button (patch releases, recommended)
 

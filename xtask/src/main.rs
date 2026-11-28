@@ -77,7 +77,10 @@ fn main() -> Result<()> {
             level,
             no_lock,
             dry_run,
-        } => run_bump(level, no_lock, dry_run),
+        } => {
+            let workspace_root = find_workspace_root().context("locate workspace root")?;
+            run_bump(&workspace_root, level, no_lock, dry_run)
+        }
     }
 }
 
@@ -147,12 +150,6 @@ struct SyncedSite {
 /// last *published* `taskfast-client` (which lacks any newly-added API). Local
 /// CI and `cargo-semver-checks` use path deps and cannot catch this; only the
 /// registry publish does. See the gh#85 / v0.9.0 postmortem.
-///
-/// `taskfast-codegen` and `taskfast-chains` are groups for the same reason:
-/// the publish workflow skips a version already on the registry without error,
-/// so an unbumped crate silently keeps its old published code. The codegen
-/// requirement is exact (`=`) because the normalizer runs inside each
-/// published client's build script.
 fn version_groups() -> &'static [&'static [SyncedSite]] {
     &[
         // Workspace version: taskfast-cli + taskfast-agent (`version.workspace`),
@@ -210,8 +207,7 @@ fn split_requirement(raw: &str) -> (&str, &str) {
     }
 }
 
-fn run_bump(level: BumpLevel, no_lock: bool, dry_run: bool) -> Result<()> {
-    let workspace_root = find_workspace_root().context("locate workspace root")?;
+fn run_bump(workspace_root: &Path, level: BumpLevel, no_lock: bool, dry_run: bool) -> Result<()> {
     let groups = version_groups();
 
     // Load each distinct file once across ALL groups. Multiple sites in the
@@ -311,7 +307,7 @@ fn run_bump(level: BumpLevel, no_lock: bool, dry_run: bool) -> Result<()> {
     if no_lock {
         eprintln!("bump: --no-lock, skipping `cargo check`");
     } else {
-        refresh_lockfile(&workspace_root).context("refresh Cargo.lock via `cargo check`")?;
+        refresh_lockfile(workspace_root).context("refresh Cargo.lock via `cargo check`")?;
     }
 
     eprintln!("bump: done. review: git diff");
@@ -582,9 +578,66 @@ mod tests {
     }
 
     #[test]
-    fn split_requirement_separates_the_exact_operator() {
-        assert_eq!(split_requirement("=0.4.0"), ("=", "0.4.0"));
-        assert_eq!(split_requirement("0.4.0"), ("", "0.4.0"));
+    fn bump_writes_the_exact_codegen_requirement_and_every_group() {
+        let root = std::env::temp_dir().join(format!("xtask-bump-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for krate in ["taskfast-client", "taskfast-codegen", "taskfast-chains"] {
+            std::fs::create_dir_all(root.join("crates").join(krate)).unwrap();
+        }
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[workspace.package]
+version = "0.28.0"
+
+[workspace.dependencies]
+taskfast-codegen = { path = "crates/taskfast-codegen", version = "=0.4.0" }
+taskfast-client = { path = "crates/taskfast-client", version = "0.24.0" }
+taskfast-chains = { path = "crates/taskfast-chains", version = "0.1.0" }
+taskfast-agent = { path = "crates/taskfast-agent", version = "0.28.0" }
+"#,
+        )
+        .unwrap();
+        for (krate, version) in [
+            ("taskfast-client", "0.24.0"),
+            ("taskfast-codegen", "0.4.0"),
+            ("taskfast-chains", "0.1.0"),
+        ] {
+            std::fs::write(
+                root.join("crates").join(krate).join("Cargo.toml"),
+                format!("[package]\nname = \"{krate}\"\nversion = \"{version}\"\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(root.join("CHANGELOG.md"), "# Changelog\n\n## Unreleased\n").unwrap();
+
+        run_bump(&root, BumpLevel::Patch, true, false).unwrap();
+
+        let manifest: DocumentMut = std::fs::read_to_string(root.join("Cargo.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let requirement = |name: &str| {
+            manifest["workspace"]["dependencies"][name]["version"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(requirement("taskfast-codegen"), "=0.4.1");
+        assert_eq!(requirement("taskfast-client"), "0.24.1");
+        assert_eq!(requirement("taskfast-chains"), "0.1.1");
+        assert_eq!(requirement("taskfast-agent"), "0.28.1");
+        let package_version = |krate: &str| {
+            std::fs::read_to_string(root.join("crates").join(krate).join("Cargo.toml"))
+                .unwrap()
+                .parse::<DocumentMut>()
+                .unwrap()["package"]["version"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(package_version("taskfast-codegen"), "0.4.1");
+        assert_eq!(package_version("taskfast-chains"), "0.1.1");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

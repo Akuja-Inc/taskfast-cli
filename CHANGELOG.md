@@ -45,10 +45,11 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   per-command JSON-RPC wiremocks; the mock signs for real and reports the
   chain id each tx was signed for.
 
-- `taskfast-codegen` is now 0.4.0 and `taskfast-client` requires it exactly
-  (`=0.4.0`). The normalizer runs inside each published client's build script
-  against that client's own bundled spec, so a change to its required-field
-  list is a breaking change, not a patch. `cargo xtask bump` keeps the `=`.
+- `taskfast-client` now requires `taskfast-codegen` exactly (`=`) and codegen
+  moves to a new 0.x line. The normalizer runs inside each published client's
+  build script against that client's own bundled spec, so a change to its
+  required-field list is a breaking change, not a patch. `cargo xtask bump`
+  keeps the `=`.
 
 ### Fixed
 
@@ -58,8 +59,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   `publish-crates.yml` skips a version already on crates.io without error, so
   an unbumped crate kept its old published code: the registry copy of
   `taskfast-chains` 0.1.0 predates the AlphaUSD fee rail on Moderato, so
-  `cargo install taskfast-cli` refused it. `taskfast-chains` publishes as
-  0.1.1 with the next release.
+  `cargo install taskfast-cli` refused it. `taskfast-chains` now publishes
+  with the next release.
 
 - `escalate sign` resolved the deployment's proxy by the environment's network
   entry instead of the server-issued chain id, so a Tempo Zone task failed

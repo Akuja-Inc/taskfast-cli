@@ -137,9 +137,12 @@ Releases are triggered by pushing a git tag of the form `taskfast-cli-vX.Y.Z`.
 The tag push fires `.github/workflows/release.yml` (cargo-dist), which builds
 artifacts, pushes the Homebrew formula, and creates the GitHub Release.
 
-`cargo xtask bump <level>` keeps the **three synced version sites** in lockstep:
-`[workspace.package].version`, the inline `taskfast-agent` dep ref, and the
-inline `xtask` build-dep ref in `taskfast-client`.
+`cargo xtask bump <level>` bumps four version groups together, each a crate's
+own version plus its matching `[workspace.dependencies]` requirement:
+the workspace (`taskfast-cli`, `taskfast-agent`, `xtask`), `taskfast-client`,
+`taskfast-codegen` and `taskfast-chains`. The `taskfast-codegen` requirement is
+exact (`=`) and the bump keeps the `=`. Bump a crate by hand only if you edit
+versions without `cargo xtask bump`, and then bump all four groups.
 
 ### Option A — CI button (patch releases, recommended)
 
@@ -175,9 +178,10 @@ git push --follow-tags              # tag push triggers release.yml
 
 - `taskfast-cli` + `taskfast-agent` version in lockstep via
   `version.workspace = true`. `xtask` also inherits, but `publish = false`.
-- `taskfast-client` and `taskfast-chains` version independently — bump their
-  own `crates/<name>/Cargo.toml` and the matching `[workspace.dependencies]`
-  inline ref by hand when releasing those.
+- `taskfast-client`, `taskfast-codegen` and `taskfast-chains` each keep their
+  own version line, and `cargo xtask bump` bumps them with every release. A
+  version already on crates.io is skipped without error at publish time, so an
+  unbumped crate silently keeps its old published code.
 - The `taskfast-cli-v` prefix is a cargo-dist *Singular Announcement*: only the
   `taskfast-cli` binary is built and published, even though `taskfast-agent`'s
   Cargo version bumped in lockstep.
