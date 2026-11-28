@@ -55,6 +55,15 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   before broadcasting or registering, and a failed save is never reported as
   saved (gh#269). Trace writes bypass `StateStore` and stay out of scope here. `init`, `fee retry` and `webhook register` run a best-effort check (destination not a directory or other non-file, replaceable, temp file creatable; a corrupt fee ledger stops `fee retry`) before minting an agent, broadcasting or registering. It narrows the window; it does not guarantee the later save. `fee retry` no longer prints a plain retry command, always reports the broadcast hash, keeps the saved hash on `retry_not_needed` (the earlier transfer may still be in flight), only advises replaying a voucher the server did not reject, previews instead of posting on `--dry-run` when a voucher is saved, refuses a fee ledger that is not a regular file, and a `.gitignore` that is not a regular file is refused. `.taskfast/` is created `0700` and hardened through a no-follow handle.
 
+- The `x-request-id` that joins a command's trace line to the server log is now
+  recorded through one send path for the hand-written `taskfast-client` methods
+  (`users/me`, artifact upload, `config/network`, `agents/me`, the events page).
+  A transport failure on those now clears the id instead of leaving an earlier
+  request's id on the failure line. A 404 from `users/me` or the upload-initiate
+  call now keeps its id. An error response from the artifact storage host no
+  longer overwrites it. Generated calls are unchanged, and JSON-RPC proxy calls
+  still bypass the id.
+
 - `escalate sign` resolved the deployment's proxy by the environment's network
   entry instead of the server-issued chain id, so a Tempo Zone task failed
   with `chain_id_mismatch`. It now selects the entry (L1 or Zone) by chain id
