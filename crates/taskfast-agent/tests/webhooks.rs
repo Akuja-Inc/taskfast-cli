@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: MIT
-//! Wiremock fixtures for `taskfast_agent::webhooks` HTTP wrappers.
+//! Wiremock fixtures for the `/agents/me/webhooks*` calls.
 //!
 //! Signature verification tests live in `src/webhooks.rs` — they're pure
 //! functions, no server involved. This file exercises only the
-//! HTTP-touching wrappers + the "secret returned once" server contract
+//! HTTP-touching calls + the "secret returned once" server contract
 //! invariant that callers must respect.
 
-use taskfast_agent::webhooks::{
-    configure_webhook, delete_webhook, get_subscriptions, get_webhook, test_webhook,
-    update_subscriptions,
-};
-use taskfast_client::api::types::WebhookConfigRequest;
+use taskfast_client::api::types::{WebhookConfigRequest, WebhookSubscriptionsUpdate};
 use taskfast_client::TaskFastClient;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -42,7 +38,9 @@ async fn configure_webhook_returns_secret_on_first_creation() {
         .mount(&server)
         .await;
 
-    let cfg = configure_webhook(&client(&server), &sample_config_request())
+    let body = sample_config_request();
+    let cfg = client(&server)
+        .call(|c| c.configure_webhook(&body))
         .await
         .expect("200 decodes");
     assert_eq!(cfg.secret.as_deref(), Some("whsec_a1b2c3d4e5f6g7h8"));
@@ -65,7 +63,9 @@ async fn configure_webhook_returns_null_secret_on_update() {
         .mount(&server)
         .await;
 
-    let cfg = configure_webhook(&client(&server), &sample_config_request())
+    let body = sample_config_request();
+    let cfg = client(&server)
+        .call(|c| c.configure_webhook(&body))
         .await
         .expect("200 decodes");
     assert!(cfg.secret.is_none(), "update must return null secret");
@@ -86,7 +86,10 @@ async fn get_webhook_returns_config_with_null_secret() {
         .mount(&server)
         .await;
 
-    let cfg = get_webhook(&client(&server)).await.expect("200 decodes");
+    let cfg = client(&server)
+        .call(|c| c.get_webhook_config())
+        .await
+        .expect("200 decodes");
     assert_eq!(cfg.url, "https://example.com/webhook");
     assert!(cfg.secret.is_none());
 }
@@ -100,7 +103,10 @@ async fn delete_webhook_accepts_204() {
         .mount(&server)
         .await;
 
-    delete_webhook(&client(&server)).await.expect("204 is Ok");
+    client(&server)
+        .call(|c| c.delete_webhook_config())
+        .await
+        .expect("204 is Ok");
 }
 
 #[tokio::test]
@@ -116,7 +122,10 @@ async fn test_webhook_returns_delivery_receipt() {
         .mount(&server)
         .await;
 
-    let receipt = test_webhook(&client(&server)).await.expect("200 decodes");
+    let receipt = client(&server)
+        .call(|c| c.test_webhook())
+        .await
+        .expect("200 decodes");
     assert_eq!(receipt.success, Some(true));
     assert_eq!(receipt.status_code, Some(200));
 }
@@ -147,12 +156,18 @@ async fn subscriptions_roundtrip() {
         .await;
 
     let c = client(&server);
-    let subs = get_subscriptions(&c).await.expect("get ok");
+    let subs = c
+        .call(|c| c.get_webhook_subscriptions())
+        .await
+        .expect("get ok");
     assert_eq!(subs.subscribed_event_types, vec!["task_assigned"]);
 
-    let updated =
-        update_subscriptions(&c, vec!["task_assigned".into(), "payment_disbursed".into()])
-            .await
-            .expect("put ok");
+    let update = WebhookSubscriptionsUpdate {
+        subscribed_event_types: vec!["task_assigned".into(), "payment_disbursed".into()],
+    };
+    let updated = c
+        .call(|c| c.update_webhook_subscriptions(&update))
+        .await
+        .expect("put ok");
     assert_eq!(updated.subscribed_event_types.len(), 2);
 }

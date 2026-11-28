@@ -32,7 +32,6 @@ use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 use crate::tempo_session::{load_wallet, WalletOpts};
 
-use taskfast_agent::bootstrap;
 use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
 use taskfast_client::api::types::SettleTaskBody;
 use taskfast_client::map_api_error;
@@ -152,7 +151,8 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
         match task.settlement_domain.as_ref() {
             Some(d) => (d.chain_id, d.verifying_contract.to_string()),
             None => {
-                let readiness = bootstrap::get_readiness(&client)
+                let readiness = client
+                    .call(|c| c.get_agent_readiness())
                     .await
                     .map_err(CmdError::from)?;
                 let d = readiness.settlement_domain;

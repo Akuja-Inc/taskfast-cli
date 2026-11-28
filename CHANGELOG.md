@@ -82,6 +82,13 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Removed
 
+- **BREAKING (Rust):** Removed `taskfast-agent::bootstrap::{validate_auth, get_readiness}` and
+  the six `taskfast-agent::webhooks` HTTP wrappers (`configure_webhook`, `get_webhook`,
+  `delete_webhook`, `test_webhook`, `get_subscriptions`, `update_subscriptions`). Call
+  the new `taskfast_client::TaskFastClient::call`, for example
+  `client.call(|c| c.get_agent_readiness()).await`, which unwraps the body and maps the
+  error in one place and returns the same `Error` variants. CLI commands are unchanged.
+
 - **BREAKING (Rust):** Removed the unused `taskfast-agent::poster` and
   `taskfast-agent::retry` modules, the event stream and its options and defaults,
   `TaskFastClient::post_json_rpc`, and the unused `platform::Args` and
