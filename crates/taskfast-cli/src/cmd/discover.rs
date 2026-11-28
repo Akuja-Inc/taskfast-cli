@@ -22,7 +22,6 @@ use super::{CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_client::api::types::ListOpenTasksStatus;
-use taskfast_client::map_api_error;
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -75,22 +74,19 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     } else {
         Some(args.capabilities.clone())
     };
-    let resp = match client
-        .inner()
-        .list_open_tasks(
-            None,
-            args.budget_max,
-            args.budget_min,
-            capabilities_vec.as_ref(),
-            args.cursor.as_deref(),
-            taskfast_client::page_limit(args.limit),
-            args.status.map(Into::into),
-        )
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| {
+            c.list_open_tasks(
+                None,
+                args.budget_max,
+                args.budget_min,
+                capabilities_vec.as_ref(),
+                args.cursor.as_deref(),
+                taskfast_client::page_limit(args.limit),
+                args.status.map(Into::into),
+            )
+        })
+        .await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,

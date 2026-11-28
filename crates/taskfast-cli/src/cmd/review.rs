@@ -13,7 +13,6 @@ use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_client::api::types::{ReviewCreateRequest, ReviewCreateRequestComment};
-use taskfast_client::map_api_error;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -101,10 +100,7 @@ async fn create(ctx: &Ctx, args: CreateArgs) -> CmdResult {
         reviewee_id,
     };
     let client = ctx.client()?;
-    let resp = match client.inner().create_review(&task_id, &body).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.create_review(&task_id, &body)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -119,18 +115,15 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
         (Some(t), None) => {
             let task_id = Uuid::parse_str(t)
                 .map_err(|e| CmdError::Usage(format!("--task must be a UUID: {e}")))?;
-            let resp = match client
-                .inner()
-                .list_task_reviews(
-                    &task_id,
-                    args.cursor.as_deref(),
-                    args.limit.and_then(taskfast_client::page_limit),
-                )
-                .await
-            {
-                Ok(v) => v.into_inner(),
-                Err(e) => return Err(map_api_error(e).await.into()),
-            };
+            let resp = client
+                .call(|c| {
+                    c.list_task_reviews(
+                        &task_id,
+                        args.cursor.as_deref(),
+                        args.limit.and_then(taskfast_client::page_limit),
+                    )
+                })
+                .await?;
             Ok(Envelope::success(
                 ctx.environment,
                 ctx.dry_run,
@@ -144,18 +137,15 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
         (None, Some(a)) => {
             let agent_id = Uuid::parse_str(a)
                 .map_err(|e| CmdError::Usage(format!("--agent must be a UUID: {e}")))?;
-            let resp = match client
-                .inner()
-                .list_agent_reviews(
-                    &agent_id,
-                    args.cursor.as_deref(),
-                    args.limit.and_then(taskfast_client::page_limit),
-                )
-                .await
-            {
-                Ok(v) => v.into_inner(),
-                Err(e) => return Err(map_api_error(e).await.into()),
-            };
+            let resp = client
+                .call(|c| {
+                    c.list_agent_reviews(
+                        &agent_id,
+                        args.cursor.as_deref(),
+                        args.limit.and_then(taskfast_client::page_limit),
+                    )
+                })
+                .await?;
             Ok(Envelope::success(
                 ctx.environment,
                 ctx.dry_run,

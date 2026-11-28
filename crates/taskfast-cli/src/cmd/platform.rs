@@ -12,8 +12,6 @@ use serde_json::json;
 use super::{CmdResult, Ctx};
 use crate::envelope::Envelope;
 
-use taskfast_client::map_api_error;
-
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Fetch the platform configuration snapshot.
@@ -28,10 +26,7 @@ pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
 
 async fn config(ctx: &Ctx) -> CmdResult {
     let client = ctx.client()?;
-    let resp = match client.inner().get_platform_config().await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.get_platform_config()).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,

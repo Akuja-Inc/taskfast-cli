@@ -29,7 +29,7 @@ use taskfast_client::api::types::{
     Artifact, SubmitArtifactCidBody, UpdateArtifactCidStatusBody,
     UpdateArtifactCidStatusBodyCidStatus,
 };
-use taskfast_client::{map_api_error, put_presigned_upload, ArtifactUpload, TaskFastClient};
+use taskfast_client::{put_presigned_upload, ArtifactUpload, TaskFastClient};
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -126,18 +126,15 @@ pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
 async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
     let task_id = parse_uuid(&args.task_id, "task id")?;
     let client = ctx.client()?;
-    let resp = match client
-        .inner()
-        .list_artifacts(
-            &task_id,
-            args.cursor.as_deref(),
-            args.limit.and_then(taskfast_client::page_limit),
-        )
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| {
+            c.list_artifacts(
+                &task_id,
+                args.cursor.as_deref(),
+                args.limit.and_then(taskfast_client::page_limit),
+            )
+        })
+        .await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -153,10 +150,9 @@ async fn get(ctx: &Ctx, args: GetArgs) -> CmdResult {
     let task_id = parse_uuid(&args.task_id, "task id")?;
     let artifact_id = parse_uuid(&args.artifact_id, "artifact id")?;
     let client = ctx.client()?;
-    let resp = match client.inner().get_artifact(&task_id, &artifact_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| c.get_artifact(&task_id, &artifact_id))
+        .await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -321,10 +317,9 @@ async fn delete(ctx: &Ctx, args: GetArgs) -> CmdResult {
         ));
     }
     let client = ctx.client()?;
-    match client.inner().delete_artifact(&task_id, &artifact_id).await {
-        Ok(_) => {}
-        Err(e) => return Err(map_api_error(e).await.into()),
-    }
+    client
+        .call(|c| c.delete_artifact(&task_id, &artifact_id))
+        .await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -360,10 +355,9 @@ async fn submit_cid(ctx: &Ctx, args: CidArgs) -> CmdResult {
     let body = SubmitArtifactCidBody {
         output_cid: output_cid.to_string(),
     };
-    let resp = match client.inner().submit_artifact_cid(&task_id, &body).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| c.submit_artifact_cid(&task_id, &body))
+        .await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -392,14 +386,9 @@ async fn update_cid_status(ctx: &Ctx, args: CidStatusArgs) -> CmdResult {
     }
     let client = ctx.client()?;
     let body = UpdateArtifactCidStatusBody { cid_status };
-    let resp = match client
-        .inner()
-        .update_artifact_cid_status(&task_id, &artifact_id, &body)
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| c.update_artifact_cid_status(&task_id, &artifact_id, &body))
+        .await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
