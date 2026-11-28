@@ -52,7 +52,7 @@ jiff = { version = "1.0.1", default-features = false, features = ["std", "serde"
 toml_edit = "0.25.15"
 rust_decimal = { version = "1.43.0", default-features = false, features = ["std"] }
 
-taskfast-codegen = { path = "crates/taskfast-codegen", version = "0.3.0" }
+taskfast-codegen = { path = "crates/taskfast-codegen", version = "=0.4.0" }
 taskfast-client = { path = "crates/taskfast-client", version = "0.24.0" }
 taskfast-chains = { path = "crates/taskfast-chains", version = "0.1.0", default-features = false }
 taskfast-agent = { path = "crates/taskfast-agent", version = "0.28.0" }

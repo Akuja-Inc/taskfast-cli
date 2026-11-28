@@ -47,9 +47,15 @@ local path dep — so if `taskfast-client` gains public API but isn't bumped, th
 crates.io publish of `taskfast-cli` fails (`E0425: cannot find function …`),
 *after* the tag is already cut. **Local CI and `cargo-semver-checks` cannot
 catch this** (they build with path deps). `cargo xtask bump` now bumps
-`taskfast-client` in lockstep (its own version line + the workspace dep
-requirement) to prevent this; if you ever bump versions by hand, do the same.
-This bit the v0.9.0 release (gh#85) and required a recovery republish.
+`taskfast-client`, `taskfast-codegen` and `taskfast-chains` in lockstep (each
+its own version line + the workspace dep requirement) to prevent this; if you
+ever bump versions by hand, do the same. This bit the v0.9.0 release (gh#85)
+and required a recovery republish. `publish-crates.yml` skips a version already
+on crates.io without error, so an unbumped crate silently keeps its old
+published code (`taskfast-chains` 0.1.0 shipped without the AlphaUSD fee rail
+for this reason). `taskfast-codegen` is pinned exactly (`=`) because its
+normalizer runs in each published `taskfast-client`'s build script; `cargo
+xtask bump` keeps the `=`.
 
 **Before tagging**, prefer validating the publish chain: dispatch
 `publish-crates.yml` with `dry_run: true`, or run `cargo publish -p taskfast-cli

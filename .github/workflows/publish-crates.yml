@@ -17,7 +17,9 @@
 # publishing — if the exact version is already there, it is skipped. Real
 # publish failures are propagated honestly (never masked); a short index-
 # propagation wait follows each publish so the next crate in the chain can
-# resolve it.
+# resolve it. A skip is NOT proof the registry copy is current: an unbumped
+# crate with changed code is skipped silently, which is why `cargo xtask bump`
+# bumps every publishable crate that has its own version line.
 #
 # Triggers:
 #   * workflow_dispatch (manual) — a `dry_run` input validates packaging +
