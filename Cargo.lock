@@ -4488,7 +4488,7 @@ dependencies = [
 
 [[package]]
 name = "taskfast-codegen"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "serde_yaml",
@@ -5574,6 +5574,7 @@ dependencies = [
  "clap",
  "jiff",
  "taskfast-codegen",
+ "tempfile",
  "toml_edit",
 ]
 

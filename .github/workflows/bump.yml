@@ -2,7 +2,7 @@
 #
 # Click "Run workflow" in the Actions tab on the `main` branch, pick the bump
 # level (patch / minor / major — default patch). CI will:
-#   1. `cargo xtask bump <level>` (bumps the 3 synced version sites + Cargo.lock,
+#   1. `cargo xtask bump <level>` (bumps the synced version sites + Cargo.lock,
 #      and rolls `## Unreleased` -> dated `## [X.Y.Z]` in CHANGELOG.md — gh#102)
 #   2. commit the diff as `chore(release): vX.Y.Z`
 #   3. tag `taskfast-cli-vX.Y.Z` (annotated — lightweight tags get dropped by
@@ -11,11 +11,7 @@
 #      release.yml (cargo-dist). A default GITHUB_TOKEN push would NOT trigger
 #      another workflow (GitHub anti-loop), hence the PAT.
 #
-# Prefer local control? Run:
-#   cargo xtask bump <patch|minor|major>
-#   git commit -am "chore(release): vX.Y.Z"
-#   git tag -a taskfast-cli-vX.Y.Z -m "Release X.Y.Z"
-#   git push --follow-tags
+# Prefer local control? Follow CONTRIBUTING.md (Release flow, Option B).
 #
 # Required secret: RELEASE_PLZ_TOKEN
 #   Fine-grained PAT with `Contents: Read and write` on this repo, owned by a
@@ -92,8 +88,9 @@ jobs:
           # `## Unreleased` into the dated release section (gh#102) — the
           # release commit must carry that roll or cargo-dist can't match the
           # tagged version's Release notes.
-          git add Cargo.toml Cargo.lock crates/taskfast-client/Cargo.toml CHANGELOG.md
+          git add Cargo.toml Cargo.lock crates/taskfast-client/Cargo.toml crates/taskfast-codegen/Cargo.toml crates/taskfast-chains/Cargo.toml CHANGELOG.md
           git commit -m "chore(release): v$VERSION"
+          scripts/publish-dry-run.sh
           # Annotated tag (-a) — `git push --follow-tags` silently skips
           # lightweight tags, which previously caused release.yml to never
           # fire and left an orphaned commit on main. See 0.2.2 postmortem.
@@ -101,4 +98,4 @@ jobs:
           # Push branch + tag explicitly (belt and suspenders — the annotated
           # tag would ride --follow-tags, but being explicit makes the intent
           # obvious and survives future refactors).
-          git push origin main "taskfast-cli-v$VERSION"
+          git push --atomic origin main "taskfast-cli-v$VERSION"

@@ -4,11 +4,7 @@
 
 Releases are triggered by pushing a git tag of the form `taskfast-cli-vX.Y.Z`. The tag push fires `.github/workflows/release.yml` (cargo-dist), which builds artifacts, pushes the Homebrew formula, and creates the GitHub Release with notes generated from Conventional Commits.
 
-`cargo xtask bump <level>` keeps the **three synced version sites** in lockstep:
-
-- `[workspace.package].version`
-- the inline `taskfast-agent` dep ref
-- the inline `xtask` build-dep ref in `taskfast-client`
+`cargo xtask bump <level>` bumps every version group in lockstep. The groups are listed in the canonical guide linked above.
 
 ## Option A — CI button (patch releases, recommended)
 
@@ -21,23 +17,11 @@ Actions tab → **Release bump (patch)** → **Run workflow** on `main`. CI runs
 
 ## Option B — local (minor / major releases, or full manual control)
 
-```bash
-cargo xtask bump minor              # or: patch | major
-#   equivalent: make bump-{patch,minor,major}
-#   --dry-run previews; --no-lock skips the `cargo check` Cargo.lock refresh.
-
-git diff Cargo.toml Cargo.lock      # review
-git commit -am "chore(release): vX.Y.Z"
-git tag taskfast-cli-vX.Y.Z         # cargo-dist Singular Announcement prefix
-git push --follow-tags              # tag push triggers release.yml
-```
-
-> **Memory note:** `--follow-tags` only pushes *annotated* tags. If you used a lightweight tag (`git tag foo` without `-a`), run `git push origin main taskfast-cli-vX.Y.Z` explicitly.
+Follow the recipe in [`CONTRIBUTING.md — Release flow`](https://github.com/Akuja-Inc/taskfast-cli/blob/main/CONTRIBUTING.md#release-flow-maintainers-only), Option B: bump, commit, run `scripts/publish-dry-run.sh`, then create an annotated tag and push.
 
 ## Scope notes
 
 - `taskfast-cli` + `taskfast-agent` version in lockstep via `version.workspace = true`. `xtask` also inherits, but `publish = false`.
-- `taskfast-client` and `taskfast-chains` version independently — bump their own `crates/<name>/Cargo.toml` and the matching `[workspace.dependencies]` inline ref by hand when releasing those.
 - The `taskfast-cli-v` prefix is a cargo-dist *Singular Announcement*: only the `taskfast-cli` binary is built and published, even though `taskfast-agent`'s Cargo version bumped in lockstep.
 
 ## After the release

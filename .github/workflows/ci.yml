@@ -213,6 +213,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Spec provenance gate (offline)
         run: scripts/check-spec-drift.sh
+      - name: Publish dry-run guard
+        run: scripts/test-publish-dry-run.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo xtask sync-spec

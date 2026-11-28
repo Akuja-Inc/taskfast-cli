@@ -48,7 +48,22 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   per-command JSON-RPC wiremocks; the mock signs for real and reports the
   chain id each tx was signed for.
 
+- `taskfast-client` now requires `taskfast-codegen` exactly (`=`) and codegen
+  moves to a new 0.x line. The normalizer runs inside each published client's
+  build script against that client's own bundled spec, so a change to its
+  required-field list is a breaking change, not a patch. `cargo xtask bump`
+  keeps the `=`.
+
 ### Fixed
+
+- `cargo xtask bump` now bumps `taskfast-codegen` and `taskfast-chains` with
+  the release, each on its own version line next to its workspace dependency
+  requirement, and `bump.yml` stages their manifests in the release commit.
+  `publish-crates.yml` skips a version already on crates.io without error, so
+  an unbumped crate kept its old published code: the registry copy of
+  `taskfast-chains` 0.1.0 predates the AlphaUSD fee rail on Moderato, so
+  `cargo install taskfast-cli` refused it. `taskfast-chains` now publishes
+  with the next release.
 
 - **`events stream` stops on a failed write.** An event now counts as seen only
   after its line is written and flushed. If a write for an event, an

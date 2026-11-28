@@ -42,9 +42,10 @@ enum Cmd {
     /// Bumps the workspace version (`taskfast-cli` + `taskfast-agent` + `xtask`,
     /// all `version.workspace = true`) and, on its own version line,
     /// `taskfast-client` — its public API is consumed by `taskfast-cli`, so it
-    /// must bump in lockstep or the crates.io publish fails (gh#85). Other
-    /// independent crates (`taskfast-chains`, `taskfast-codegen`) are not bumped;
-    /// add them to `version_groups()` if they ever gain consumed public API.
+    /// must bump in lockstep or the crates.io publish fails (gh#85).
+    /// `taskfast-codegen` and `taskfast-chains` bump in lockstep too: a skipped
+    /// already-published version is silent, so a stale crate ships old code. A
+    /// leading `=` on a dependency requirement is preserved.
     Bump {
         /// Which semver component to increment.
         level: BumpLevel,
@@ -76,7 +77,10 @@ fn main() -> Result<()> {
             level,
             no_lock,
             dry_run,
-        } => run_bump(level, no_lock, dry_run),
+        } => {
+            let workspace_root = find_workspace_root().context("locate workspace root")?;
+            run_bump(&workspace_root, level, no_lock, dry_run)
+        }
     }
 }
 
@@ -173,11 +177,37 @@ fn version_groups() -> &'static [&'static [SyncedSite]] {
                 toml_path: &["workspace", "dependencies", "taskfast-client", "version"],
             },
         ],
+        &[
+            SyncedSite {
+                file: "crates/taskfast-codegen/Cargo.toml",
+                toml_path: &["package", "version"],
+            },
+            SyncedSite {
+                file: "Cargo.toml",
+                toml_path: &["workspace", "dependencies", "taskfast-codegen", "version"],
+            },
+        ],
+        &[
+            SyncedSite {
+                file: "crates/taskfast-chains/Cargo.toml",
+                toml_path: &["package", "version"],
+            },
+            SyncedSite {
+                file: "Cargo.toml",
+                toml_path: &["workspace", "dependencies", "taskfast-chains", "version"],
+            },
+        ],
     ]
 }
 
-fn run_bump(level: BumpLevel, no_lock: bool, dry_run: bool) -> Result<()> {
-    let workspace_root = find_workspace_root().context("locate workspace root")?;
+fn split_requirement(raw: &str) -> (&str, &str) {
+    match raw.strip_prefix('=') {
+        Some(version) => ("=", version),
+        None => ("", raw),
+    }
+}
+
+fn run_bump(workspace_root: &Path, level: BumpLevel, no_lock: bool, dry_run: bool) -> Result<()> {
     let groups = version_groups();
 
     // Load each distinct file once across ALL groups. Multiple sites in the
@@ -212,8 +242,9 @@ fn run_bump(level: BumpLevel, no_lock: bool, dry_run: bool) -> Result<()> {
             .with_context(|| format!("{} @ {}", group[0].file, group[0].toml_path.join(".")))?
             .to_owned();
         for site in &group[1..] {
-            let v = read_toml_string(&docs[doc_for(site.file, &docs)].1, site.toml_path)
+            let raw = read_toml_string(&docs[doc_for(site.file, &docs)].1, site.toml_path)
                 .with_context(|| format!("{} @ {}", site.file, site.toml_path.join(".")))?;
+            let (_, v) = split_requirement(raw);
             if v != current {
                 bail!(
                     "synced site {}@{} = {v} but group version = {current}; \
@@ -259,7 +290,9 @@ fn run_bump(level: BumpLevel, no_lock: bool, dry_run: bool) -> Result<()> {
     for (group, next) in &plans {
         for site in *group {
             let idx = doc_for(site.file, &docs);
-            write_toml_string(&mut docs[idx].1, site.toml_path, next);
+            let (operator, _) = split_requirement(read_toml_string(&docs[idx].1, site.toml_path)?);
+            let requirement = format!("{operator}{next}");
+            write_toml_string(&mut docs[idx].1, site.toml_path, &requirement);
         }
     }
     for (path, doc) in &docs {
@@ -274,7 +307,7 @@ fn run_bump(level: BumpLevel, no_lock: bool, dry_run: bool) -> Result<()> {
     if no_lock {
         eprintln!("bump: --no-lock, skipping `cargo check`");
     } else {
-        refresh_lockfile(&workspace_root).context("refresh Cargo.lock via `cargo check`")?;
+        refresh_lockfile(workspace_root).context("refresh Cargo.lock via `cargo check`")?;
     }
 
     eprintln!("bump: done. review: git diff");
@@ -500,28 +533,122 @@ mod tests {
         );
     }
 
+    fn workspace_manifest() -> (PathBuf, DocumentMut) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let doc = std::fs::read_to_string(root.join("Cargo.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        (root, doc)
+    }
+
     #[test]
-    fn taskfast_client_is_an_independent_bump_group() {
-        // Regression guard for the gh#85 / v0.9.0 release: taskfast-client must
-        // bump alongside every release so its published version always carries
-        // the API that taskfast-cli depends on.
-        let groups = version_groups();
-        assert_eq!(groups.len(), 2, "workspace group + taskfast-client group");
-        let client = groups
-            .iter()
-            .find(|g| {
-                g.iter()
-                    .any(|s| s.file == "crates/taskfast-client/Cargo.toml")
-            })
-            .expect("a taskfast-client version group exists");
-        // It pins both the crate's own version and the workspace dep requirement.
-        assert!(client
-            .iter()
-            .any(|s| s.file == "crates/taskfast-client/Cargo.toml"
-                && s.toml_path == ["package", "version"].as_slice()));
-        assert!(client.iter().any(|s| s.file == "Cargo.toml"
-            && s.toml_path
-                == ["workspace", "dependencies", "taskfast-client", "version"].as_slice()));
+    fn every_independently_versioned_path_dependency_has_a_bump_group() {
+        let (root, manifest) = workspace_manifest();
+        let deps = manifest["workspace"]["dependencies"].as_table().unwrap();
+        let mut missing = Vec::new();
+        for (name, dep) in deps {
+            let Some(path) = dep.get("path").and_then(|p| p.as_str()) else {
+                continue;
+            };
+            let member: DocumentMut = std::fs::read_to_string(root.join(path).join("Cargo.toml"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            if member["package"]["version"].as_str().is_none() {
+                continue;
+            }
+            let member_file = format!("{path}/Cargo.toml");
+            let covered = version_groups().iter().any(|group| {
+                group.iter().any(|s| {
+                    s.file == member_file && s.toml_path == ["package", "version"].as_slice()
+                }) && group.iter().any(|s| {
+                    s.file == "Cargo.toml"
+                        && s.toml_path == ["workspace", "dependencies", name, "version"].as_slice()
+                })
+            });
+            if !covered {
+                missing.push(name.to_owned());
+            }
+        }
+        assert!(missing.is_empty(), "no bump group for: {missing:?}");
+    }
+
+    #[test]
+    fn bump_writes_the_exact_codegen_requirement_and_every_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for krate in ["taskfast-client", "taskfast-codegen", "taskfast-chains"] {
+            std::fs::create_dir_all(root.join("crates").join(krate)).unwrap();
+        }
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[workspace.package]
+version = "0.28.0"
+
+[workspace.dependencies]
+taskfast-codegen = { path = "crates/taskfast-codegen", version = "=0.4.0" }
+taskfast-client = { path = "crates/taskfast-client", version = "0.24.0" }
+taskfast-chains = { path = "crates/taskfast-chains", version = "0.1.0" }
+taskfast-agent = { path = "crates/taskfast-agent", version = "0.28.0" }
+"#,
+        )
+        .unwrap();
+        for (krate, version) in [
+            ("taskfast-client", "0.24.0"),
+            ("taskfast-codegen", "0.4.0"),
+            ("taskfast-chains", "0.1.0"),
+        ] {
+            std::fs::write(
+                root.join("crates").join(krate).join("Cargo.toml"),
+                format!("[package]\nname = \"{krate}\"\nversion = \"{version}\"\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(root.join("CHANGELOG.md"), "# Changelog\n\n## Unreleased\n").unwrap();
+
+        run_bump(root, BumpLevel::Patch, true, false).unwrap();
+
+        let manifest: DocumentMut = std::fs::read_to_string(root.join("Cargo.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let requirement = |name: &str| {
+            manifest["workspace"]["dependencies"][name]["version"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(requirement("taskfast-codegen"), "=0.4.1");
+        assert_eq!(requirement("taskfast-client"), "0.24.1");
+        assert_eq!(requirement("taskfast-chains"), "0.1.1");
+        assert_eq!(requirement("taskfast-agent"), "0.28.1");
+        let package_version = |krate: &str| {
+            std::fs::read_to_string(root.join("crates").join(krate).join("Cargo.toml"))
+                .unwrap()
+                .parse::<DocumentMut>()
+                .unwrap()["package"]["version"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(package_version("taskfast-codegen"), "0.4.1");
+        assert_eq!(package_version("taskfast-chains"), "0.1.1");
+    }
+
+    #[test]
+    fn taskfast_codegen_is_pinned_exactly() {
+        let (_, manifest) = workspace_manifest();
+        let req = manifest["workspace"]["dependencies"]["taskfast-codegen"]["version"]
+            .as_str()
+            .unwrap();
+        assert!(
+            req.starts_with('='),
+            "codegen requirement `{req}` is not exact"
+        );
     }
 
     #[test]
