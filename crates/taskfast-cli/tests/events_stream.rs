@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use taskfast_cli::cmd::events::stream::{run_with, ShutdownToken, StreamArgs, StreamIo};
+use taskfast_cli::cmd::events::stream::{run, run_with, ShutdownToken, StreamArgs, StreamIo};
 use taskfast_cli::cmd::Ctx;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::TcpListener;
@@ -342,7 +342,17 @@ async fn missing_api_key_envelope_goes_to_injected_writer() {
     .await;
 
     assert_eq!(code, std::process::ExitCode::from(2));
+    assert!(out.ends_with(b"\n"));
     let lines = out_lines(&out);
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["ok"], false);
+    assert_eq!(lines[0]["error"]["code"], "missing_api_key");
+}
+
+fn assert_send<T: Send>(_: T) {}
+
+#[test]
+fn run_future_is_send() {
+    let ctx = Ctx::default();
+    assert_send(run(&ctx, once_args()));
 }

@@ -95,12 +95,23 @@ const RECONNECT_CAP: Duration = Duration::from_secs(30);
 /// the envelope wrapper: error envelopes would contaminate the JSONL
 /// stream and swallow stdout buffering semantics.
 pub async fn run(ctx: &Ctx, args: StreamArgs) -> ExitCode {
+    let mut stdout = std::io::stdout();
+    if let Err(e) = connection_target(ctx) {
+        emit_error_envelope(&mut stdout, ctx, &e);
+        return e.exit_code().into();
+    }
     let io = StreamIo {
-        out: &mut LiveStdout,
+        out: &mut stdout,
         acks: args.ack_stdin.then(spawn_stdin_reader),
         shutdown: install_shutdown_signal(),
     };
     run_with(ctx, args, io).await
+}
+
+fn connection_target(ctx: &Ctx) -> Result<(String, String), CmdError> {
+    let api_key = ctx.api_key.clone().ok_or(CmdError::MissingApiKey)?;
+    let ws_url = ws_url_from_base(ctx.base_url())?;
+    Ok((api_key, ws_url))
 }
 
 #[doc(hidden)]
@@ -117,15 +128,8 @@ pub async fn run_with(ctx: &Ctx, args: StreamArgs, io: StreamIo<'_>) -> ExitCode
         acks: mut ack_lines,
         shutdown,
     } = io;
-    let api_key = match ctx.api_key.as_deref() {
-        Some(k) => k.to_string(),
-        None => {
-            emit_error_envelope(out, ctx, &CmdError::MissingApiKey);
-            return CmdError::MissingApiKey.exit_code().into();
-        }
-    };
-    let ws_url = match ws_url_from_base(ctx.base_url()) {
-        Ok(u) => u,
+    let (api_key, ws_url) = match connection_target(ctx) {
+        Ok(target) => target,
         Err(e) => {
             emit_error_envelope(out, ctx, &e);
             return e.exit_code().into();
@@ -199,7 +203,7 @@ enum ConnectOutcome {
 }
 
 async fn run_once(
-    out: &mut dyn Write,
+    out: &mut (dyn Write + Send),
     ws_url: &str,
     api_key: &str,
     first_connect: bool,
@@ -479,18 +483,6 @@ fn ws_url_from_base(base: &str) -> Result<String, CmdError> {
     Ok(format!("{swapped}/socket/agent/websocket?vsn=2.0.0"))
 }
 
-struct LiveStdout;
-
-impl Write for LiveStdout {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        std::io::stdout().lock().write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        std::io::stdout().lock().flush()
-    }
-}
-
 fn emit_sentinel(out: &mut dyn Write, kind: &str) {
     let line = format!("{}\n", json!({ "sentinel": kind }));
     let _ = out.write_all(line.as_bytes());
@@ -520,8 +512,11 @@ fn emit_error_envelope(out: &mut dyn Write, ctx: &Ctx, err: &CmdError) {
         return;
     }
     let env = crate::envelope::Envelope::error(ctx.environment, ctx.dry_run, err);
-    let _ = serde_json::to_writer(&mut *out, &env);
-    let _ = out.write_all(b"\n");
+    let Ok(mut buf) = serde_json::to_vec(&env) else {
+        return;
+    };
+    buf.push(b'\n');
+    let _ = out.write_all(&buf);
     let _ = out.flush();
 }
 
