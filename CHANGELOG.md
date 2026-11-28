@@ -47,6 +47,14 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Fixed
 
+- **`events stream` stops on a failed write.** An event now counts as seen only
+  after its line is written and flushed. If a write for an event, an
+  `unparseable` record or a non-terminal sentinel (`connected`, `resumed`,
+  `reconnecting`, `acked`) fails, the stream stops with exit code 6 instead of
+  exiting 0 or reconnecting. If the server replays the event whose write failed,
+  a restarted stream prints it instead of acking it unseen. A failed `closing`
+  or `auth_failed` write is still best effort.
+
 - The `x-request-id` that joins a command's trace line to the server log is now
   recorded through one send path for the hand-written `taskfast-client` methods
   (`users/me`, artifact upload, `config/network`, `agents/me`, the events page).
