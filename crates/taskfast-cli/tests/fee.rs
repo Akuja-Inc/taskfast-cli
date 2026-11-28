@@ -788,3 +788,36 @@ async fn old_task_retry_fee_dry_run_prints_the_same_redirect() {
         "got {err:?}"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fee_retry_refuses_unwritable_state_dir_before_broadcasting() {
+    let api_server = MockServer::start().await;
+    let (rpc_url, node) = testnet_node();
+    let wallet = create_test_wallet();
+    mock_task_status(&api_server, Some("retry_submission_fee"), None).await;
+    mock_payment_data(&api_server, TOKEN_ADDR).await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    let link = tmp.path().join(".taskfast");
+    std::os::unix::fs::symlink(&shared, &link).unwrap();
+
+    let cmd = retry_wallet(
+        &wallet.keystore_path,
+        &wallet.password_path,
+        &wallet.address,
+        Some(rpc_url),
+    );
+    let mut ctx = ctx_for(&api_server);
+    ctx.allow_custom_endpoints = true;
+    ctx.config_path = link.join("config.json");
+
+    let err = run(&ctx, cmd).await.expect_err("state dir must be refused");
+    assert!(err.to_string().contains("symlink"), "{err}");
+    assert!(
+        node.sent_transactions().is_empty(),
+        "nothing may be broadcast"
+    );
+}

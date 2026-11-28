@@ -100,12 +100,21 @@ impl StateStore {
         if dir.as_os_str().is_empty() || dir == Path::new(".") {
             return Ok(());
         }
-        fs::create_dir_all(dir)?;
-
         let is_taskfast_dir = Path::new(DEFAULT_CONFIG_PATH)
             .parent()
             .and_then(Path::file_name)
             .is_some_and(|expected| dir.file_name() == Some(expected));
+
+        if is_taskfast_dir && fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to harden symlinked state directory {}",
+                    dir.display()
+                ),
+            ));
+        }
+        fs::create_dir_all(dir)?;
 
         if is_taskfast_dir {
             #[cfg(unix)]
@@ -445,6 +454,26 @@ mod tests {
             .record_pending_fee_retry(&uuid::Uuid::new_v4(), "0xabc")
             .unwrap();
         assert_hardened_fresh_dir(&dir, &dir.join("fee_retries.json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_through_symlinked_taskfast_dir_is_refused_and_target_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let shared = tmp.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = tmp.path().join(".taskfast");
+        std::os::unix::fs::symlink(&shared, &link).unwrap();
+        let store = StateStore::from_config_path(&link.join("config.json"));
+
+        assert!(store.write_cursor(Some("cur1")).is_err());
+
+        let mode = fs::metadata(&shared).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+        assert!(!shared.join(".gitignore").exists());
+        assert!(!shared.join("events.cursor").exists());
     }
 
     #[test]

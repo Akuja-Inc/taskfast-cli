@@ -228,6 +228,7 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
     let client = ctx.client()?;
     let pending_voucher = state_store.get_pending_fee_retry(&task_id);
 
+    let mut voucher_saved = true;
     let voucher_to_submit = if let Some(saved_tx_hash) = pending_voucher {
         eprintln!(
             "taskfast: found pending broadcast transaction {saved_tx_hash} for task {task_id}; \
@@ -261,6 +262,10 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
                 }),
             ));
         }
+
+        state_store.ensure_dir().map_err(|e| {
+            CmdError::Usage(format!("prepare state directory before broadcasting: {e}"))
+        })?;
 
         let token_address_str = payment
             .token_address
@@ -315,6 +320,7 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
         let tx_hash_hex = format!("{tx_hash:#x}");
 
         if let Err(e) = state_store.record_pending_fee_retry(&task_id, &tx_hash_hex) {
+            voucher_saved = false;
             eprintln!("taskfast: warning: failed to persist pending fee retry to state store: {e}");
         }
 
@@ -342,10 +348,14 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
             let retry_cmd = format!(
                 "taskfast fee retry {task_id} --submission-fee-voucher {voucher_to_submit}"
             );
+            let saved_note = if voucher_saved {
+                format!("The pending transaction has been saved locally; re-running `taskfast fee retry {task_id}` will reuse it.\nAlternatively, run:")
+            } else {
+                "The pending transaction was NOT saved locally; do not re-run a plain `fee retry` (it would pay again). Retry only with:".to_string()
+            };
             eprintln!(
                 "taskfast: fee transfer was broadcast ({voucher_to_submit}) but server retry failed: {server_err}.\n\
-                 The pending transaction has been saved locally; re-running `taskfast fee retry {task_id}` will reuse it.\n\
-                 Alternatively, run:\n  {retry_cmd}"
+                 {saved_note}\n  {retry_cmd}"
             );
             return Err(server_err.into());
         }

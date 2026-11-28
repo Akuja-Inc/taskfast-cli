@@ -219,16 +219,6 @@ impl Config {
     /// Atomic write: JSON-serialize, chmod `0600` on unix from creation, rename into place.
     /// Creates the parent directory if it doesn't exist and tightens to `0700`.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                crate::state_store::StateStore::ensure_dir_path(parent).map_err(|source| {
-                    ConfigError::Io {
-                        path: parent.to_path_buf(),
-                        source,
-                    }
-                })?;
-            }
-        }
         let mut to_write = self.clone();
         if to_write.schema_version == 0 {
             to_write.schema_version = CURRENT_SCHEMA_VERSION;

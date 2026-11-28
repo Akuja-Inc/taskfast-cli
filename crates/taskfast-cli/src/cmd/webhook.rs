@@ -138,6 +138,14 @@ pub async fn provision_webhook(
         // a carefully-curated subscription list.
         events: None,
     };
+    if let Some(parent) = secret_file.and_then(std::path::Path::parent) {
+        crate::state_store::StateStore::ensure_dir_path(parent).map_err(|e| {
+            CmdError::Usage(format!(
+                "prepare secret directory {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
     let cfg = webhooks::configure_webhook(client, &body)
         .await
         .map_err(CmdError::from)?;

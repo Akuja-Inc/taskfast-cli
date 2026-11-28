@@ -305,3 +305,34 @@ async fn delete_returns_action_deleted_on_204() {
     let v = value(&env);
     assert_eq!(v["data"]["action"], "deleted");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn register_refuses_unwritable_secret_dir_before_any_put() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    fs::create_dir(&shared).unwrap();
+    let link = tmp.path().join(".taskfast");
+    std::os::unix::fs::symlink(&shared, &link).unwrap();
+
+    let ctx = ctx_for(&server, false);
+    let err = webhook::run(
+        &ctx,
+        Command::Register(RegisterArgs {
+            url: "https://example.com/hook".into(),
+            secret_file: Some(link.join("webhook.secret")),
+            events: vec![],
+        }),
+    )
+    .await
+    .expect_err("symlinked .taskfast must be refused");
+    assert!(err.to_string().contains("symlink"), "{err}");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}

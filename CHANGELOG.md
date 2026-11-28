@@ -47,10 +47,13 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Fixed
 
-- Every write under a fresh `.taskfast/` now hardens the directory (mode `0700`,
-  `.gitignore` of `*`). The events cursor, seen-ids, fee-retry and webhook-secret
-  writes used to create it with the umask default and no `.gitignore` when
-  `taskfast config` had not run first (gh#269).
+- The events cursor, seen-ids, fee-retry and webhook-secret atomic writes now
+  harden their immediate `.taskfast/` parent (mode `0700`, `.gitignore` of `*`).
+  They used to create it with the umask default and no `.gitignore` when
+  `taskfast config` had not run first. A symlinked `.taskfast/` is refused
+  rather than followed, `fee retry` and `webhook register` check the directory
+  before broadcasting or registering, and a failed save is never reported as
+  saved (gh#269). Trace files are still written outside this path.
 
 - `escalate sign` resolved the deployment's proxy by the environment's network
   entry instead of the server-issued chain id, so a Tempo Zone task failed
