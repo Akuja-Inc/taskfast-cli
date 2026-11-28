@@ -210,7 +210,11 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
                 let _ = state_store.clear_pending_fee_retry(&task_id);
                 v.into_inner()
             }
-            Err(e) => return Err(map_api_error(e).await.into()),
+            Err(e) => {
+                let server_err = map_api_error(e).await;
+                clear_if_hash_reused(&state_store, &task_id, &voucher, &server_err);
+                return Err(server_err.into());
+            }
         };
         return Ok(Envelope::success(
             ctx.environment,
@@ -226,8 +230,24 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
     // Pass-through form was not provided. Check whether a previous broadcast
     // was recorded in local state, avoiding double-payment if server submit failed.
     let client = ctx.client()?;
-    let pending_voucher = state_store.get_pending_fee_retry(&task_id);
+    let pending_voucher = state_store
+        .try_pending_fee_retry(&task_id)
+        .map_err(|e| CmdError::Usage(format!("cannot read the pending fee retry ledger: {e}")))?;
+    if ctx.dry_run {
+        if let Some(saved) = &pending_voucher {
+            return Ok(Envelope::success(
+                ctx.environment,
+                ctx.dry_run,
+                json!({
+                    "action": "would_submit_saved_voucher",
+                    "task_id": task_id.to_string(),
+                    "submission_fee_voucher": saved,
+                }),
+            ));
+        }
+    }
 
+    let mut voucher_saved = true;
     let voucher_to_submit = if let Some(saved_tx_hash) = pending_voucher {
         eprintln!(
             "taskfast: found pending broadcast transaction {saved_tx_hash} for task {task_id}; \
@@ -261,6 +281,14 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
                 }),
             ));
         }
+
+        state_store
+            .preflight(crate::state_store::StateAsset::FeeRetries)
+            .map_err(|e| {
+                CmdError::Usage(format!(
+                    "cannot save the pending fee retry before broadcasting: {e}"
+                ))
+            })?;
 
         let token_address_str = payment
             .token_address
@@ -314,7 +342,9 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
             .await?;
         let tx_hash_hex = format!("{tx_hash:#x}");
 
+        voucher_saved = !state_store.is_ephemeral();
         if let Err(e) = state_store.record_pending_fee_retry(&task_id, &tx_hash_hex) {
+            voucher_saved = false;
             eprintln!("taskfast: warning: failed to persist pending fee retry to state store: {e}");
         }
 
@@ -334,18 +364,21 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
         }
         Err(e) => {
             let server_err = map_api_error(e).await;
+            clear_if_hash_reused(&state_store, &task_id, &voucher_to_submit, &server_err);
+            let mut replay = true;
             if let taskfast_client::Error::Validation { code, .. } = &server_err {
-                if code == "retry_not_needed" {
-                    let _ = state_store.clear_pending_fee_retry(&task_id);
+                if code == "submission_fee_hash_reused" || code == "fee_executed_unmatched" {
+                    replay = false;
                 }
             }
-            let retry_cmd = format!(
-                "taskfast fee retry {task_id} --submission-fee-voucher {voucher_to_submit}"
-            );
             eprintln!(
-                "taskfast: fee transfer was broadcast ({voucher_to_submit}) but server retry failed: {server_err}.\n\
-                 The pending transaction has been saved locally; re-running `taskfast fee retry {task_id}` will reuse it.\n\
-                 Alternatively, run:\n  {retry_cmd}"
+                "{}",
+                broadcast_notice(
+                    &voucher_to_submit,
+                    &server_err.to_string(),
+                    replay,
+                    voucher_saved
+                )
             );
             return Err(server_err.into());
         }
@@ -361,4 +394,73 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
             "submission_fee_voucher": voucher_to_submit,
         }),
     ))
+}
+
+fn clear_if_hash_reused(
+    state_store: &crate::state_store::StateStore,
+    task_id: &uuid::Uuid,
+    voucher: &str,
+    server_err: &taskfast_client::Error,
+) {
+    let taskfast_client::Error::Validation { code, .. } = server_err else {
+        return;
+    };
+    if code != "submission_fee_hash_reused" {
+        return;
+    }
+    if let Err(e) = state_store.clear_pending_fee_retry_matching(task_id, voucher) {
+        eprintln!(
+            "taskfast: warning: could not clear the rejected saved voucher for task {task_id}: {e}"
+        );
+    }
+}
+
+fn broadcast_notice(voucher: &str, server_err: &str, replay: bool, saved: bool) -> String {
+    let head = format!(
+        "taskfast: fee transfer was broadcast ({voucher}) but server retry failed: {server_err}."
+    );
+    let saved_note = if saved {
+        "The transaction hash is saved locally."
+    } else {
+        "The transaction hash was NOT saved locally; keep the hash above."
+    };
+    if replay {
+        format!(
+            "{head}\n{saved_note} Check the task and the transaction first; if the transfer did not land or the server did not take it, repeat your original `fee retry` command with `--submission-fee-voucher {voucher}` added. Do not run a plain `fee retry` again."
+        )
+    } else {
+        head
+    }
+}
+
+#[cfg(test)]
+mod guidance_tests {
+    use super::broadcast_notice;
+
+    #[test]
+    fn notice_always_carries_the_hash() {
+        assert!(broadcast_notice("0xabc", "boom", true, true).contains("0xabc"));
+        assert!(broadcast_notice("0xabc", "boom", false, false).contains("0xabc"));
+    }
+
+    #[test]
+    fn replay_advice_checks_first_then_repeats_with_voucher() {
+        let n = broadcast_notice("0xabc", "boom", true, true);
+        assert!(n.contains("Check the task and the transaction first"));
+        assert!(n.contains("--submission-fee-voucher 0xabc"));
+        assert!(n.contains("is saved locally"));
+    }
+
+    #[test]
+    fn unsaved_hash_is_never_called_saved() {
+        let n = broadcast_notice("0xabc", "boom", true, false);
+        assert!(n.contains("NOT saved"));
+        assert!(!n.contains("is saved locally"));
+    }
+
+    #[test]
+    fn rejected_voucher_gets_no_replay_advice() {
+        let n = broadcast_notice("0xabc", "boom", false, true);
+        assert!(!n.contains("--submission-fee-voucher"));
+    }
 }

@@ -244,6 +244,11 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
     //    config-supplied api_key is layered under the CLI/env sources
     //    Ctx already resolved (flag > env var > config).
     let mut cfg = Config::load(&cfg_path)?;
+    if !ctx.dry_run && !crate::state_store::StateStore::from_config_path(&cfg_path).is_ephemeral() {
+        crate::state_store::StateStore::preflight_file(&cfg_path).map_err(|e| {
+            CmdError::Usage(format!("cannot save config to {}: {e}", cfg_path.display()))
+        })?;
+    }
     // The key as it was on disk when the run started, for step 4's check
     // that a claim link saved earlier still belongs to the key in use.
     let config_api_key_on_start = cfg.api_key.clone();

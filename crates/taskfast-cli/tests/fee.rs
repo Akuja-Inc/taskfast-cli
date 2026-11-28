@@ -788,3 +788,297 @@ async fn old_task_retry_fee_dry_run_prints_the_same_redirect() {
         "got {err:?}"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fee_retry_refuses_unwritable_state_dir_before_broadcasting() {
+    let api_server = MockServer::start().await;
+    let (rpc_url, node) = testnet_node();
+    let wallet = create_test_wallet();
+    mock_task_status(&api_server, Some("retry_submission_fee"), None).await;
+    mock_payment_data(&api_server, TOKEN_ADDR).await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    let link = tmp.path().join(".taskfast");
+    std::os::unix::fs::symlink(&shared, &link).unwrap();
+
+    let cmd = retry_wallet(
+        &wallet.keystore_path,
+        &wallet.password_path,
+        &wallet.address,
+        Some(rpc_url),
+    );
+    let mut ctx = ctx_for(&api_server);
+    ctx.allow_custom_endpoints = true;
+    ctx.config_path = link.join("config.json");
+
+    let err = run(&ctx, cmd).await.expect_err("state dir must be refused");
+    assert!(err.to_string().contains("symlink"), "{err}");
+    assert!(
+        node.sent_transactions().is_empty(),
+        "nothing may be broadcast"
+    );
+}
+
+#[tokio::test]
+async fn fee_retry_directory_at_retry_file_prevents_broadcast() {
+    let api_server = MockServer::start().await;
+    let (rpc_url, node) = testnet_node();
+    let wallet = create_test_wallet();
+    mock_task_status(&api_server, Some("retry_submission_fee"), None).await;
+    mock_payment_data(&api_server, TOKEN_ADDR).await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join(".taskfast");
+    std::fs::create_dir_all(dir.join("fee_retries.json")).unwrap();
+
+    let cmd = retry_wallet(
+        &wallet.keystore_path,
+        &wallet.password_path,
+        &wallet.address,
+        Some(rpc_url),
+    );
+    let mut ctx = ctx_for(&api_server);
+    ctx.allow_custom_endpoints = true;
+    ctx.config_path = dir.join("config.json");
+
+    let err = run(&ctx, cmd)
+        .await
+        .expect_err("directory destination must be refused");
+    assert!(err.to_string().contains("regular file"), "{err}");
+    assert!(
+        node.sent_transactions().is_empty(),
+        "nothing may be broadcast"
+    );
+}
+
+#[tokio::test]
+async fn fee_retry_corrupt_ledger_blocks_broadcast_and_is_left_untouched() {
+    let api_server = MockServer::start().await;
+    let (rpc_url, node) = testnet_node();
+    let wallet = create_test_wallet();
+    mock_task_status(&api_server, Some("retry_submission_fee"), None).await;
+    mock_payment_data(&api_server, TOKEN_ADDR).await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join(".taskfast");
+    std::fs::create_dir_all(&dir).unwrap();
+    let ledger = dir.join("fee_retries.json");
+    std::fs::write(&ledger, "{ not json").unwrap();
+
+    let cmd = retry_wallet(
+        &wallet.keystore_path,
+        &wallet.password_path,
+        &wallet.address,
+        Some(rpc_url),
+    );
+    let mut ctx = ctx_for(&api_server);
+    ctx.allow_custom_endpoints = true;
+    ctx.config_path = dir.join("config.json");
+
+    let err = run(&ctx, cmd)
+        .await
+        .expect_err("corrupt ledger must stop the run");
+    assert!(err.to_string().contains("ledger"), "{err}");
+    assert!(
+        node.sent_transactions().is_empty(),
+        "nothing may be broadcast"
+    );
+    assert_eq!(std::fs::read_to_string(&ledger).unwrap(), "{ not json");
+}
+
+#[tokio::test]
+async fn fee_retry_post_409_retry_not_needed_after_broadcast_keeps_voucher() {
+    let api_server = MockServer::start().await;
+    let (rpc_url, node) = testnet_node();
+    let wallet = create_test_wallet();
+    mock_task_status(&api_server, Some("retry_submission_fee"), None).await;
+    mock_payment_data(&api_server, TOKEN_ADDR).await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "retry_not_needed",
+            "message": "Task is not awaiting fee retry",
+        })))
+        .expect(1)
+        .mount(&api_server)
+        .await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join(".taskfast");
+    let cmd = retry_wallet(
+        &wallet.keystore_path,
+        &wallet.password_path,
+        &wallet.address,
+        Some(rpc_url),
+    );
+    let mut ctx = ctx_for(&api_server);
+    ctx.allow_custom_endpoints = true;
+    ctx.config_path = dir.join("config.json");
+
+    let err = run(&ctx, cmd)
+        .await
+        .expect_err("server refuses after broadcast");
+    assert!(matches!(&err, CmdError::Validation { code, .. } if code == "retry_not_needed"));
+    assert_eq!(node.sent_transactions().len(), 1);
+    let task_uuid = uuid::Uuid::parse_str(TASK_ID).unwrap();
+    assert_eq!(
+        ctx.state_store().get_pending_fee_retry(&task_uuid),
+        Some(format!("{:#x}", node.tx_hashes()[0]))
+    );
+}
+
+#[tokio::test]
+async fn fee_retry_dry_run_with_saved_voucher_previews_and_posts_nothing() {
+    let api_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&api_server)
+        .await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut ctx = ctx_for(&api_server);
+    ctx.dry_run = true;
+    ctx.config_path = tmp.path().join(".taskfast").join("config.json");
+    let task_uuid = uuid::Uuid::parse_str(TASK_ID).unwrap();
+    ctx.state_store()
+        .record_pending_fee_retry(&task_uuid, "0xfeed")
+        .unwrap();
+
+    let cmd = Command::Retry(RetryArgs {
+        task_id: TASK_ID.into(),
+        submission_fee_voucher: None,
+        wallet_address: None,
+        keystore: None,
+        wallet_password_file: None,
+        rpc_url: None,
+    });
+    let env = run(&ctx, cmd).await.expect("dry run previews");
+    let v = envelope_value(&env);
+    assert_eq!(v["data"]["action"], "would_submit_saved_voucher");
+    assert_eq!(v["data"]["submission_fee_voucher"], "0xfeed");
+    let posts = api_server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.method.as_str() == "POST")
+        .count();
+    assert_eq!(posts, 0);
+}
+
+#[tokio::test]
+async fn fee_retry_hash_reused_clears_only_the_matching_saved_hash() {
+    let api_server = MockServer::start().await;
+    let (rpc_url, node) = testnet_node();
+    let wallet = create_test_wallet();
+    mock_task_status(&api_server, Some("retry_submission_fee"), None).await;
+    mock_payment_data(&api_server, TOKEN_ADDR).await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "retry_not_needed",
+            "message": "in flight",
+        })))
+        .up_to_n_times(1)
+        .mount(&api_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "submission_fee_hash_reused",
+            "message": "hash already used",
+        })))
+        .mount(&api_server)
+        .await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut ctx = ctx_for(&api_server);
+    ctx.allow_custom_endpoints = true;
+    ctx.config_path = tmp.path().join(".taskfast").join("config.json");
+    let task_uuid = uuid::Uuid::parse_str(TASK_ID).unwrap();
+
+    let cmd = retry_wallet(
+        &wallet.keystore_path,
+        &wallet.password_path,
+        &wallet.address,
+        Some(rpc_url.clone()),
+    );
+    run(&ctx, cmd).await.expect_err("retry_not_needed");
+    let hash = format!("{:#x}", node.tx_hashes()[0]);
+    assert_eq!(
+        ctx.state_store().get_pending_fee_retry(&task_uuid),
+        Some(hash)
+    );
+
+    let cmd = retry_wallet(
+        &wallet.keystore_path,
+        &wallet.password_path,
+        &wallet.address,
+        Some(rpc_url),
+    );
+    run(&ctx, cmd).await.expect_err("hash reused");
+    assert_eq!(
+        node.sent_transactions().len(),
+        1,
+        "saved hash is reused, no second broadcast"
+    );
+    assert_eq!(ctx.state_store().get_pending_fee_retry(&task_uuid), None);
+}
+
+#[tokio::test]
+async fn fee_retry_unsaved_broadcast_in_ephemeral_mode_still_surfaces_the_server_error() {
+    let api_server = MockServer::start().await;
+    let (rpc_url, node) = testnet_node();
+    let wallet = create_test_wallet();
+    mock_task_status(&api_server, Some("retry_submission_fee"), None).await;
+    mock_payment_data(&api_server, TOKEN_ADDR).await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "error": "boom",
+            "message": "server down",
+        })))
+        .mount(&api_server)
+        .await;
+    let mut ctx = ctx_for(&api_server);
+    ctx.allow_custom_endpoints = true;
+    let cmd = retry_wallet(
+        &wallet.keystore_path,
+        &wallet.password_path,
+        &wallet.address,
+        Some(rpc_url),
+    );
+    run(&ctx, cmd).await.expect_err("server failure");
+    assert_eq!(node.sent_transactions().len(), 1);
+    assert!(ctx.state_store().is_ephemeral());
+}
+
+#[tokio::test]
+async fn fee_retry_explicit_voucher_hash_reused_clears_the_matching_saved_hash() {
+    let api_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/tasks/{TASK_ID}/retry-fee")))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "submission_fee_hash_reused",
+            "message": "hash already used",
+        })))
+        .mount(&api_server)
+        .await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut ctx = ctx_for(&api_server);
+    ctx.config_path = tmp.path().join(".taskfast").join("config.json");
+    let task_uuid = uuid::Uuid::parse_str(TASK_ID).unwrap();
+    ctx.state_store()
+        .record_pending_fee_retry(&task_uuid, VOUCHER)
+        .unwrap();
+
+    run(&ctx, retry_with_voucher(VOUCHER))
+        .await
+        .expect_err("server rejects the reused hash");
+    assert_eq!(ctx.state_store().get_pending_fee_retry(&task_uuid), None);
+}

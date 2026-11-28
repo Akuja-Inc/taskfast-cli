@@ -137,6 +137,11 @@ pub async fn provision_webhook(
         // a carefully-curated subscription list.
         events: None,
     };
+    if let Some(path) = secret_file {
+        crate::state_store::StateStore::preflight_file(path).map_err(|e| {
+            CmdError::Usage(format!("cannot save secret to {}: {e}", path.display()))
+        })?;
+    }
     let cfg = client
         .call(|c| c.configure_webhook(&body))
         .await

@@ -305,3 +305,169 @@ async fn delete_returns_action_deleted_on_204() {
     let v = value(&env);
     assert_eq!(v["data"]["action"], "deleted");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn register_refuses_unwritable_secret_dir_before_any_put() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    fs::create_dir(&shared).unwrap();
+    let link = tmp.path().join(".taskfast");
+    std::os::unix::fs::symlink(&shared, &link).unwrap();
+
+    let ctx = ctx_for(&server, false);
+    let err = webhook::run(
+        &ctx,
+        Command::Register(RegisterArgs {
+            url: "https://example.com/hook".into(),
+            secret_file: Some(link.join("webhook.secret")),
+            events: vec![],
+        }),
+    )
+    .await
+    .expect_err("symlinked .taskfast must be refused");
+    assert!(err.to_string().contains("symlink"), "{err}");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn register_refuses_directory_at_secret_path_before_any_put() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let secret_path = tmp.path().join("hook.secret");
+    fs::create_dir(&secret_path).unwrap();
+
+    let err = webhook::run(
+        &ctx_for(&server, false),
+        Command::Register(RegisterArgs {
+            url: "https://example.com/hook".into(),
+            secret_file: Some(secret_path),
+            events: vec![],
+        }),
+    )
+    .await
+    .expect_err("directory at the secret path must be refused");
+    assert!(err.to_string().contains("directory"), "{err}");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn register_refuses_unwritable_parent_before_any_put() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("ro");
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+    if fs::File::create(dir.join("probe")).is_ok() {
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+
+    let res = webhook::run(
+        &ctx_for(&server, false),
+        Command::Register(RegisterArgs {
+            url: "https://example.com/hook".into(),
+            secret_file: Some(dir.join("hook.secret")),
+            events: vec![],
+        }),
+    )
+    .await;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(res.is_err());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn register_checks_explicit_dev_secret_path_before_any_put() {
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open("/dev/.taskfast-probe-webhook")
+        .is_ok()
+    {
+        let _ = std::fs::remove_file("/dev/.taskfast-probe-webhook");
+        return;
+    }
+    let server = MockServer::start().await;
+    let res = webhook::run(
+        &ctx_for(&server, false),
+        Command::Register(RegisterArgs {
+            url: "https://example.com/hook".into(),
+            secret_file: Some(std::path::PathBuf::from("/dev/null")),
+            events: vec![],
+        }),
+    )
+    .await;
+    assert!(res.is_err());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn register_refuses_read_only_existing_secret_even_when_webhook_exists() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/agents/me/webhooks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "created_at": "2026-04-13T00:00:00Z",
+            "updated_at": "2026-04-13T00:00:00Z",
+            "url": "https://old.example.com/hook",
+            "events": [],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/agents/me/webhooks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "created_at": "2026-04-13T00:00:00Z",
+            "updated_at": "2026-04-13T00:05:00Z",
+            "url": "https://example.com/hook",
+            "events": [],
+            "secret": null,
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("ro");
+    fs::create_dir(&dir).unwrap();
+    let secret_path = dir.join("hook.secret");
+    fs::write(&secret_path, "whsec_saved").unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+    if fs::File::create(dir.join("probe")).is_ok() {
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+
+    let res = webhook::run(
+        &ctx_for(&server, false),
+        Command::Register(RegisterArgs {
+            url: "https://example.com/hook".into(),
+            secret_file: Some(secret_path.clone()),
+            events: vec![],
+        }),
+    )
+    .await;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(res.is_err());
+    assert_eq!(fs::read_to_string(&secret_path).unwrap(), "whsec_saved");
+    let puts = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.method.as_str() == "PUT")
+        .count();
+    assert_eq!(puts, 0);
+}
