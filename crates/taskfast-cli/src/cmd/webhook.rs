@@ -139,9 +139,16 @@ pub async fn provision_webhook(
         events: None,
     };
     if let Some(path) = secret_file {
-        crate::state_store::StateStore::preflight_file(path).map_err(|e| {
-            CmdError::Usage(format!("cannot save secret to {}: {e}", path.display()))
-        })?;
+        if let Err(e) = crate::state_store::StateStore::preflight_file(path) {
+            let existing_secret_update =
+                path.is_file() && webhooks::get_webhook(client).await.is_ok();
+            if !existing_secret_update {
+                return Err(CmdError::Usage(format!(
+                    "cannot save secret to {}: {e}",
+                    path.display()
+                )));
+            }
+        }
     }
     let cfg = webhooks::configure_webhook(client, &body)
         .await

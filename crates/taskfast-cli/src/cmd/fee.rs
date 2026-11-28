@@ -243,6 +243,7 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
         }
     }
 
+    let mut voucher_saved = true;
     let voucher_to_submit = if let Some(saved_tx_hash) = pending_voucher {
         eprintln!(
             "taskfast: found pending broadcast transaction {saved_tx_hash} for task {task_id}; \
@@ -337,7 +338,9 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
             .await?;
         let tx_hash_hex = format!("{tx_hash:#x}");
 
+        voucher_saved = !state_store.is_ephemeral();
         if let Err(e) = state_store.record_pending_fee_retry(&task_id, &tx_hash_hex) {
+            voucher_saved = false;
             eprintln!("taskfast: warning: failed to persist pending fee retry to state store: {e}");
         }
 
@@ -357,14 +360,29 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
         }
         Err(e) => {
             let server_err = map_api_error(e).await;
-            let replay = !matches!(
-                &server_err,
-                taskfast_client::Error::Validation { code, .. }
-                    if code == "submission_fee_hash_reused" || code == "fee_executed_unmatched"
-            );
+            let mut replay = true;
+            if let taskfast_client::Error::Validation { code, .. } = &server_err {
+                if code == "submission_fee_hash_reused" || code == "fee_executed_unmatched" {
+                    replay = false;
+                }
+                if code == "submission_fee_hash_reused" {
+                    if let Err(clear_err) =
+                        state_store.clear_pending_fee_retry_matching(&task_id, &voucher_to_submit)
+                    {
+                        eprintln!(
+                            "taskfast: warning: could not clear the rejected saved voucher for task {task_id}: {clear_err}"
+                        );
+                    }
+                }
+            }
             eprintln!(
                 "{}",
-                broadcast_notice(&voucher_to_submit, &server_err.to_string(), replay)
+                broadcast_notice(
+                    &voucher_to_submit,
+                    &server_err.to_string(),
+                    replay,
+                    voucher_saved
+                )
             );
             return Err(server_err.into());
         }
@@ -382,13 +400,18 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
     ))
 }
 
-fn broadcast_notice(voucher: &str, server_err: &str, replay: bool) -> String {
+fn broadcast_notice(voucher: &str, server_err: &str, replay: bool, saved: bool) -> String {
     let head = format!(
         "taskfast: fee transfer was broadcast ({voucher}) but server retry failed: {server_err}."
     );
+    let saved_note = if saved {
+        "The transaction hash is saved locally."
+    } else {
+        "The transaction hash was NOT saved locally; keep the hash above."
+    };
     if replay {
         format!(
-            "{head}\nThe transaction hash is saved locally. Check the task and the transaction first; if the transfer did not land or the server did not take it, repeat your original `fee retry` command with `--submission-fee-voucher {voucher}` added. Do not run a plain `fee retry` again."
+            "{head}\n{saved_note} Check the task and the transaction first; if the transfer did not land or the server did not take it, repeat your original `fee retry` command with `--submission-fee-voucher {voucher}` added. Do not run a plain `fee retry` again."
         )
     } else {
         head
@@ -401,21 +424,28 @@ mod guidance_tests {
 
     #[test]
     fn notice_always_carries_the_hash() {
-        assert!(broadcast_notice("0xabc", "boom", true).contains("0xabc"));
-        assert!(broadcast_notice("0xabc", "boom", false).contains("0xabc"));
+        assert!(broadcast_notice("0xabc", "boom", true, true).contains("0xabc"));
+        assert!(broadcast_notice("0xabc", "boom", false, false).contains("0xabc"));
     }
 
     #[test]
     fn replay_advice_checks_first_then_repeats_with_voucher() {
-        let n = broadcast_notice("0xabc", "boom", true);
+        let n = broadcast_notice("0xabc", "boom", true, true);
         assert!(n.contains("Check the task and the transaction first"));
         assert!(n.contains("--submission-fee-voucher 0xabc"));
-        assert!(!n.contains("will reuse it"));
+        assert!(n.contains("is saved locally"));
+    }
+
+    #[test]
+    fn unsaved_hash_is_never_called_saved() {
+        let n = broadcast_notice("0xabc", "boom", true, false);
+        assert!(n.contains("NOT saved"));
+        assert!(!n.contains("is saved locally"));
     }
 
     #[test]
     fn rejected_voucher_gets_no_replay_advice() {
-        let n = broadcast_notice("0xabc", "boom", false);
+        let n = broadcast_notice("0xabc", "boom", false, true);
         assert!(!n.contains("--submission-fee-voucher"));
     }
 }
