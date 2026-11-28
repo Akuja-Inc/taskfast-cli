@@ -95,17 +95,39 @@ const RECONNECT_CAP: Duration = Duration::from_secs(30);
 /// the envelope wrapper: error envelopes would contaminate the JSONL
 /// stream and swallow stdout buffering semantics.
 pub async fn run(ctx: &Ctx, args: StreamArgs) -> ExitCode {
+    let io = StreamIo {
+        out: &mut LiveStdout,
+        acks: args.ack_stdin.then(spawn_stdin_reader),
+        shutdown: install_shutdown_signal(),
+    };
+    run_with(ctx, args, io).await
+}
+
+#[doc(hidden)]
+pub struct StreamIo<'a> {
+    pub out: &'a mut (dyn Write + Send),
+    pub acks: Option<UnboundedReceiver<String>>,
+    pub shutdown: ShutdownToken,
+}
+
+#[doc(hidden)]
+pub async fn run_with(ctx: &Ctx, args: StreamArgs, io: StreamIo<'_>) -> ExitCode {
+    let StreamIo {
+        out,
+        acks: mut ack_lines,
+        shutdown,
+    } = io;
     let api_key = match ctx.api_key.as_deref() {
         Some(k) => k.to_string(),
         None => {
-            emit_error_envelope(ctx, &CmdError::MissingApiKey);
+            emit_error_envelope(out, ctx, &CmdError::MissingApiKey);
             return CmdError::MissingApiKey.exit_code().into();
         }
     };
     let ws_url = match ws_url_from_base(ctx.base_url()) {
         Ok(u) => u,
         Err(e) => {
-            emit_error_envelope(ctx, &e);
+            emit_error_envelope(out, ctx, &e);
             return e.exit_code().into();
         }
     };
@@ -113,17 +135,16 @@ pub async fn run(ctx: &Ctx, args: StreamArgs) -> ExitCode {
     let mut backoff = Duration::from_secs(1);
     let mut first_connect = true;
 
-    let shutdown = install_shutdown_signal();
-    let mut ack_lines = args.ack_stdin.then(spawn_stdin_reader);
     let mut intake = super::intake::EventIntake::from_ctx(ctx, None);
 
     loop {
         if shutdown.is_cancelled() {
-            emit_sentinel("closing");
+            emit_sentinel(out, "closing");
             return ExitCode::SUCCESS;
         }
 
         match run_once(
+            &mut *out,
             &ws_url,
             &api_key,
             first_connect,
@@ -135,11 +156,11 @@ pub async fn run(ctx: &Ctx, args: StreamArgs) -> ExitCode {
         .await
         {
             ConnectOutcome::AuthFailed => {
-                emit_sentinel("auth_failed");
+                emit_sentinel(out, "auth_failed");
                 return ExitCode::from(2);
             }
             ConnectOutcome::Shutdown => {
-                emit_sentinel("closing");
+                emit_sentinel(out, "closing");
                 return ExitCode::SUCCESS;
             }
             ConnectOutcome::OnceDone => {
@@ -156,12 +177,12 @@ pub async fn run(ctx: &Ctx, args: StreamArgs) -> ExitCode {
             return ExitCode::from(1);
         }
 
-        emit_sentinel("reconnecting");
+        emit_sentinel(out, "reconnecting");
         let wait = backoff;
         tokio::select! {
             () = sleep(wait) => {},
             () = shutdown.cancelled() => {
-                emit_sentinel("closing");
+                emit_sentinel(out, "closing");
                 return ExitCode::SUCCESS;
             }
         }
@@ -178,6 +199,7 @@ enum ConnectOutcome {
 }
 
 async fn run_once(
+    out: &mut dyn Write,
     ws_url: &str,
     api_key: &str,
     first_connect: bool,
@@ -262,7 +284,7 @@ async fn run_once(
                                     "WS text frame was not valid JSON; surfacing as unparseable"
                                 );
                                 intake.record_unparseable();
-                                emit_unparseable(&text, &e.to_string());
+                                emit_unparseable(out, &text, &e.to_string());
                                 continue;
                             }
                         };
@@ -271,7 +293,7 @@ async fn run_once(
                                 if !join_acked {
                                     join_acked = true;
                                     let sentinel = if first_connect { "connected" } else { "resumed" };
-                                    emit_sentinel(sentinel);
+                                    emit_sentinel(out, sentinel);
                                 }
                             }
                             FrameKind::JoinError => {
@@ -289,14 +311,14 @@ async fn run_once(
                                         }
                                     }
                                     super::intake::StreamItemOutcome::Accepted { .. } => {
-                                        emit_event(&payload);
+                                        emit_event(out, &payload);
                                         if once {
                                             let _ = sink.send(Message::Close(None)).await;
                                             return ConnectOutcome::OnceDone;
                                         }
                                     }
                                     super::intake::StreamItemOutcome::Malformed { error } => {
-                                        emit_unparseable(&payload.to_string(), &error);
+                                        emit_unparseable(out, &payload.to_string(), &error);
                                         if once {
                                             let _ = sink.send(Message::Close(None)).await;
                                             return ConnectOutcome::OnceDone;
@@ -305,7 +327,7 @@ async fn run_once(
                                 }
                             }
                             FrameKind::Acked(id) => {
-                                emit_event(&json!({ "sentinel": "acked", "event_id": id }));
+                                emit_event(out, &json!({ "sentinel": "acked", "event_id": id }));
                             }
                             FrameKind::Ignored => {}
                         }
@@ -457,56 +479,73 @@ fn ws_url_from_base(base: &str) -> Result<String, CmdError> {
     Ok(format!("{swapped}/socket/agent/websocket?vsn=2.0.0"))
 }
 
-fn emit_sentinel(kind: &str) {
-    let line = format!("{}\n", json!({ "sentinel": kind }));
-    let stdout = std::io::stdout();
-    let mut guard = stdout.lock();
-    let _ = guard.write_all(line.as_bytes());
-    let _ = guard.flush();
+struct LiveStdout;
+
+impl Write for LiveStdout {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        std::io::stdout().lock().write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::stdout().lock().flush()
+    }
 }
 
-fn emit_event(payload: &Value) {
+fn emit_sentinel(out: &mut dyn Write, kind: &str) {
+    let line = format!("{}\n", json!({ "sentinel": kind }));
+    let _ = out.write_all(line.as_bytes());
+    let _ = out.flush();
+}
+
+fn emit_event(out: &mut dyn Write, payload: &Value) {
     let mut buf = match serde_json::to_vec(payload) {
         Ok(b) => b,
         Err(_) => return,
     };
     buf.push(b'\n');
-    let stdout = std::io::stdout();
-    let mut guard = stdout.lock();
-    let _ = guard.write_all(&buf);
-    let _ = guard.flush();
+    let _ = out.write_all(&buf);
+    let _ = out.flush();
 }
 
 /// Surface a malformed WS text frame on the `--json` path instead of
 /// swallowing it. The `type: "unparseable"` tag keeps consumers' stream
 /// parsers from mistaking it for a regular event.
-fn emit_unparseable(raw: &str, error: &str) {
+fn emit_unparseable(out: &mut dyn Write, raw: &str, error: &str) {
     let payload = json!({ "type": "unparseable", "raw": raw, "error": error });
-    emit_event(&payload);
+    emit_event(out, &payload);
 }
 
-fn emit_error_envelope(ctx: &Ctx, err: &CmdError) {
+fn emit_error_envelope(out: &mut dyn Write, ctx: &Ctx, err: &CmdError) {
     if ctx.quiet {
         return;
     }
-    crate::envelope::Envelope::error(ctx.environment, ctx.dry_run, err).emit();
+    let env = crate::envelope::Envelope::error(ctx.environment, ctx.dry_run, err);
+    let _ = serde_json::to_writer(&mut *out, &env);
+    let _ = out.write_all(b"\n");
+    let _ = out.flush();
 }
 
 #[derive(Clone)]
-struct ShutdownToken {
+pub struct ShutdownToken {
     inner: Arc<tokio::sync::Notify>,
     flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
+impl Default for ShutdownToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ShutdownToken {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Arc::new(tokio::sync::Notify::new()),
             flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
-    fn trigger(&self) {
+    pub fn trigger(&self) {
         self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
         self.inner.notify_waiters();
     }

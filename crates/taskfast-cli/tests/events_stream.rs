@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use taskfast_cli::cmd::events::stream::{run_with, ShutdownToken, StreamArgs, StreamIo};
+use taskfast_cli::cmd::Ctx;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::TcpListener;
 use tokio::process::{ChildStdout, Command};
@@ -75,6 +77,56 @@ async fn fake_channel(listener: TcpListener, replay_a: bool) {
             _ => {}
         }
     }
+}
+
+fn ctx_for(port: u16, cfg: &std::path::Path) -> Ctx {
+    Ctx {
+        api_key: Some("test-key".into()),
+        api_base: Some(format!("http://127.0.0.1:{port}")),
+        config_path: cfg.join("config.json"),
+        allow_custom_endpoints: true,
+        ..Default::default()
+    }
+}
+
+fn once_args() -> StreamArgs {
+    StreamArgs {
+        once: true,
+        no_reconnect: true,
+        ack_stdin: false,
+    }
+}
+
+#[derive(Clone, Default)]
+struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedBuf {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl SharedBuf {
+    fn contains(&self, needle: &str) -> bool {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).contains(needle)
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+fn out_lines(buf: &[u8]) -> Vec<Value> {
+    String::from_utf8(buf.to_vec())
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
 }
 
 /// Next stdout JSONL line. The server's ack timeout is 300 s, so 10 s
@@ -155,32 +207,57 @@ async fn replayed_event_is_printed_once_and_still_acked() {
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(fake_channel(listener, true));
     let cfg = tempfile::tempdir().unwrap();
+    let ctx = ctx_for(port, cfg.path());
+    let out = SharedBuf::default();
+    let shutdown = ShutdownToken::new();
+    let watcher = {
+        let (out, shutdown) = (out.clone(), shutdown.clone());
+        tokio::spawn(async move {
+            while !out.contains(EVENT_B) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            shutdown.trigger();
+        })
+    };
+    let mut writer = out.clone();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_taskfast"))
-        .args(["--env", "local", "--allow-custom-endpoints", "--no-trace"])
-        .args(["--api-base", &format!("http://127.0.0.1:{port}")])
-        .args(["--api-key", "test-key"])
-        .args(["events", "stream", "--no-reconnect"])
-        .env("TASKFAST_CONFIG", cfg.path().join("config.json"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let code = tokio::time::timeout(
+        Duration::from_secs(10),
+        run_with(
+            &ctx,
+            StreamArgs {
+                once: false,
+                no_reconnect: true,
+                ack_stdin: false,
+            },
+            StreamIo {
+                out: &mut writer,
+                acks: None,
+                shutdown,
+            },
+        ),
+    )
+    .await
+    .expect("stream did not finish");
+    watcher.await.unwrap();
 
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    let out = out.bytes();
+    let lines = out_lines(&out);
+    assert_eq!(lines[0], json!({ "sentinel": "connected" }));
+    assert_eq!(lines[1]["event_id"], EVENT_A);
     assert_eq!(
-        next_json(&mut lines).await,
-        json!({ "sentinel": "connected" })
-    );
-    assert_eq!(next_json(&mut lines).await["event_id"], EVENT_A);
-    // Next line is the ack reply for the duplicate, not a second copy of A.
-    assert_eq!(
-        next_json(&mut lines).await,
+        lines[2],
         json!({ "sentinel": "acked", "event_id": EVENT_A })
     );
-    assert_eq!(next_json(&mut lines).await["event_id"], EVENT_B);
+    assert_eq!(lines[3]["event_id"], EVENT_B);
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l["event_id"] == EVENT_A && l.get("sentinel").is_none())
+            .count(),
+        1
+    );
     assert!(cfg.path().join("events.seen").exists());
 }
 
@@ -219,30 +296,53 @@ async fn stream_once_terminates_on_malformed_event_frame() {
     });
 
     let cfg = tempfile::tempdir().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_taskfast"))
-        .args(["--env", "local", "--allow-custom-endpoints", "--no-trace"])
-        .args(["--api-base", &format!("http://127.0.0.1:{port}")])
-        .args(["--api-key", "test-key"])
-        .args(["events", "stream", "--once", "--no-reconnect"])
-        .env("TASKFAST_CONFIG", cfg.path().join("config.json"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
+    let ctx = ctx_for(port, cfg.path());
+    let mut out: Vec<u8> = Vec::new();
 
-    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-    assert_eq!(
-        next_json(&mut lines).await,
-        json!({ "sentinel": "connected" })
-    );
-    let err_frame = next_json(&mut lines).await;
-    assert_eq!(err_frame["type"], "unparseable");
+    let code = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_with(
+            &ctx,
+            once_args(),
+            StreamIo {
+                out: &mut out,
+                acks: None,
+                shutdown: ShutdownToken::new(),
+            },
+        ),
+    )
+    .await
+    .expect("stream timed out waiting to exit under --once");
 
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
-        .await
-        .expect("stream timed out waiting to exit under --once")
-        .unwrap();
-    assert!(status.success());
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    let lines = out_lines(&out);
+    assert_eq!(lines[0], json!({ "sentinel": "connected" }));
+    assert_eq!(lines[1]["type"], "unparseable");
+}
+
+#[tokio::test]
+async fn missing_api_key_envelope_goes_to_injected_writer() {
+    let cfg = tempfile::tempdir().unwrap();
+    let ctx = Ctx {
+        api_key: None,
+        config_path: cfg.path().join("config.json"),
+        ..Default::default()
+    };
+    let mut out: Vec<u8> = Vec::new();
+
+    let code = run_with(
+        &ctx,
+        once_args(),
+        StreamIo {
+            out: &mut out,
+            acks: None,
+            shutdown: ShutdownToken::new(),
+        },
+    )
+    .await;
+
+    assert_eq!(code, std::process::ExitCode::from(2));
+    let lines = out_lines(&out);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["ok"], false);
 }
