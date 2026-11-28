@@ -127,13 +127,14 @@ jobs:
           # Topological order is load-bearing — each crate's workspace deps must
           # already be on the registry, so publish in this exact sequence. xtask
           # is intentionally absent (internal, never published).
-          crates="taskfast-codegen taskfast-client taskfast-chains taskfast-agent taskfast-cli"
+          crates="$(release_crates)"
           if [ "${DRY_RUN}" = "true" ]; then
             exec scripts/publish-dry-run.sh
           fi
+          cli_version="$(pkg_version taskfast-cli)"
           case "${GITHUB_REF}" in
-            refs/tags/taskfast-cli-v*|refs/tags/v*) ;;
-            *) echo "::error::a real upload runs only from a release tag, not ${GITHUB_REF}. Run it from the tag, or set dry_run."; exit 1 ;;
+            "refs/tags/taskfast-cli-v${cli_version}"|"refs/tags/v${cli_version}") ;;
+            *) echo "::error::a real upload runs only from the tag taskfast-cli-v${cli_version} (or v${cli_version}), not ${GITHUB_REF}. Run it from that tag, or set dry_run."; exit 1 ;;
           esac
           for crate in ${crates}; do
             ver="$(pkg_version "$crate")"

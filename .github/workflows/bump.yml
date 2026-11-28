@@ -98,4 +98,4 @@ jobs:
           # Push branch + tag explicitly (belt and suspenders — the annotated
           # tag would ride --follow-tags, but being explicit makes the intent
           # obvious and survives future refactors).
-          git push origin main "taskfast-cli-v$VERSION"
+          git push --atomic origin main "taskfast-cli-v$VERSION"

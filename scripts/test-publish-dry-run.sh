@@ -11,11 +11,15 @@ cat > "$work/bin/cargo" <<'CARGO'
 #!/usr/bin/env bash
 if [ "$1" = "metadata" ]; then
   jq -n '{packages: [
-    {name: "taskfast-codegen", version: "9.0.0"},
-    {name: "taskfast-client", version: "9.0.0"},
-    {name: "taskfast-chains", version: "9.0.0"},
-    {name: "taskfast-agent", version: "9.0.0"},
-    {name: "taskfast-cli", version: "9.0.0"}]}'
+    {name: "taskfast-cli", version: "9.0.0", publish: null, dependencies: [
+      {name: "taskfast-agent", path: "/a", kind: null}, {name: "taskfast-client", path: "/c", kind: null}]},
+    {name: "taskfast-agent", version: "9.0.0", publish: null, dependencies: [
+      {name: "taskfast-client", path: "/c", kind: null}, {name: "taskfast-cli", path: "/x", kind: "dev"}]},
+    {name: "taskfast-client", version: "9.0.0", publish: null, dependencies: [
+      {name: "taskfast-codegen", path: "/g", kind: "build"}]},
+    {name: "taskfast-chains", version: "9.0.0", publish: null, dependencies: []},
+    {name: "taskfast-codegen", version: "9.0.0", publish: null, dependencies: []},
+    {name: "xtask", version: "9.0.0", publish: [], dependencies: [{name: "taskfast-codegen", path: "/g", kind: null}]}]}'
 else
   echo "cargo $*" >> "$FAKE_CARGO_LOG"
 fi
@@ -49,7 +53,7 @@ check() {
 }
 
 check "unpublished versions run the workspace dry-run" 0 "http://127.0.0.1:${port}"
-grep -q 'publish --workspace --exclude xtask --locked --dry-run' "$work/cargo.log"
+grep -qx 'cargo publish -p taskfast-chains -p taskfast-codegen -p taskfast-client -p taskfast-agent -p taskfast-cli --locked --dry-run' "$work/cargo.log"
 
 record() {
   printf '{"name":"taskfast-client","vers":"%s","cksum":"%064d","yanked":false}\n' "$1" 0
@@ -69,7 +73,7 @@ grep -q 'taskfast-client 9.0.0 is already on crates.io' "$work/out.log"
 } > "$work/index/ta/sk/taskfast-client"
 check "a published version matched late in a large response fails" 1 "http://127.0.0.1:${port}"
 
-for body in "" "not json" '{"name":"taskfast-client"}'; do
+for body in "" "not json" '{"name":"taskfast-client"}' '{"name":"taskfast-client","vers":null}' '{"name":"taskfast-codegen","vers":"9.0.0"}'; do
   printf '%s' "$body" > "$work/index/ta/sk/taskfast-client"
   check "a malformed 200 response (${body:-empty}) fails" 1 "http://127.0.0.1:${port}"
   grep -q 'index lookup for taskfast-client failed' "$work/out.log"

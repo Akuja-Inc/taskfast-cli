@@ -172,7 +172,7 @@ git diff Cargo.toml Cargo.lock      # review
 git commit -am "chore(release): vX.Y.Z" \
   && scripts/publish-dry-run.sh \
   && git tag -a taskfast-cli-vX.Y.Z -m "Release X.Y.Z" \
-  && git push --follow-tags         # tag push triggers release.yml
+  && git push --atomic origin main taskfast-cli-vX.Y.Z   # tag push triggers release.yml
 ```
 
 ### Scope notes

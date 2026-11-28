@@ -20,7 +20,7 @@ published_state() {
   fi
   case "$code" in
     200)
-      if ! jq -es 'length > 0 and all(.[]; type == "object" and has("vers"))' "$body" > /dev/null 2>&1; then
+      if ! jq -es --arg n "$name" 'length > 0 and all(.[]; type == "object" and .name == $n and (.vers | type == "string" and length > 0))' "$body" > /dev/null 2>&1; then
         echo "error"
       elif jq -es --arg v "$ver" 'any(.[]; .vers == $v)' "$body" > /dev/null 2>&1; then
         echo "published"
@@ -34,3 +34,17 @@ published_state() {
   rm -f "$body"
 }
 
+
+release_crates() {
+  cargo metadata --no-deps --format-version 1 | jq -er '
+    [.packages[] | select(.publish != [])] as $p
+    | ($p | map(.name)) as $names
+    | ($p | map({name, deps: ([.dependencies[] | select(.path != null and .kind != "dev") | .name] | map(select(. as $d | $names | index($d))))})) as $g
+    | {done: [], rest: $g}
+    | until(.rest | length == 0;
+        . as $s
+        | ($s.rest | map(select(all(.deps[]; . as $d | $s.done | index($d)))) | map(.name) | sort) as $ready
+        | if ($ready | length) == 0 then error("dependency cycle among release crates") else
+          {done: ($s.done + $ready), rest: ($s.rest | map(select(.name as $n | $ready | index($n) | not)))} end)
+    | .done[]'
+}

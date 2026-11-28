@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CRATES="taskfast-codegen taskfast-client taskfast-chains taskfast-agent taskfast-cli"
 . "$(dirname "$0")/registry-lookup.sh"
+
+CRATES="$(release_crates)"
 
 failed=0
 for crate in ${CRATES}; do
@@ -21,4 +22,6 @@ for crate in ${CRATES}; do
 done
 [ "${failed}" = "0" ] || exit 1
 
-cargo publish --workspace --exclude xtask --locked --dry-run
+packages=()
+for crate in ${CRATES}; do packages+=(-p "$crate"); done
+cargo publish "${packages[@]}" --locked --dry-run
