@@ -1,24 +1,28 @@
 // SPDX-License-Identifier: MIT
 //! End-to-end tests for `taskfast escrow sign`.
 //!
-//! Dry-run covers the happy path without RPC mocks (no tx broadcast).
+//! Dry-run covers the happy path without RPC mocks (no tx broadcast; the
+//! deployment's `GET /config/network` is still consulted to vet the
+//! server-issued chain id, since dry-run signs).
 //! Error-mapping tests cover 403/422 from both escrow/params and finalize
 //! so the Auth-vs-Validation contract (exit code 2 vs 4) is pinned.
 //!
-//! The live on-chain path requires mocking the full Tempo RPC surface
-//! (chainId, gasPrice, estimateGas, nonce, sendRawTransaction, receipt) —
-//! that's smoke-test territory, deferred to the manual E2E in the plan.
+//! The live on-chain path talks to the exported in-memory
+//! [`MockTempoRpc`](taskfast_cli::tempo_session::MockTempoRpc); the full
+//! preflight/revert/retry matrix lives in `tests/chain_session.rs`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
 use serde_json::{json, Value};
-use wiremock::matchers::{body_partial_json, method, path, query_param};
+use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use taskfast_cli::cmd::escrow::{run, Command, SignArgs};
 use taskfast_cli::cmd::{CmdError, Ctx};
+use taskfast_cli::tempo_session::{register_mock_rpc, MockTempoRpc};
 use taskfast_cli::{Envelope, Environment};
 
 const BID_ID: &str = "00000000-0000-0000-0000-0000000000bb";
@@ -141,6 +145,47 @@ async fn mount_params(server: &MockServer, body: Value, status: u16) {
         .await;
 }
 
+/// The deployment advertises the testnet chain the params are issued for.
+async fn mount_network(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/config/network"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "networks": { "testnet": {
+                "chain_id": CHAIN_ID,
+                "rpc_url": format!("{}/rpc/testnet", server.uri()),
+                "wss_url": null,
+                "explorer_url": null,
+            }},
+        })))
+        .mount(server)
+        .await;
+}
+
+/// A deployment that also advertises a Tempo zone chain (the server issues
+/// zone chain ids and the CLI must resolve them by `entry_by_chain_id`).
+async fn mount_network_with_zone(server: &MockServer, zone_chain_id: u64) {
+    Mock::given(method("GET"))
+        .and(path("/config/network"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "networks": {
+                "testnet": {
+                    "chain_id": CHAIN_ID,
+                    "rpc_url": format!("{}/rpc/testnet", server.uri()),
+                    "wss_url": null,
+                    "explorer_url": null,
+                },
+                "tempo-zone-moderato": {
+                    "chain_id": zone_chain_id,
+                    "rpc_url": format!("{}/rpc/tempo-zone-moderato", server.uri()),
+                    "wss_url": null,
+                    "explorer_url": null,
+                },
+            },
+        })))
+        .mount(server)
+        .await;
+}
+
 async fn mount_readiness(server: &MockServer) {
     Mock::given(method("GET"))
         .and(path("/agents/me/readiness"))
@@ -167,6 +212,7 @@ async fn escrow_sign_dry_run_signs_server_issued_deadline_verbatim() {
     let keys = fresh_keys();
     mount_params(&server, escrow_params_json(), 200).await;
     mount_readiness(&server).await;
+    mount_network(&server).await;
 
     let mut ctx = ctx_for(&server, Some("k"));
     ctx.dry_run = true;
@@ -191,6 +237,7 @@ async fn escrow_sign_aborts_before_broadcast_when_deadline_below_min_lifetime() 
     params["poster_approval_deadline"] = json!(1_700_000_000i64); // 2023 — long past
     mount_params(&server, params, 200).await;
     mount_readiness(&server).await;
+    mount_network(&server).await;
 
     // Not dry-run: the abort must gate the real broadcast path. rpc_url points
     // at an invalid host, so reaching RPC at all would surface a different error.
@@ -245,6 +292,7 @@ async fn escrow_sign_dry_run_emits_signature_and_calldata_without_rpc() {
 
     mount_params(&server, escrow_params_json(), 200).await;
     mount_readiness(&server).await;
+    mount_network(&server).await;
     // No /escrow/finalize mount — dry-run must not POST.
 
     let mut ctx = ctx_for(&server, Some("test-key"));
@@ -285,6 +333,7 @@ async fn escrow_sign_rejects_custom_rpc_without_opt_in() {
     let keys = fresh_keys();
     mount_params(&server, escrow_params_json(), 200).await;
     mount_readiness(&server).await;
+    mount_network(&server).await;
 
     let mut ctx = ctx_for(&server, Some("test-key"));
     ctx.allow_custom_endpoints = false;
@@ -309,6 +358,7 @@ async fn escrow_sign_rejects_plain_http_mainnet_rpc() {
     let keys = fresh_keys();
     mount_params(&server, escrow_params_json_with_chain_id(4_217), 200).await;
     mount_readiness_with_chain_id(&server, 4_217).await;
+    mount_network(&server).await;
 
     let mut ctx = ctx_for(&server, Some("test-key"));
     ctx.dry_run = true;
@@ -389,6 +439,8 @@ async fn escrow_sign_zone_task_signs_against_params_domain_not_global_readiness(
     // Global readiness disagrees on both chain_id (42431) and
     // verifying_contract (TASK_ESCROW). It must not gate the zone sign.
     mount_readiness(&server).await;
+    // The zone is advertised (by chain id, not by the env's network entry).
+    mount_network_with_zone(&server, ZONE_CHAIN_ID).await;
 
     let mut ctx = ctx_for(&server, Some("test-key"));
     ctx.dry_run = true;
@@ -432,6 +484,7 @@ async fn escrow_sign_wallet_address_mismatch_aborts_before_rpc() {
 
     mount_params(&server, escrow_params_json(), 200).await;
     mount_readiness(&server).await;
+    mount_network(&server).await;
 
     let mut args = base_args(&keys);
     // A random other address — keystore will decrypt to its own random
@@ -466,6 +519,7 @@ async fn dry_run_calldata(params: Value) -> Vec<u8> {
     let keys = fresh_keys();
     mount_params(&server, params, 200).await;
     mount_readiness(&server).await;
+    mount_network(&server).await;
     let mut ctx = ctx_for(&server, Some("k"));
     ctx.dry_run = true;
     let env = run(&ctx, Command::Sign(base_args(&keys)))
@@ -550,6 +604,7 @@ async fn sign_err(params: Value) -> CmdError {
     let keys = fresh_keys();
     mount_params(&server, params, 200).await;
     mount_readiness(&server).await;
+    mount_network(&server).await;
     // Not dry-run, rpc_url is an invalid host: reaching RPC would surface a
     // different error, so these assert the abort happens before any tx.
     run(
@@ -633,6 +688,7 @@ async fn v3_dry_run_signs_no_approval() {
     let keys = fresh_keys();
     mount_params(&server, v3_params(), 200).await;
     mount_readiness(&server).await;
+    mount_network(&server).await;
 
     let mut ctx = ctx_for(&server, Some("k"));
     ctx.dry_run = true;
@@ -647,29 +703,22 @@ async fn v3_dry_run_signs_no_approval() {
 #[tokio::test]
 async fn v3_opens_with_review_signs_no_approval_and_finalize_omits_it() {
     let api = MockServer::start().await;
-    let rpc = MockServer::start().await;
     let keys = fresh_keys();
-    let tx_hash = format!("0x{}", "bb".repeat(32));
     mount_params(&api, v3_params(), 200).await;
     mount_readiness(&api).await;
-    let rpc_ok = |result: Value| {
-        ResponseTemplate::new(200)
-            .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": result}))
-    };
-    for (m, result) in [
-        ("eth_chainId", json!(format!("{CHAIN_ID:#x}"))),
-        ("eth_getTransactionCount", json!("0x0")),
-        ("eth_gasPrice", json!("0x3b9aca00")),
-        ("eth_estimateGas", json!("0x4b094")),
-        ("eth_sendRawTransaction", json!(tx_hash)),
-        ("eth_getTransactionReceipt", json!({"status": "0x1"})),
-    ] {
-        Mock::given(method("POST"))
-            .and(body_partial_json(json!({"method": m})))
-            .respond_with(rpc_ok(result))
-            .mount(&rpc)
-            .await;
-    }
+    mount_network(&api).await;
+    // The deployment's proxy is the RPC endpoint; the node behind it is the
+    // in-memory adapter, so no JSON-RPC scaffolding is needed.
+    let proxy_url = format!("{}/rpc/testnet", api.uri());
+    let node = Arc::new(MockTempoRpc::new());
+    node.set_chain_id(CHAIN_ID);
+    // The balance preflight runs even with the allowance check skipped.
+    node.set_balance(
+        TOKEN_ADDR.parse::<Address>().unwrap(),
+        keys.address,
+        alloy_primitives::U256::from(100_000_000u64),
+    );
+    register_mock_rpc(&proxy_url, node.clone());
     Mock::given(method("POST"))
         .and(path(format!("/bids/{BID_ID}/escrow/finalize")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -683,31 +732,17 @@ async fn v3_opens_with_review_signs_no_approval_and_finalize_omits_it() {
         .await;
 
     let mut args = base_args(&keys);
-    args.rpc_url = Some(rpc.uri());
+    args.rpc_url = None;
     args.skip_allowance_check = true;
     let env = run(&ctx_for(&api, Some("k")), Command::Sign(args))
         .await
         .expect("v3 live open");
     assert_eq!(envelope_value(&env)["data"]["deadline"], Value::Null);
 
-    let sent: Vec<_> = rpc
-        .received_requests()
-        .await
-        .expect("requests")
-        .into_iter()
-        .filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok())
-        .filter(|b| b["method"] == "eth_sendRawTransaction")
-        .collect();
-    assert_eq!(sent.len(), 1);
-    let raw = sent[0]["params"][0].as_str().expect("raw tx");
-    let bytes = hex::decode(raw.trim_start_matches("0x")).expect("hex");
-    use alloy_consensus::{Transaction, TxEnvelope};
-    use alloy_eips::eip2718::Decodable2718;
-    let tx = TxEnvelope::decode_2718(&mut bytes.as_slice()).expect("2718");
-    assert_eq!(
-        &tx.input()[..4],
-        hex::decode("f1e32bb8").unwrap().as_slice()
-    );
+    let sent = node.sent_transactions();
+    assert_eq!(sent.len(), 1, "one open, no approval");
+    assert_eq!(sent[0].0, TASK_ESCROW.parse::<Address>().unwrap());
+    assert_eq!(&sent[0].1[..4], hex::decode("f1e32bb8").unwrap().as_slice());
 
     let finalize: Vec<Value> = api
         .received_requests()
@@ -735,6 +770,7 @@ async fn v2_missing_only_min_lifetime_is_version_skew() {
         .remove("poster_approval_min_lifetime");
     mount_params(&server, params, 200).await;
     mount_readiness(&server).await;
+    mount_network(&server).await;
 
     let err = run(
         &ctx_for(&server, Some("k")),

@@ -1,21 +1,25 @@
 // SPDX-License-Identifier: MIT
 //! End-to-end tests for `taskfast escalate` (poster's on-chain dispute).
 //!
-//! wiremock only: no chain, no live RPC. The live send needs a full Tempo RPC
-//! mock (chainId, nonce, gas, sendRawTransaction, receipt) and stays deferred,
-//! as in tests/escrow.rs. `--dry-run` covers calldata; the node-chain-id guard
-//! is covered by a one-method RPC mock that must see no `eth_sendRawTransaction`.
+//! The API is wiremocked; the chain is the exported in-memory
+//! [`MockTempoRpc`](taskfast_cli::tempo_session::MockTempoRpc), registered at
+//! the command's `--rpc-url`, so no JSON-RPC scaffolding is needed.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256};
 use alloy_signer_local::PrivateKeySigner;
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use taskfast_agent::chain::{
+    dispute_timeout_calldata, disputed_at_calldata, get_escrow_calldata, timeout_resolve_calldata,
+};
 use taskfast_cli::cmd::escalate::{run, Command, RejectRemedyArgs, SignArgs, TimeoutResolveArgs};
 use taskfast_cli::cmd::{CmdError, Ctx};
+use taskfast_cli::tempo_session::{register_mock_rpc, MockTempoRpc};
 use taskfast_cli::{Envelope, Environment};
 
 const TASK_ID: &str = "00000000-0000-0000-0000-0000000000aa";
@@ -343,15 +347,10 @@ async fn sign_refuses_when_node_id_id_differs_before_any_send() {
     )
     .await;
     mount_network(&server, CHAIN_ID).await;
-    Mock::given(method("POST"))
-        .and(path("/rpc"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x1" })),
-        )
-        .mount(&server)
-        .await;
     let rpc = format!("{}/rpc", server.uri());
+    let node = Arc::new(MockTempoRpc::new());
+    node.set_chain_id(1);
+    register_mock_rpc(&rpc, node.clone());
     let err = run(&ctx_for(&server), Command::Sign(sign_args(&keys, &rpc)))
         .await
         .expect_err("node chain mismatch");
@@ -359,12 +358,10 @@ async fn sign_refuses_when_node_id_id_differs_before_any_send() {
         matches!(&err, CmdError::Validation { code, .. } if code == "chain_id_mismatch"),
         "got {err:?}"
     );
-    for r in server.received_requests().await.unwrap() {
-        if r.url.path() == "/rpc" {
-            let body = String::from_utf8_lossy(&r.body);
-            assert!(!body.contains("sendRawTransaction"), "{body}");
-        }
-    }
+    assert!(
+        node.sent_transactions().is_empty(),
+        "refused before any send"
+    );
 }
 
 #[tokio::test]
@@ -497,30 +494,8 @@ fn word(n: u64) -> String {
     format!("0x{n:064x}")
 }
 
-impl wiremock::Respond for Chain {
-    fn respond(&self, req: &wiremock::Request) -> ResponseTemplate {
-        let body: Value = serde_json::from_slice(&req.body).unwrap();
-        let result = match body["method"].as_str().unwrap() {
-            "eth_chainId" => json!(format!("0x{:x}", self.node_id)),
-            "eth_getBlockByNumber" => json!({ "timestamp": format!("0x{:x}", self.block_ts) }),
-            "eth_call" => {
-                let data = body["params"][0]["data"].as_str().unwrap();
-                if data.len() == 10 {
-                    json!(word(TIMEOUT)) // DISPUTE_TIMEOUT(): selector only, no args
-                } else if data.starts_with(&hex_selector(
-                    &taskfast_agent::chain::disputed_at_calldata(ESCROW_ID.parse().unwrap()),
-                )) {
-                    json!(word(DISPUTED_AT))
-                } else {
-                    // getEscrow: 8 words, `state` last.
-                    json!(format!("0x{}{:064x}", "00".repeat(32 * 7), self.state))
-                }
-            }
-            m => panic!("unexpected rpc method {m}"),
-        };
-        ResponseTemplate::new(200)
-            .set_body_json(json!({ "jsonrpc": "2.0", "id": 1, "result": result }))
-    }
+fn selector(calldata: &[u8]) -> [u8; 4] {
+    calldata[..4].try_into().unwrap()
 }
 
 fn hex_selector(calldata: &[u8]) -> String {
@@ -544,12 +519,33 @@ async fn mount_task(server: &MockServer, body: Value) {
         .await;
 }
 
-async fn mount_chain(server: &MockServer, chain: Chain) {
-    Mock::given(method("POST"))
-        .and(path("/rpc"))
-        .respond_with(chain)
-        .mount(server)
-        .await;
+/// Serve the reads `timeout-resolve` makes from fixed chain facts, through
+/// the in-memory adapter registered at the command's `--rpc-url`.
+fn mount_chain(server: &MockServer, chain: Chain) -> Arc<MockTempoRpc> {
+    let node = Arc::new(MockTempoRpc::new());
+    node.set_chain_id(chain.node_id);
+    let id: B256 = ESCROW_ID.parse().unwrap();
+    // getEscrow: 8 words, `state` last.
+    let state_word = format!("{:064x}", u64::from(chain.state));
+    let get_escrow = format!("{}{state_word}", "00".repeat(32 * 7));
+    node.set_call_result(
+        selector(&get_escrow_calldata(id)),
+        hex::decode(get_escrow).unwrap(),
+    );
+    node.set_call_result(
+        selector(&disputed_at_calldata(id)),
+        hex::decode(word(DISPUTED_AT).trim_start_matches("0x")).unwrap(),
+    );
+    node.set_call_result(
+        selector(&dispute_timeout_calldata()),
+        hex::decode(word(TIMEOUT).trim_start_matches("0x")).unwrap(),
+    );
+    node.set_raw(
+        "eth_getBlockByNumber",
+        json!({ "timestamp": format!("0x{:x}", chain.block_ts) }),
+    );
+    register_mock_rpc(&format!("{}/rpc", server.uri()), node.clone());
+    node
 }
 
 fn tr_args(keys: &Keys, server: &MockServer) -> TimeoutResolveArgs {
@@ -569,17 +565,11 @@ async fn tr(server: &MockServer, keys: &Keys, dry_run: bool) -> Result<Envelope,
     run(&ctx, Command::TimeoutResolve(tr_args(keys, server))).await
 }
 
-async fn assert_nothing_sent(server: &MockServer) {
-    for r in server.received_requests().await.unwrap() {
-        if r.url.path() == "/rpc" {
-            let body = String::from_utf8_lossy(&r.body);
-            assert!(!body.contains("sendRawTransaction"), "{body}");
-            assert!(
-                !body.contains("estimateGas") && !body.contains("getTransactionCount"),
-                "{body}"
-            );
-        }
-    }
+fn assert_nothing_sent(node: &MockTempoRpc) {
+    assert!(
+        node.sent_transactions().is_empty(),
+        "refused before any send"
+    );
 }
 
 fn code_of(err: &CmdError) -> &str {
@@ -589,19 +579,19 @@ fn code_of(err: &CmdError) -> &str {
     }
 }
 
-async fn ready(chain: Chain) -> (MockServer, Keys) {
+async fn ready(chain: Chain) -> (MockServer, Keys, Arc<MockTempoRpc>) {
     let server = MockServer::start().await;
     mount_task(&server, task_json(Some(ESCROW_ID), CONTRACT, CHAIN_ID)).await;
     mount_network(&server, CHAIN_ID).await;
-    mount_chain(&server, chain).await;
-    (server, fresh_keys())
+    let node = mount_chain(&server, chain);
+    (server, fresh_keys(), node)
 }
 
 const ELIGIBLE: u64 = DISPUTED_AT + TIMEOUT;
 
 #[tokio::test]
 async fn timeout_resolve_refuses_one_second_before_the_deadline() {
-    let (server, keys) = ready(Chain {
+    let (server, keys, node) = ready(Chain {
         node_id: CHAIN_ID as u64,
         state: STATE_DISPUTED,
         block_ts: ELIGIBLE - 1,
@@ -609,12 +599,12 @@ async fn timeout_resolve_refuses_one_second_before_the_deadline() {
     .await;
     let err = tr(&server, &keys, false).await.expect_err("too early");
     assert_eq!(code_of(&err), "dispute_timeout_not_elapsed");
-    assert_nothing_sent(&server).await;
+    assert_nothing_sent(&node);
 }
 
 #[tokio::test]
 async fn timeout_resolve_builds_the_call_at_exactly_the_deadline() {
-    let (server, keys) = ready(Chain {
+    let (server, keys, node) = ready(Chain {
         node_id: CHAIN_ID as u64,
         state: STATE_DISPUTED,
         block_ts: ELIGIBLE,
@@ -627,21 +617,19 @@ async fn timeout_resolve_builds_the_call_at_exactly_the_deadline() {
     assert_eq!(v["data"]["from"], format!("{:#x}", keys.address));
     assert_eq!(v["data"]["chain_id"], CHAIN_ID);
     // Golden: `cast calldata "timeoutResolveDispute(bytes32)" <ESCROW_ID>`.
-    let selector = hex_selector(&taskfast_agent::chain::timeout_resolve_calldata(
-        ESCROW_ID.parse().unwrap(),
-    ));
+    let selector = hex_selector(&timeout_resolve_calldata(ESCROW_ID.parse().unwrap()));
     assert_eq!(
         v["data"]["calldata"],
         format!("{selector}{}", &ESCROW_ID[2..])
     );
     assert_eq!(v["data"]["eligible_at"], ELIGIBLE.to_string());
-    assert_nothing_sent(&server).await;
+    assert_nothing_sent(&node);
 }
 
 #[tokio::test]
 async fn timeout_resolve_judges_by_chain_time_not_the_local_clock() {
     // Block time is far before the deadline while the real clock is long past it.
-    let (server, keys) = ready(Chain {
+    let (server, keys, _node) = ready(Chain {
         node_id: CHAIN_ID as u64,
         state: STATE_DISPUTED,
         block_ts: 1,
@@ -656,7 +644,7 @@ async fn timeout_resolve_judges_by_chain_time_not_the_local_clock() {
 #[tokio::test]
 async fn timeout_resolve_refuses_every_non_disputed_state() {
     for state in [0u8, 1, 2, 3, 4] {
-        let (server, keys) = ready(Chain {
+        let (server, keys, node) = ready(Chain {
             node_id: CHAIN_ID as u64,
             state,
             block_ts: ELIGIBLE + 1,
@@ -664,7 +652,7 @@ async fn timeout_resolve_refuses_every_non_disputed_state() {
         .await;
         let err = tr(&server, &keys, false).await.expect_err("not disputed");
         assert_eq!(code_of(&err), "escrow_not_disputed", "state {state}");
-        assert_nothing_sent(&server).await;
+        assert_nothing_sent(&node);
     }
 }
 
@@ -673,26 +661,25 @@ async fn timeout_resolve_refuses_when_task_chain_differs_from_configured_network
     let server = MockServer::start().await;
     mount_task(&server, task_json(Some(ESCROW_ID), CONTRACT, 1)).await;
     mount_network(&server, CHAIN_ID).await;
-    mount_chain(
+    let node = mount_chain(
         &server,
         Chain {
             node_id: 1,
             state: STATE_DISPUTED,
             block_ts: ELIGIBLE,
         },
-    )
-    .await;
+    );
     let keys = fresh_keys();
     let err = tr(&server, &keys, false)
         .await
         .expect_err("config chain mismatch");
     assert_eq!(code_of(&err), "chain_id_mismatch");
-    assert_nothing_sent(&server).await;
+    assert_nothing_sent(&node);
 }
 
 #[tokio::test]
 async fn timeout_resolve_refuses_when_node_id_differs() {
-    let (server, keys) = ready(Chain {
+    let (server, keys, node) = ready(Chain {
         node_id: 1,
         state: STATE_DISPUTED,
         block_ts: ELIGIBLE,
@@ -702,7 +689,31 @@ async fn timeout_resolve_refuses_when_node_id_differs() {
         .await
         .expect_err("node chain mismatch");
     assert_eq!(code_of(&err), "chain_id_mismatch");
-    assert_nothing_sent(&server).await;
+    assert_nothing_sent(&node);
+}
+
+#[tokio::test]
+async fn timeout_resolve_refuses_a_wallet_mismatch_before_any_node_io() {
+    let (server, keys, node) = ready(Chain {
+        node_id: CHAIN_ID as u64,
+        state: STATE_DISPUTED,
+        block_ts: ELIGIBLE,
+    })
+    .await;
+    let mut args = tr_args(&keys, &server);
+    args.wallet_address = Some(format!("{:#x}", PrivateKeySigner::random().address()));
+    let err = run(&ctx_for(&server), Command::TimeoutResolve(args))
+        .await
+        .expect_err("wallet mismatch");
+    match err {
+        CmdError::Usage(m) => assert!(m.contains("does not match"), "msg: {m}"),
+        other => panic!("expected Usage, got {other:?}"),
+    }
+    assert_eq!(
+        node.request_count(),
+        0,
+        "wallet preflight precedes node I/O"
+    );
 }
 
 #[tokio::test]

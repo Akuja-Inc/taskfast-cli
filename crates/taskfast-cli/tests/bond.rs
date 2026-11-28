@@ -168,6 +168,29 @@ async fn dry_run_emits_would_post_bond_with_derived_task_ref_and_default_token()
     assert!(data["post_calldata"].as_str().unwrap().starts_with("0x"));
 }
 
+/// `--dry-run` still opens the keystore: a `--wallet-address` that is not the
+/// keystore's must be refused, as on the live path.
+#[tokio::test]
+async fn dry_run_still_validates_the_keystore_against_wallet_address() {
+    let server = MockServer::start().await;
+    mount_quote(&server, 200, quote_json(None)).await;
+    mount_network_config(&server).await;
+    let keys = fresh_keys();
+
+    let mut ctx = ctx_for(&server, Some("test-key"));
+    ctx.dry_run = true;
+    let mut args = base_args(&keys);
+    args.wallet_address = Some("0x0000000000000000000000000000000000000099".into());
+
+    let err = run(&ctx, Command::Post(args))
+        .await
+        .expect_err("wallet address mismatch");
+    match err {
+        CmdError::Usage(m) => assert!(m.contains("does not match"), "msg: {m}"),
+        other => panic!("expected Usage, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn task_bond_defaults_to_server_advertised_contract() {
     let server = MockServer::start().await;

@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: MIT
 //! End-to-end tests for `taskfast post`.
 //!
-//! Two wiremock servers: one for the TaskFast API (draft prepare + submit),
-//! one for the Tempo JSON-RPC. The happy path wires them together through
-//! the real `TempoSession::send_transaction` path so any regression in
-//! tempo_rpc (nonce tag, RLP encoding) surfaces here too.
+//! wiremock serves the TaskFast API (draft prepare + submit); the chain is the
+//! in-memory [`MockTempoRpc`] registered at the deployment's proxy URL, so
+//! the happy path runs the real prepare → wallet unlock → sign-and-broadcast
+//! pipeline end to end. (The HTTP/RLP layer itself is covered in
+//! `taskfast-agent`'s `tempo_rpc` tests.)
+
+use std::sync::Arc;
 
 use alloy_signer_local::PrivateKeySigner;
 use serde_json::{json, Value};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use taskfast_cli::tempo_session::{register_mock_rpc, MockTempoRpc};
 
 use taskfast_cli::cmd::post::{run, Args};
 use taskfast_cli::cmd::{CmdError, Ctx};
@@ -35,6 +40,15 @@ fn envelope_value(env: &Envelope) -> Value {
     serde_json::to_value(env).expect("serialize envelope")
 }
 
+/// A fresh `--rpc-url` served by an in-memory testnet node.
+fn testnet_node() -> (String, Arc<MockTempoRpc>) {
+    let url = format!("http://node-{}/rpc", uuid::Uuid::new_v4().simple());
+    let node = Arc::new(MockTempoRpc::new());
+    node.set_chain_id(42431);
+    register_mock_rpc(&url, node.clone());
+    (url, node)
+}
+
 /// Build a minimal Args with sensible defaults for the happy path. Callers
 /// override just the fields they care about.
 fn base_args(wallet_address: Option<String>, keystore: Option<String>) -> Args {
@@ -57,10 +71,9 @@ fn base_args(wallet_address: Option<String>, keystore: Option<String>) -> Args {
 }
 
 /// Mount `GET /config/network` so the runtime path's fetch of the
-/// deployment's proxy URL succeeds. Returns the testnet rpc_url that will
-/// be picked (i.e. `<api_base>/rpc/testnet`) so callers can point the
-/// RPC proxy mocks at it if they need to.
-async fn mount_network_config_mock(server: &MockServer) -> String {
+/// deployment's proxy URL succeeds, and serve that proxy from an in-memory
+/// testnet node. Returns the proxy URL and the node.
+async fn mount_network_config_mock(server: &MockServer) -> (String, Arc<MockTempoRpc>) {
     let uri = server.uri();
     let payload = json!({
         "networks": {
@@ -85,53 +98,16 @@ async fn mount_network_config_mock(server: &MockServer) -> String {
         .respond_with(ResponseTemplate::new(200).set_body_json(payload))
         .mount(server)
         .await;
-    format!("{uri}/rpc/testnet")
-}
-
-/// Mount all four JSON-RPC methods the sign-and-broadcast path needs.
-async fn mount_rpc_mocks(server: &MockServer, tx_hash_hex: &str) {
-    let rpc_ok = |result: Value| {
-        ResponseTemplate::new(200).set_body_json(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": result,
-        }))
-    };
-    Mock::given(method("POST"))
-        .and(body_partial_json(json!({"method": "eth_chainId"})))
-        .respond_with(rpc_ok(json!("0xa5bf"))) // 42431 (testnet)
-        .mount(server)
-        .await;
-    Mock::given(method("POST"))
-        .and(body_partial_json(
-            json!({"method": "eth_getTransactionCount"}),
-        ))
-        .respond_with(rpc_ok(json!("0x0")))
-        .mount(server)
-        .await;
-    Mock::given(method("POST"))
-        .and(body_partial_json(json!({"method": "eth_gasPrice"})))
-        .respond_with(rpc_ok(json!("0x3b9aca00"))) // 1 gwei
-        .mount(server)
-        .await;
-    Mock::given(method("POST"))
-        .and(body_partial_json(json!({"method": "eth_estimateGas"})))
-        .respond_with(rpc_ok(json!("0x4b094"))) // 307_348 — canonical testnet USDC transfer
-        .mount(server)
-        .await;
-    Mock::given(method("POST"))
-        .and(body_partial_json(
-            json!({"method": "eth_sendRawTransaction"}),
-        ))
-        .respond_with(rpc_ok(json!(tx_hash_hex)))
-        .mount(server)
-        .await;
+    let proxy_url = format!("{uri}/rpc/testnet");
+    let node = Arc::new(MockTempoRpc::new());
+    node.set_chain_id(42431);
+    register_mock_rpc(&proxy_url, node.clone());
+    (proxy_url, node)
 }
 
 #[tokio::test]
 async fn post_happy_path_end_to_end() {
     let api_server = MockServer::start().await;
-    let rpc_server = MockServer::start().await;
 
     // Real keystore so the full prepare→sign→submit path exercises I/O.
     let signer = PrivateKeySigner::random();
@@ -142,7 +118,7 @@ async fn post_happy_path_end_to_end() {
     let password_path = tmp.path().join("pw");
     std::fs::write(&password_path, b"pw").unwrap();
 
-    let _ = mount_network_config_mock(&api_server).await;
+    let (_proxy_url, node) = mount_network_config_mock(&api_server).await;
 
     let draft_id = uuid::Uuid::new_v4();
     let task_id = uuid::Uuid::new_v4();
@@ -154,7 +130,6 @@ async fn post_happy_path_end_to_end() {
         format!("0x{}", hex::encode(buf))
     };
     let token_addr = "0x20c0000000000000000000000000000000000000";
-    let tx_hash_hex = format!("0x{}", "aa".repeat(32));
 
     Mock::given(method("POST"))
         .and(path("/task_drafts"))
@@ -168,30 +143,53 @@ async fn post_happy_path_end_to_end() {
 
     Mock::given(method("POST"))
         .and(path(format!("/task_drafts/{draft_id}/submit")))
-        .and(body_partial_json(
-            json!({ "signature": tx_hash_hex.clone() }),
-        ))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": task_id,
             "status": "open",
             "submission_fee_status": "pending_confirmation",
-            "submission_fee_tx_hash": tx_hash_hex,
+            "submission_fee_tx_hash": "set-below",
         })))
         .mount(&api_server)
         .await;
-
-    mount_rpc_mocks(&rpc_server, &tx_hash_hex).await;
 
     let mut args = base_args(
         Some(wallet_addr.clone()),
         Some(keystore_path.display().to_string()),
     );
     args.wallet_password_file = Some(password_path);
-    args.rpc_url = Some(rpc_server.uri());
+    args.rpc_url = None;
 
     let envelope = run(&ctx_for(&api_server, Some("test-key")), args)
         .await
         .expect("post should succeed");
+
+    // One fee transfer to the token contract, signed for the node's chain,
+    // and its hash is what got reported to the server and the user.
+    let sent = node.sent_transactions();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].0,
+        token_addr.parse::<alloy_primitives::Address>().unwrap()
+    );
+    assert_eq!(
+        sent[0].1.as_ref(),
+        hex::decode(calldata_hex.trim_start_matches("0x")).unwrap()
+    );
+    assert_eq!(node.broadcast_chain_ids(), [Some(42431)]);
+    let [tx_hash] = node.tx_hashes()[..] else {
+        panic!("one tx hash")
+    };
+    let tx_hash_hex = format!("{tx_hash:#x}");
+    let submits: Vec<Value> = api_server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path().ends_with("/submit"))
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(submits.len(), 1);
+    assert_eq!(submits[0]["signature"], tx_hash_hex);
 
     let v = envelope_value(&envelope);
     assert_eq!(v["ok"], true);
@@ -211,7 +209,7 @@ async fn post_blocked_on_submission_fee_debt_renders_message_and_fee_status() {
     // post looks stalled; the envelope must say the task is waiting on
     // on-chain confirmation, not that the post failed.
     let api_server = MockServer::start().await;
-    let rpc_server = MockServer::start().await;
+    let (rpc_url, _node) = testnet_node();
 
     let signer = PrivateKeySigner::random();
     let wallet_addr = format!("{:#x}", signer.address());
@@ -250,14 +248,12 @@ async fn post_blocked_on_submission_fee_debt_renders_message_and_fee_status() {
         .mount(&api_server)
         .await;
 
-    mount_rpc_mocks(&rpc_server, &tx_hash_hex).await;
-
     let mut args = base_args(
         Some(wallet_addr.clone()),
         Some(keystore_path.display().to_string()),
     );
     args.wallet_password_file = Some(password_path);
-    args.rpc_url = Some(rpc_server.uri());
+    args.rpc_url = Some(rpc_url.clone());
 
     let envelope = run(&ctx_for(&api_server, Some("test-key")), args)
         .await
@@ -409,8 +405,7 @@ async fn post_rejects_non_allowlisted_fee_token() {
     // instead of broadcasting an ERC-20 transfer to whatever contract the
     // server named.
     let api_server = MockServer::start().await;
-    let rpc_server = MockServer::start().await;
-    let _ = mount_network_config_mock(&api_server).await;
+    let (_proxy_url, node) = mount_network_config_mock(&api_server).await;
 
     let draft_id = uuid::Uuid::new_v4();
     let calldata_hex = format!("0x{}", "00".repeat(4 + 64));
@@ -426,9 +421,6 @@ async fn post_rejects_non_allowlisted_fee_token() {
         .mount(&api_server)
         .await;
 
-    // RPC returns the real testnet chain id → allowlist is active.
-    mount_rpc_mocks(&rpc_server, &format!("0x{}", "aa".repeat(32))).await;
-
     let signer = PrivateKeySigner::random();
     let tmp = tempfile::tempdir().expect("tempdir");
     let keystore_path = tmp.path().join("wallet.json");
@@ -439,13 +431,9 @@ async fn post_rejects_non_allowlisted_fee_token() {
     let wallet_addr = format!("{:#x}", signer.address());
     let mut args = base_args(Some(wallet_addr), Some(keystore_path.display().to_string()));
     args.wallet_password_file = Some(password_path);
-    args.rpc_url = Some(rpc_server.uri());
+    args.rpc_url = None;
 
-    // Explicitly turn off the opt-in so the allowlist's chain-id guard is
-    // active even though the api_base is a mock URL.
-    let mut ctx = ctx_for(&api_server, Some("test-key"));
-    ctx.allow_custom_endpoints = true; // needed for mock api/rpc URLs
-    let err = run(&ctx, args)
+    let err = run(&ctx_for(&api_server, Some("test-key")), args)
         .await
         .expect_err("attacker token must be refused");
     match err {
@@ -456,6 +444,7 @@ async fn post_rejects_non_allowlisted_fee_token() {
         }
         other => panic!("expected Validation, got {other:?}"),
     }
+    assert!(node.sent_transactions().is_empty(), "never signed");
 }
 
 #[tokio::test]
@@ -477,7 +466,7 @@ async fn post_missing_api_key_errors_before_any_http() {
 #[tokio::test]
 async fn post_forwards_completion_criteria() {
     let api_server = MockServer::start().await;
-    let rpc_server = MockServer::start().await;
+    let (rpc_url, _node) = testnet_node();
     let _ = mount_network_config_mock(&api_server).await;
 
     let signer = PrivateKeySigner::random();
@@ -525,14 +514,12 @@ async fn post_forwards_completion_criteria() {
         .mount(&api_server)
         .await;
 
-    mount_rpc_mocks(&rpc_server, &tx_hash_hex).await;
-
     let mut args = base_args(
         Some(wallet_addr.clone()),
         Some(keystore_path.display().to_string()),
     );
     args.wallet_password_file = Some(password_path);
-    args.rpc_url = Some(rpc_server.uri());
+    args.rpc_url = Some(rpc_url.clone());
     args.criteria = vec![serde_json::to_string(&json!({
         "description": "matches anything",
         "check_type": "regex",
@@ -557,7 +544,7 @@ async fn post_forwards_completion_criteria() {
 #[tokio::test]
 async fn post_forwards_settlement_venue() {
     let api_server = MockServer::start().await;
-    let rpc_server = MockServer::start().await;
+    let (rpc_url, _node) = testnet_node();
     let _ = mount_network_config_mock(&api_server).await;
 
     let signer = PrivateKeySigner::random();
@@ -603,14 +590,12 @@ async fn post_forwards_settlement_venue() {
         .mount(&api_server)
         .await;
 
-    mount_rpc_mocks(&rpc_server, &tx_hash_hex).await;
-
     let mut args = base_args(
         Some(wallet_addr.clone()),
         Some(keystore_path.display().to_string()),
     );
     args.wallet_password_file = Some(password_path);
-    args.rpc_url = Some(rpc_server.uri());
+    args.rpc_url = Some(rpc_url.clone());
     args.venue = Some("tempo-zone-moderato".into());
 
     let envelope = run(&ctx_for(&api_server, Some("test-key")), args)
@@ -643,7 +628,7 @@ async fn post_bad_criterion_json_is_usage_error() {
 #[tokio::test]
 async fn post_criteria_file_merges_with_inline() {
     let api_server = MockServer::start().await;
-    let rpc_server = MockServer::start().await;
+    let (rpc_url, _node) = testnet_node();
 
     let signer = PrivateKeySigner::random();
     let wallet_addr = format!("{:#x}", signer.address());
@@ -702,11 +687,10 @@ async fn post_criteria_file_merges_with_inline() {
         })))
         .mount(&api_server)
         .await;
-    mount_rpc_mocks(&rpc_server, &tx_hash_hex).await;
 
     let mut args = base_args(Some(wallet_addr), Some(keystore_path.display().to_string()));
     args.wallet_password_file = Some(password_path);
-    args.rpc_url = Some(rpc_server.uri());
+    args.rpc_url = Some(rpc_url.clone());
     args.criteria_file = Some(criteria_path);
     args.criteria = vec![serde_json::to_string(&json!({
         "description": "inline",

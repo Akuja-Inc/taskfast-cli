@@ -4443,6 +4443,7 @@ dependencies = [
  "serde_json",
  "taskfast-agent",
  "taskfast-chains",
+ "taskfast-cli",
  "taskfast-client",
  "tempfile",
  "thiserror 2.0.21",

@@ -357,6 +357,21 @@ pub async fn sign_and_broadcast_tx(
     rpc.send_raw_transaction(&raw).await
 }
 
+/// Sign `calldata` as a legacy tx for a chain id the caller has already
+/// verified against the node (e.g. `TempoSession`'s `eth_chainId` guard), so
+/// the EIP-155 replay protection binds to the verified chain even if the node
+/// re-routes or re-orgs to another chain before the tx is built.
+pub async fn sign_and_broadcast_tx_for_chain(
+    rpc: &TempoRpcClient,
+    signer: &PrivateKeySigner,
+    to: Address,
+    calldata: Bytes,
+    chain_id: u64,
+) -> Result<TxHash, RpcError> {
+    let raw = sign_tx_for_chain(rpc, signer, to, calldata, chain_id).await?;
+    rpc.send_raw_transaction(&raw).await
+}
+
 /// Build + sign a legacy tx targeting `to` without broadcasting. Returns the
 /// raw RLP-encoded signed tx — suitable for dry-runs or server-broadcast flows.
 pub async fn sign_tx(
@@ -366,11 +381,36 @@ pub async fn sign_tx(
     calldata: Bytes,
 ) -> Result<Vec<u8>, RpcError> {
     let chain_id = rpc.chain_id().await?;
+    sign_tx_for_chain(rpc, signer, to, calldata, chain_id).await
+}
+
+/// [`sign_tx`] pinned to a caller-verified `chain_id` instead of a second
+/// `eth_chainId` round-trip.
+pub async fn sign_tx_for_chain(
+    rpc: &TempoRpcClient,
+    signer: &PrivateKeySigner,
+    to: Address,
+    calldata: Bytes,
+    chain_id: u64,
+) -> Result<Vec<u8>, RpcError> {
     let nonce = rpc.pending_nonce(signer.address()).await?;
     let gas_price = rpc.gas_price().await?;
     let estimate = rpc.estimate_gas(signer.address(), to, &calldata).await?;
     let gas_limit = estimate.saturating_mul(GAS_ESTIMATE_BUFFER_NUM) / GAS_ESTIMATE_BUFFER_DEN;
+    sign_legacy_tx(signer, to, calldata, nonce, gas_price, gas_limit, chain_id).map(|(_, raw)| raw)
+}
 
+/// Build + sign a legacy tx for `chain_id` (EIP-155) with caller-supplied
+/// nonce and fees; no RPC. Returns the signed tx's hash and its RLP.
+pub fn sign_legacy_tx(
+    signer: &PrivateKeySigner,
+    to: Address,
+    calldata: Bytes,
+    nonce: u64,
+    gas_price: u128,
+    gas_limit: u64,
+    chain_id: u64,
+) -> Result<(TxHash, Vec<u8>), RpcError> {
     let tx = TxLegacy {
         chain_id: Some(chain_id),
         nonce,
@@ -385,8 +425,67 @@ pub async fn sign_tx(
         .sign_hash_sync(&sig_hash)
         .map_err(|e| RpcError::Sign(e.to_string()))?;
     let signed = tx.into_signed(sig);
+    let hash = *signed.hash();
     let envelope = TxEnvelope::Legacy(signed);
-    Ok(envelope.encoded_2718())
+    Ok((hash, envelope.encoded_2718()))
+}
+
+/// The chain id a raw signed tx is bound to, decoded from its signature:
+/// `None` for a pre-EIP-155 tx.
+pub fn signed_tx_chain_id(raw: &[u8]) -> Result<Option<u64>, RpcError> {
+    use alloy_consensus::Transaction;
+    use alloy_eips::eip2718::Decodable2718;
+    let mut raw = raw;
+    let envelope = TxEnvelope::decode_2718(&mut raw)
+        .map_err(|e| RpcError::Decode(format!("signed tx: {e}")))?;
+    Ok(envelope.chain_id())
+}
+
+#[cfg(test)]
+mod pinned_chain_tests {
+    use super::*;
+
+    /// `eth_chainId` answers 1 both times; a tx signed "for chain 42431" must
+    /// still carry 42431, proving the pinned id wins over the node's answer.
+    #[tokio::test]
+    async fn sign_tx_for_chain_pins_the_verified_chain_id() {
+        let server = wiremock::MockServer::start().await;
+        let ok = |r: Value| {
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(json!({"jsonrpc":"2.0","id":1,"result":r}))
+        };
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/"))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&req.body).unwrap();
+                let result = match body["method"].as_str().unwrap() {
+                    "eth_chainId" => json!("0x1"),
+                    "eth_getTransactionCount" => json!("0x0"),
+                    "eth_gasPrice" => json!("0x1"),
+                    "eth_estimateGas" => json!("0x5208"),
+                    m => panic!("unexpected method {m}"),
+                };
+                ok(result)
+            })
+            .mount(&server)
+            .await;
+        let rpc = TempoRpcClient::with_default_client(server.uri());
+        let raw = sign_tx_for_chain(
+            &rpc,
+            &PrivateKeySigner::random(),
+            Address::ZERO,
+            Bytes::new(),
+            42_431,
+        )
+        .await
+        .unwrap();
+        use alloy_eips::eip2718::Decodable2718;
+        let TxEnvelope::Legacy(signed) = TxEnvelope::decode_2718(&mut raw.as_slice()).unwrap()
+        else {
+            panic!("legacy expected")
+        };
+        assert_eq!(signed.tx().chain_id, Some(42_431));
+    }
 }
 
 /// Thin ERC-20 wrapper around [`sign_and_broadcast_tx`]. The returned hash is

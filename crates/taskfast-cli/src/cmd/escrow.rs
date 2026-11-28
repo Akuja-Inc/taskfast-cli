@@ -8,7 +8,7 @@
 //!  1. `GET /bids/:id/escrow/params` → server-derived on-chain params.
 //!  2. EIP-712 `DistributionDomain` from those params (chain_id +
 //!     task_escrow_contract) — the venue's escrow for zone-bound tasks.
-//!  3. ERC-20 `allowance` preflight; `approve` if short.
+//!  3. ERC-20 `balance` preflight, then `allowance`; `approve` if short.
 //!  4. Random 32-byte salt → `compute_escrow_id` (matches Solidity).
 //!  5. EIP-712 `DistributionApproval(escrowId, deadline)` — `sign_distribution`;
 //!     skipped when the params carry `review_window_seconds` (v3 venue).
@@ -24,6 +24,11 @@
 //!
 //! Error mapping delegates to `map_api_error` (401|403→Auth, 409|422→
 //! Validation). Keystore / signing failures surface as `Wallet` (exit 5).
+//!
+//! Every chain touch goes through [`ChainConnection`]: the escrow params'
+//! `chain_id` selects the deployment's entry (L1 or a Tempo Zone venue), the
+//! proxy must be same-host, the node's `eth_chainId` must match, and the
+//! keystore unlocks behind the same seam.
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -35,17 +40,14 @@ use clap::Parser;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{
-    is_proxy_rpc_url, network_policy_for_chain_id, parse_duration, validate_override_rpc_url,
-    CmdError, CmdResult, Ctx,
-};
+use super::{parse_duration, CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
+use crate::tempo_session::{ChainConnection, ChainTarget, WalletOpts};
 
 use taskfast_agent::chain::{
     compute_escrow_id, decode_escrow_state, decode_escrow_worker, decode_u256, get_escrow_calldata,
     EscrowIdParams, TaskEscrow,
 };
-use taskfast_agent::tempo_rpc::TempoRpcClient;
 use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
 use taskfast_client::api::types::{
     BidEscrowFinalizeRequest, BidEscrowFinalizeRequestPosterApprovalDeadline,
@@ -124,7 +126,8 @@ pub struct SignArgs {
     pub rpc_url: Option<String>,
 
     /// Skip the on-chain `allowance` preflight + `approve` tx. Only safe when
-    /// the caller already granted a sufficient allowance out-of-band.
+    /// the caller already granted a sufficient allowance out-of-band. The
+    /// balance preflight still runs.
     #[arg(long)]
     pub skip_allowance_check: bool,
 
@@ -291,19 +294,26 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     let review_window = review_window_from(&params)?;
     let open_deadline = open_approval_deadline(&params)?;
 
-    // 6. Load signer + preflight address equality.
-    let keystore_path = super::wallet_args::resolve_keystore_path(
-        args.keystore.as_deref(),
-        ctx.keystore_path.as_deref(),
-    );
-    let signer = super::wallet_args::load_signer_and_validate(
-        keystore_path.as_deref(),
-        args.wallet_password_file.as_deref(),
-        args.wallet_address
-            .as_deref()
-            .or(ctx.wallet_address.as_deref()),
-        "escrow approval",
-    )?;
+    // 6. Resolve the chain endpoint (override or the deployment's same-host
+    //    proxy for `params.chain_id`) and unlock the wallet behind the seam.
+    let wallet = WalletOpts {
+        keystore: args.keystore.as_deref(),
+        password_file: args.wallet_password_file.as_deref(),
+        wallet_address: args.wallet_address.as_deref(),
+        rpc_url: args.rpc_url.as_deref(),
+        receipt_timeout: args.receipt_timeout,
+    };
+    let conn = ChainConnection::resolve(
+        ctx,
+        &client,
+        wallet.rpc_url,
+        ChainTarget::ChainId(params.chain_id),
+    )
+    .await?;
+    let rpc_url = conn.rpc_url().to_string();
+    // Unlocks the wallet, then verifies the node's chain id unless --dry-run.
+    let session = conn.into_session(ctx, &wallet, "escrow approval").await?;
+    let signer = session.signer();
 
     // 7. Derive random salt + predicted escrow_id. Must byte-match Solidity
     //    `TaskEscrow.computeEscrowId`. See
@@ -329,7 +339,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
     //    we never strand funds behind an approval the server would reject at
     //    finalize (gh#118 / taskfast#935).
     let mut approval = open_deadline
-        .map(|d| sign_distribution(&signer, &domain, escrow_id, U256::from(d)).map(|sig| (d, sig)))
+        .map(|d| sign_distribution(signer, &domain, escrow_id, U256::from(d)).map(|sig| (d, sig)))
         .transpose()?;
 
     // 9. Build open / openWithMemo calldata up front — we reuse it for the
@@ -347,46 +357,6 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         memo_hash_opt,
         review_window,
     );
-
-    // Resolve RPC URL. Override flows to a bare upstream gateway; default
-    // path pulls the deployment's proxy URL from `GET /config/network`
-    // (reverse-lookup by chain_id, so the selected entry matches the
-    // server-returned escrow params). The proxy URL is sanity-checked to
-    // live under the authenticated api_base — catches a misconfigured (or
-    // malicious) deployment returning an off-host upstream.
-    let (rpc_url, _via_proxy) = if let Some(ref url) = args.rpc_url {
-        validate_override_rpc_url(
-            url,
-            network_policy_for_chain_id(chain_id_u64),
-            ctx.allow_custom_endpoints,
-        )?;
-        (url.clone(), false)
-    } else {
-        let cfg = client.fetch_network_config().await.map_err(|e| {
-            CmdError::Server(format!("fetch network config from {}: {e}", ctx.base_url()))
-        })?;
-        let (_name, entry) = cfg.entry_by_chain_id(params.chain_id).map_err(|e| {
-            CmdError::Server(format!(
-                "deployment at {} does not advertise chain_id={}: {e}",
-                ctx.base_url(),
-                params.chain_id
-            ))
-        })?;
-        // Same-host guard as post::resolve_proxy_rpc_url — the proxy may be mounted
-        // at any path on api_base (`/rpc/…` or `/api/rpc/…`); only the host
-        // must match so the API key never leaves the approved deployment.
-        if !is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
-            return Err(CmdError::Server(format!(
-                "deployment at {} returned rpc_url {:?} for chain_id={}, \
-                 which is not on the same host. Refusing to route RPC \
-                 traffic off-host.",
-                ctx.base_url(),
-                entry.rpc_url,
-                params.chain_id,
-            )));
-        }
-        (entry.rpc_url.clone(), true)
-    };
 
     if ctx.dry_run {
         return Ok(Envelope::success(
@@ -412,32 +382,29 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         ));
     }
 
-    let http = ctx.rpc_http_client(&client, &rpc_url);
-    let rpc = TempoRpcClient::new(http, rpc_url);
-    let default_timeout = crate::tempo_session::default_receipt_timeout_for_chain_id(chain_id_u64);
-    let receipt_timeout =
-        super::resolve_duration(args.receipt_timeout, ctx.receipt_timeout, default_timeout);
-    let session =
-        crate::tempo_session::TempoSession::new(signer, keystore_path, rpc, receipt_timeout);
+    // (Live only: the node's chain id was verified and pinned before the
+    // keystore was unlocked.)
 
-    // 10. Live RPC: allowance preflight + optional approve.
-    //     TaskEscrow.open calls transferFrom for `deposit + platformFeeAmount` in a
-    //     single call, so balance/allowance/approve must cover the sum — not
-    //     just deposit.
+    // 10. Live RPC: balance preflight, then allowance preflight + optional
+    //     approve. TaskEscrow.open calls transferFrom for `deposit +
+    //     platformFeeAmount` in a single call, so balance/allowance/approve must
+    //     cover the sum — not just deposit. The balance check always runs:
+    //     `--skip-allowance-check` governs only the allowance + approve path.
     let total_required = deposit
         .checked_add(platform_fee)
         .ok_or_else(|| CmdError::Decode("deposit + platform_fee overflow U256".into()))?;
 
+    let balance = session
+        .erc20_balance_of(token_address, session.address())
+        .await?;
+    if balance < total_required {
+        return Err(CmdError::Usage(format!(
+            "poster balance {balance} < required {total_required} (deposit {deposit} + fee {platform_fee}) on token {token_address:#x}"
+        )));
+    }
+
     let mut approval_tx_hex: Option<String> = None;
     if !args.skip_allowance_check {
-        let balance = session
-            .erc20_balance_of(token_address, session.address())
-            .await?;
-        if balance < total_required {
-            return Err(CmdError::Usage(format!(
-                "poster balance {balance} < required {total_required} (deposit {deposit} + fee {platform_fee}) on token {token_address:#x}"
-            )));
-        }
         approval_tx_hex = session
             .ensure_allowance(token_address, task_escrow, total_required)
             .await?
@@ -737,16 +704,6 @@ fn decimal_to_u256(s: &str, decimals: u8) -> Result<U256, CmdError> {
 
 // ─── worker `submitWork` (taskfast#2044) ──────────────────────────────────
 
-/// Wallet/RPC flags, same sources as `escrow sign` and `settle` (flag, env,
-/// then `Ctx` config). Used by `escrow submit-work` and by `task submit`/`remedy`.
-pub(super) struct WalletOpts<'a> {
-    pub keystore: Option<&'a str>,
-    pub password_file: Option<&'a std::path::Path>,
-    pub wallet_address: Option<&'a str>,
-    pub rpc_url: Option<&'a str>,
-    pub receipt_timeout: Option<std::time::Duration>,
-}
-
 /// `EscrowState::Open` in `ArbitratedEscrow.sol`.
 const ESCROW_STATE_OPEN: u8 = 1;
 
@@ -782,12 +739,15 @@ fn view_calldata(escrow_id: B256, window: bool) -> Bytes {
     }
 }
 
+/// A contract from before the review clock has no `reviewWindowOf`: the call
+/// reverts (JSON-RPC execution error) or returns nothing. That is a legacy
+/// escrow, not a failure; transport and decode errors still are.
 async fn review_window(
-    rpc: &TempoRpcClient,
+    conn: &ChainConnection,
     contract: Address,
     escrow_id: B256,
 ) -> Result<U256, CmdError> {
-    match rpc
+    match conn
         .eth_call(contract, &view_calldata(escrow_id, true))
         .await
     {
@@ -825,9 +785,17 @@ pub(super) async fn submit_work(
     }
     let target = super::escalate::chain_target(&task, "nothing to submit")?;
     let (contract, escrow_id) = (target.contract, target.escrow_id);
-    let (rpc, _) = super::escalate::connect_rpc(ctx, &client, &target, opts.rpc_url).await?;
+    // The task's venue chain selects the deployment's entry (L1 or a Tempo
+    // Zone); the node must be on it.
+    let conn = ChainConnection::connect(
+        ctx,
+        &client,
+        opts.rpc_url,
+        ChainTarget::ChainId(target.chain_id),
+    )
+    .await?;
     let read = |what: &'static str, data: Bytes| {
-        let rpc = &rpc;
+        let rpc = &conn;
         async move {
             rpc.eth_call(contract, &data)
                 .await
@@ -835,7 +803,7 @@ pub(super) async fn submit_work(
         }
     };
 
-    let window = review_window(&rpc, contract, escrow_id).await?;
+    let window = review_window(&conn, contract, escrow_id).await?;
     if window.is_zero() {
         return Ok(json!({
             "action": "no_review_clock",
@@ -867,16 +835,6 @@ pub(super) async fn submit_work(
                 .into(),
         })?;
 
-    let keystore_path =
-        super::wallet_args::resolve_keystore_path(opts.keystore, ctx.keystore_path.as_deref());
-    let signer = super::wallet_args::load_signer_and_validate(
-        keystore_path.as_deref(),
-        opts.password_file,
-        opts.wallet_address.or(ctx.wallet_address.as_deref()),
-        "escrow submit-work",
-    )?;
-    let signer_address = signer.address();
-
     let state_raw = read("getEscrow", get_escrow_calldata(escrow_id).into()).await?;
     let state = decode_escrow_state(&state_raw)
         .map_err(|e| super::escalate::chain_read_err("getEscrow", e))?;
@@ -891,6 +849,14 @@ pub(super) async fn submit_work(
     }
     let worker = decode_escrow_worker(&state_raw)
         .map_err(|e| super::escalate::chain_read_err("getEscrow", e))?;
+
+    let submitted_at = decode_u256(&read("submittedAtOf", view_calldata(escrow_id, false)).await?)
+        .map_err(|e| super::escalate::chain_read_err("submittedAtOf", e))?;
+
+    // Wallet unlock + address preflight, behind the same seam.
+    let session = conn.into_session(ctx, opts, "escrow submit-work").await?;
+    let signer_address = session.address();
+
     if worker != signer_address {
         return Err(CmdError::Validation {
             code: "not_escrow_worker".into(),
@@ -900,8 +866,6 @@ pub(super) async fn submit_work(
             ),
         });
     }
-    let submitted_at = decode_u256(&read("submittedAtOf", view_calldata(escrow_id, false)).await?)
-        .map_err(|e| super::escalate::chain_read_err("submittedAtOf", e))?;
     let common = |action: &str| {
         json!({
             "action": action,
@@ -928,13 +892,6 @@ pub(super) async fn submit_work(
         return Ok(data);
     }
 
-    let receipt_timeout = super::resolve_duration(
-        opts.receipt_timeout,
-        ctx.receipt_timeout,
-        crate::tempo_session::default_receipt_timeout_for_chain_id(target.chain_id_u64),
-    );
-    let session =
-        crate::tempo_session::TempoSession::new(signer, keystore_path, rpc, receipt_timeout);
     let tx = session
         .send_transaction_and_wait(
             contract,
@@ -1063,8 +1020,16 @@ async fn record_payout_approval(
         }
     }
     let target = super::escalate::chain_target(&task, "nothing to approve")?;
-    let (rpc, _) = super::escalate::connect_rpc(ctx, &client, &target, opts.rpc_url).await?;
-    if review_window(&rpc, target.contract, target.escrow_id)
+    // Same seam as `submit-work`: the task's chain selects the deployment's
+    // entry and the node is verified before the read; no tx is sent.
+    let conn = ChainConnection::connect(
+        ctx,
+        &client,
+        opts.rpc_url,
+        ChainTarget::ChainId(target.chain_id),
+    )
+    .await?;
+    if review_window(&conn, target.contract, target.escrow_id)
         .await?
         .is_zero()
     {
@@ -1075,25 +1040,28 @@ async fn record_payout_approval(
         }));
     }
 
-    let keystore_path =
-        super::wallet_args::resolve_keystore_path(opts.keystore, ctx.keystore_path.as_deref());
-    let signer = super::wallet_args::load_signer_and_validate(
-        keystore_path.as_deref(),
-        opts.password_file,
-        opts.wallet_address.or(ctx.wallet_address.as_deref()),
-        "payout approval",
-    )?;
+    // The node is already verified; this only unlocks the wallet (no lock,
+    // nothing is broadcast).
+    let session = conn.into_session(ctx, opts, "payout approval").await?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| CmdError::Signing(format!("system clock is before the epoch: {e}")))?
         .as_secs();
     let deadline = now + PAYOUT_APPROVAL_LIFETIME_SECS;
-    let domain = DistributionDomain::new(target.chain_id_u64, target.contract);
-    let signature = sign_distribution(&signer, &domain, target.escrow_id, U256::from(deadline))?;
+    let domain = DistributionDomain::new(
+        crate::tempo_session::chain_id_u64(target.chain_id, "server-issued")?,
+        target.contract,
+    );
+    let signature = sign_distribution(
+        session.signer(),
+        &domain,
+        target.escrow_id,
+        U256::from(deadline),
+    )?;
     let mut data = json!({
         "task_id": task_id.to_string(),
         "escrow_id": format!("{:#x}", target.escrow_id),
-        "from": format!("{:#x}", signer.address()),
+        "from": format!("{:#x}", session.address()),
         "deadline": deadline,
     });
 

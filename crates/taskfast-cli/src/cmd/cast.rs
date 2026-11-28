@@ -18,6 +18,10 @@
 //! / `keccak` / `4byte` conveniences, `--block` on `call` (everything in-repo
 //! reads `latest`; add an additive `eth_call_at` later if needed), `--value`
 //! on `send` (every replaced invocation targets a non-payable function).
+//!
+//! Every chain touch goes through [`ChainConnection`]: an explicit `--rpc-url`
+//! needs no TaskFast credentials, the deployment's proxy is same-host guarded,
+//! and `send` verifies the node's `eth_chainId` before signing.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -28,13 +32,10 @@ use alloy_primitives::{Address, Bytes};
 use clap::Parser;
 use serde_json::{json, Value};
 
-use super::{
-    is_proxy_rpc_url, parse_duration, resolve_duration, validate_override_rpc_url, CmdError,
-    CmdResult, Ctx,
-};
+use super::{parse_duration, CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
-
-use taskfast_agent::tempo_rpc::TempoRpcClient;
+use crate::tempo_session::validate_override_rpc_url;
+use crate::tempo_session::{load_wallet, ChainConnection, ChainTarget, WalletOpts};
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
@@ -128,9 +129,8 @@ async fn call(ctx: &Ctx, args: CallArgs) -> CmdResult {
     let values = coerce_args(&func, &args.args)?;
     let calldata = encode_calldata(&func, &values)?;
 
-    let (rpc_url, http) = resolve_rpc(ctx, args.rpc_url.as_deref()).await?;
-    let rpc = TempoRpcClient::new(http, rpc_url);
-    let raw = rpc
+    let conn = connect(ctx, args.rpc_url.as_deref()).await?;
+    let raw = conn
         .eth_call(to, &calldata)
         .await
         .map_err(|e| CmdError::Server(format!("eth_call: {e}")))?;
@@ -164,23 +164,18 @@ async fn send(ctx: &Ctx, args: SendArgs) -> CmdResult {
     let values = coerce_args(&func, &args.args)?;
     let calldata = encode_calldata(&func, &values)?;
 
-    // Load signer + preflight the wallet address before any network I/O —
-    // same order as `bond post`, so `--dry-run` still validates the keystore.
-    let keystore_path = super::wallet_args::resolve_keystore_path(
-        args.keystore.as_deref(),
-        ctx.keystore_path.as_deref(),
-    );
-    let signer = super::wallet_args::load_signer_and_validate(
-        keystore_path.as_deref(),
-        args.wallet_password_file.as_deref(),
-        args.wallet_address
-            .as_deref()
-            .or(ctx.wallet_address.as_deref()),
-        "cast send transaction",
-    )?;
-
+    // Preflight the wallet before any network I/O — same order as `bond post`,
+    // so `--dry-run` still validates the keystore.
+    let wallet = WalletOpts {
+        keystore: args.keystore.as_deref(),
+        password_file: args.wallet_password_file.as_deref(),
+        wallet_address: args.wallet_address.as_deref(),
+        rpc_url: args.rpc_url.as_deref(),
+        receipt_timeout: args.receipt_timeout,
+    };
     if ctx.dry_run {
-        validate_dry_run_override(ctx, args.rpc_url.as_deref())?;
+        validate_dry_run_override(ctx, wallet.rpc_url)?;
+        let (signer, _) = load_wallet(ctx, &wallet, "cast send transaction")?;
         return Ok(Envelope::success(
             ctx.environment,
             ctx.dry_run,
@@ -194,16 +189,10 @@ async fn send(ctx: &Ctx, args: SendArgs) -> CmdResult {
         ));
     }
 
-    let (rpc_url, http) = resolve_rpc(ctx, args.rpc_url.as_deref()).await?;
-    let rpc = TempoRpcClient::new(http, rpc_url);
-
-    let default_timeout =
-        crate::tempo_session::default_receipt_timeout_for_network(ctx.environment.network());
-    let receipt_timeout =
-        resolve_duration(args.receipt_timeout, ctx.receipt_timeout, default_timeout);
-
-    let session =
-        crate::tempo_session::TempoSession::new(signer, keystore_path, rpc, receipt_timeout);
+    let session = connect(ctx, wallet.rpc_url)
+        .await?
+        .into_session(ctx, &wallet, "cast send transaction")
+        .await?;
 
     let tx_hash = session
         .send_transaction_and_wait(to, calldata, "", None)
@@ -245,9 +234,8 @@ async fn rpc(ctx: &Ctx, args: RpcArgs) -> CmdResult {
         ));
     }
 
-    let (rpc_url, http) = resolve_rpc(ctx, args.rpc_url.as_deref()).await?;
-    let rpc = TempoRpcClient::new(http, rpc_url);
-    let result = rpc
+    let conn = connect(ctx, args.rpc_url.as_deref()).await?;
+    let result = conn
         .raw_call(&args.method, params)
         .await
         .map_err(|e| CmdError::Server(format!("{}: {e}", args.method)))?;
@@ -262,49 +250,23 @@ async fn rpc(ctx: &Ctx, args: RpcArgs) -> CmdResult {
     ))
 }
 
-/// Resolve the RPC URL + the reqwest client to hit it with. Same policy as
-/// `bond post` / `escrow sign`: an explicit `--rpc-url` / `TEMPO_RPC_URL`
-/// override goes through the endpoint guard; otherwise the deployment's
-/// `GET /config/network` supplies the authenticated same-host proxy URL.
-/// The override path only builds an API client when the URL is our own proxy
-/// (which needs the `X-API-Key` header), so pointing at a bare upstream node
-/// works without any TaskFast credentials.
-async fn resolve_rpc(
-    ctx: &Ctx,
-    override_url: Option<&str>,
-) -> Result<(String, reqwest::Client), CmdError> {
-    let network = ctx.environment.network();
-    if let Some(url) = override_url {
-        validate_override_rpc_url(url, network, ctx.allow_custom_endpoints)?;
-        let http = if is_proxy_rpc_url(url, ctx.base_url()) {
-            ctx.client()?.http_client()
-        } else {
-            reqwest::Client::new()
-        };
-        return Ok((url.to_string(), http));
+/// The chain-session seam's endpoint choice: an explicit `--rpc-url` goes
+/// through the endpoint guard and needs no TaskFast credentials; otherwise the
+/// deployment's `GET /config/network` supplies the same-host proxy for the
+/// environment's network. Makes no node request.
+async fn connect(ctx: &Ctx, override_url: Option<&str>) -> Result<ChainConnection, CmdError> {
+    match override_url {
+        Some(url) => ChainConnection::open_override(ctx, url),
+        None => {
+            ChainConnection::resolve(
+                ctx,
+                &ctx.client()?,
+                None,
+                ChainTarget::Network(ctx.environment.network()),
+            )
+            .await
+        }
     }
-
-    let client = ctx.client()?;
-    let cfg = client
-        .fetch_network_config()
-        .await
-        .map_err(CmdError::from)?;
-    let name = network.as_str();
-    let entry = cfg.entry(name).map_err(|e| {
-        CmdError::Server(format!(
-            "deployment at {} does not advertise network `{name}`: {e}",
-            ctx.base_url()
-        ))
-    })?;
-    if !is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
-        return Err(CmdError::Server(format!(
-            "deployment at {} returned rpc_url {:?} for network `{name}`, which is not on \
-             the same host. Refusing to route RPC traffic off-host.",
-            ctx.base_url(),
-            entry.rpc_url,
-        )));
-    }
-    Ok((entry.rpc_url.clone(), client.http_client()))
 }
 
 /// Endpoint-guard check for dry-run short-circuits: `validate_override_rpc_url`
