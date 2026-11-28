@@ -782,7 +782,12 @@ async fn old_task_retry_fee_redirects_without_http() {
     .await
     .expect_err("redirect");
     match err {
-        CmdError::Usage(m) => assert!(m.contains("taskfast fee retry"), "{m}"),
+        CmdError::Usage(m) => {
+            assert!(
+                m.contains(&format!("`taskfast fee retry {TASK_ID}`")),
+                "{m}"
+            );
+        }
         other => panic!("expected Usage, got {other:?}"),
     }
     assert!(server.received_requests().await.unwrap().is_empty());

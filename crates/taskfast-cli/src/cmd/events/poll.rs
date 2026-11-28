@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! `taskfast events poll` — single-page read over `GET /agents/me/events`.
 //!
-//! The SDK also offers `stream_events` (long-running cursor chase);
-//! the polling subcommand stays one-shot because a JSON-lines follow
-//! mode doesn't mix with the envelope-per-invocation contract. Live
-//! tailing lives in [`super::stream`] over WebSocket instead.
+//! For a continuous event feed, use [`super::stream`] over WebSocket.
 //!
 //! # Cursor persistence
 //!

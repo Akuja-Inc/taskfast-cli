@@ -21,7 +21,6 @@ serde_json.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
-futures.workspace = true
 taskfast-client = { workspace = true }
 alloy-primitives = { workspace = true }
 alloy-signer = { workspace = true }

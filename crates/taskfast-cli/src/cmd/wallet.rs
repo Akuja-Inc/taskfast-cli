@@ -5,7 +5,7 @@
 //! native-token balance, token balances (USDC, etc.) and nonce — useful
 //! right after `init` to confirm funding before attempting a bid or post.
 
-use clap::{Parser, Subcommand};
+use clap::Subcommand;
 use serde_json::json;
 
 use super::{CmdResult, Ctx};
@@ -18,9 +18,6 @@ pub enum Command {
     /// Fetch the caller's wallet balance snapshot.
     Balance,
 }
-
-#[derive(Debug, Parser)]
-pub struct Args;
 
 pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
     match cmd {
