@@ -244,7 +244,7 @@ pub async fn run_with_prompter<P: crate::cmd::init_tui::Prompter>(
     //    config-supplied api_key is layered under the CLI/env sources
     //    Ctx already resolved (flag > env var > config).
     let mut cfg = Config::load(&cfg_path)?;
-    if !ctx.dry_run {
+    if !ctx.dry_run && !crate::state_store::StateStore::from_config_path(&cfg_path).is_ephemeral() {
         crate::state_store::StateStore::preflight_file(&cfg_path).map_err(|e| {
             CmdError::Usage(format!("cannot save config to {}: {e}", cfg_path.display()))
         })?;

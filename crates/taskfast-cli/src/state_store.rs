@@ -135,9 +135,6 @@ impl StateStore {
     /// parent, rejects a directory destination, and proves a sibling temp
     /// file can be created. Meant to run before any irreversible remote step.
     pub fn preflight_file(path: &Path) -> io::Result<()> {
-        if Self::from_config_path(path).is_ephemeral() {
-            return Ok(());
-        }
         if let Some(parent) = path.parent() {
             Self::ensure_dir_path(parent)?;
         }
@@ -286,7 +283,12 @@ impl StateStore {
     }
 
     /// Read any pending fee retry transaction hash for `task_id`.
-    pub fn get_pending_fee_retry(&self, task_id: &uuid::Uuid) -> io::Result<Option<String>> {
+    pub fn get_pending_fee_retry(&self, task_id: &uuid::Uuid) -> Option<String> {
+        self.try_pending_fee_retry(task_id).ok().flatten()
+    }
+
+    /// Fallible lookup: only a missing ledger is empty; unreadable or corrupt state is an error.
+    pub fn try_pending_fee_retry(&self, task_id: &uuid::Uuid) -> io::Result<Option<String>> {
         Ok(self.read_fee_ledger()?.get(&task_id.to_string()).cloned())
     }
 
@@ -294,6 +296,19 @@ impl StateStore {
         let Some(path) = self.path_for(StateAsset::FeeRetries) else {
             return Ok(std::collections::HashMap::new());
         };
+        match fs::metadata(&path) {
+            Ok(m) if !m.is_file() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("fee retry ledger {} is not a regular file", path.display()),
+                ));
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Ok(std::collections::HashMap::new());
+            }
+            Err(e) => return Err(e),
+            Ok(_) => {}
+        }
         match fs::read_to_string(&path) {
             Ok(raw) => serde_json::from_str(&raw).map_err(|e| {
                 io::Error::new(
@@ -636,7 +651,8 @@ mod tests {
         let ledger = tmp.path().join("fee_retries.json");
         fs::write(&ledger, "{ not json").unwrap();
         let id = uuid::Uuid::new_v4();
-        assert!(store.get_pending_fee_retry(&id).is_err());
+        assert!(store.try_pending_fee_retry(&id).is_err());
+        assert_eq!(store.get_pending_fee_retry(&id), None);
         assert!(store.record_pending_fee_retry(&id, "0xabc").is_err());
         assert!(store.clear_pending_fee_retry(&id).is_err());
         assert_eq!(fs::read_to_string(&ledger).unwrap(), "{ not json");
@@ -675,6 +691,37 @@ mod tests {
         assert!(res.is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn fifo_fee_ledger_is_rejected_without_blocking() {
+        let tmp = TempDir::new().unwrap();
+        let store = StateStore::from_config_path(&tmp.path().join("config.json"));
+        let fifo = tmp.path().join("fee_retries.json");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let err = store
+            .try_pending_fee_retry(&uuid::Uuid::new_v4())
+            .unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+    }
+
+    #[test]
+    fn preflight_file_checks_explicit_dev_paths_instead_of_skipping() {
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open("/dev/.taskfast-probe")
+            .is_ok()
+        {
+            let _ = std::fs::remove_file("/dev/.taskfast-probe");
+            return;
+        }
+        assert!(StateStore::preflight_file(Path::new("/dev/null")).is_err());
+    }
+
     #[test]
     fn atomic_write_file_into_other_dir_writes_no_gitignore() {
         let tmp = TempDir::new().unwrap();
@@ -690,16 +737,16 @@ mod tests {
         let store = StateStore::from_config_path(&config_path);
         let task_id = uuid::Uuid::new_v4();
 
-        assert_eq!(store.get_pending_fee_retry(&task_id).unwrap(), None);
+        assert_eq!(store.get_pending_fee_retry(&task_id), None);
         store
             .record_pending_fee_retry(&task_id, "0xabcdef123456")
             .unwrap();
         assert_eq!(
-            store.get_pending_fee_retry(&task_id).unwrap(),
+            store.get_pending_fee_retry(&task_id),
             Some("0xabcdef123456".into())
         );
 
         store.clear_pending_fee_retry(&task_id).unwrap();
-        assert_eq!(store.get_pending_fee_retry(&task_id).unwrap(), None);
+        assert_eq!(store.get_pending_fee_retry(&task_id), None);
     }
 }

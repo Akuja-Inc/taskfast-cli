@@ -1327,7 +1327,7 @@ async fn init_refuses_unwritable_config_path_before_any_request() {
     std::os::unix::fs::symlink(&shared, tmp.path().join(".taskfast")).unwrap();
 
     let err = run(
-        &ctx_for(&server, Some("test-key"), config_path_in(tmp.path()), false),
+        &ctx_for(&server, None, config_path_in(tmp.path()), false),
         keyless_args(),
     )
     .await

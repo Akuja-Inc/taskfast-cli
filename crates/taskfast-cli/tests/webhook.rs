@@ -382,3 +382,28 @@ async fn register_refuses_unwritable_parent_before_any_put() {
     assert!(res.is_err());
     assert!(server.received_requests().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn register_checks_explicit_dev_secret_path_before_any_put() {
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open("/dev/.taskfast-probe")
+        .is_ok()
+    {
+        let _ = std::fs::remove_file("/dev/.taskfast-probe");
+        return;
+    }
+    let server = MockServer::start().await;
+    let res = webhook::run(
+        &ctx_for(&server, false),
+        Command::Register(RegisterArgs {
+            url: "https://example.com/hook".into(),
+            secret_file: Some(std::path::PathBuf::from("/dev/null")),
+            events: vec![],
+        }),
+    )
+    .await;
+    assert!(res.is_err());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}

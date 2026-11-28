@@ -599,7 +599,7 @@ async fn fee_retry_reuses_pending_broadcast_tx_on_server_failure() {
     // Verify pending tx was cleared on success
     let store = ctx.state_store();
     let task_uuid = uuid::Uuid::parse_str(TASK_ID).unwrap();
-    assert_eq!(store.get_pending_fee_retry(&task_uuid).unwrap(), None);
+    assert_eq!(store.get_pending_fee_retry(&task_uuid), None);
 }
 
 #[tokio::test]
@@ -847,7 +847,7 @@ async fn fee_retry_directory_at_retry_file_prevents_broadcast() {
     let err = run(&ctx, cmd)
         .await
         .expect_err("directory destination must be refused");
-    assert!(err.to_string().contains("directory"), "{err}");
+    assert!(err.to_string().contains("regular file"), "{err}");
     assert!(
         node.sent_transactions().is_empty(),
         "nothing may be broadcast"
@@ -890,7 +890,7 @@ async fn fee_retry_corrupt_ledger_blocks_broadcast_and_is_left_untouched() {
 }
 
 #[tokio::test]
-async fn fee_retry_post_409_retry_not_needed_after_broadcast_clears_voucher() {
+async fn fee_retry_post_409_retry_not_needed_after_broadcast_keeps_voucher() {
     let api_server = MockServer::start().await;
     let (rpc_url, node) = testnet_node();
     let wallet = create_test_wallet();
@@ -925,7 +925,47 @@ async fn fee_retry_post_409_retry_not_needed_after_broadcast_clears_voucher() {
     assert_eq!(node.sent_transactions().len(), 1);
     let task_uuid = uuid::Uuid::parse_str(TASK_ID).unwrap();
     assert_eq!(
-        ctx.state_store().get_pending_fee_retry(&task_uuid).unwrap(),
-        None
+        ctx.state_store().get_pending_fee_retry(&task_uuid),
+        Some(format!("{:#x}", node.tx_hashes()[0]))
     );
+}
+
+#[tokio::test]
+async fn fee_retry_dry_run_with_saved_voucher_previews_and_posts_nothing() {
+    let api_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&api_server)
+        .await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut ctx = ctx_for(&api_server);
+    ctx.dry_run = true;
+    ctx.config_path = tmp.path().join(".taskfast").join("config.json");
+    let task_uuid = uuid::Uuid::parse_str(TASK_ID).unwrap();
+    ctx.state_store()
+        .record_pending_fee_retry(&task_uuid, "0xfeed")
+        .unwrap();
+
+    let cmd = Command::Retry(RetryArgs {
+        task_id: TASK_ID.into(),
+        submission_fee_voucher: None,
+        wallet_address: None,
+        keystore: None,
+        wallet_password_file: None,
+        rpc_url: None,
+    });
+    let env = run(&ctx, cmd).await.expect("dry run previews");
+    let v = envelope_value(&env);
+    assert_eq!(v["data"]["action"], "would_submit_saved_voucher");
+    assert_eq!(v["data"]["submission_fee_voucher"], "0xfeed");
+    let posts = api_server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.method.as_str() == "POST")
+        .count();
+    assert_eq!(posts, 0);
 }
