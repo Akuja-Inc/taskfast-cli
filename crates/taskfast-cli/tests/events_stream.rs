@@ -167,7 +167,7 @@ async fn closed_stdout_pipe_exits_6_without_recording_the_event() {
         .env("TASKFAST_CONFIG", cfg.path().join("config.json"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
@@ -179,10 +179,18 @@ async fn closed_stdout_pipe_exits_6_without_recording_the_event() {
     drop(lines);
     go.send(()).unwrap();
 
-    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
-        .await
-        .expect("stream hung after its stdout closed")
-        .unwrap();
+    let pid = child.id().unwrap();
+    let status = match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
+        Ok(s) => s.unwrap(),
+        Err(_) => {
+            let fds: Vec<String> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+                .map(|d| d.flatten().map(|e| format!("{:?}->{:?}", e.file_name(), std::fs::read_link(e.path()))).collect())
+                .unwrap_or_default();
+            let wchan = std::fs::read_to_string(format!("/proc/{pid}/wchan")).unwrap_or_default();
+            let st = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+            panic!("DEBUG wchan={wchan} fds={fds:?} status={}", st.lines().filter(|l| l.starts_with("State") || l.starts_with("Sig")).collect::<Vec<_>>().join("|"));
+        }
+    };
     assert_eq!(status.code(), Some(6));
     let seen = std::fs::read_to_string(cfg.path().join("events.seen")).unwrap_or_default();
     assert!(!seen.contains(EVENT_A), "{seen:?}");
