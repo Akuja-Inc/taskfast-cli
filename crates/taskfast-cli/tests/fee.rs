@@ -821,3 +821,32 @@ async fn fee_retry_refuses_unwritable_state_dir_before_broadcasting() {
         "nothing may be broadcast"
     );
 }
+
+#[tokio::test]
+async fn fee_retry_directory_at_retry_file_prevents_broadcast() {
+    let api_server = MockServer::start().await;
+    let (rpc_url, node) = testnet_node();
+    let wallet = create_test_wallet();
+    mock_task_status(&api_server, Some("retry_submission_fee"), None).await;
+    mock_payment_data(&api_server, TOKEN_ADDR).await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join(".taskfast");
+    std::fs::create_dir_all(dir.join("fee_retries.json")).unwrap();
+
+    let cmd = retry_wallet(
+        &wallet.keystore_path,
+        &wallet.password_path,
+        &wallet.address,
+        Some(rpc_url),
+    );
+    let mut ctx = ctx_for(&api_server);
+    ctx.allow_custom_endpoints = true;
+    ctx.config_path = dir.join("config.json");
+
+    let err = run(&ctx, cmd)
+        .await
+        .expect_err("directory destination must be refused");
+    assert!(err.to_string().contains("directory"), "{err}");
+    assert!(node.sent_transactions().is_empty());
+}

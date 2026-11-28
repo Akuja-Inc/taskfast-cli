@@ -138,12 +138,9 @@ pub async fn provision_webhook(
         // a carefully-curated subscription list.
         events: None,
     };
-    if let Some(parent) = secret_file.and_then(std::path::Path::parent) {
-        crate::state_store::StateStore::ensure_dir_path(parent).map_err(|e| {
-            CmdError::Usage(format!(
-                "prepare secret directory {}: {e}",
-                parent.display()
-            ))
+    if let Some(path) = secret_file {
+        crate::state_store::StateStore::preflight_file(path).map_err(|e| {
+            CmdError::Usage(format!("cannot save secret to {}: {e}", path.display()))
         })?;
     }
     let cfg = webhooks::configure_webhook(client, &body)

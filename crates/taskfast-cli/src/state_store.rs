@@ -114,17 +114,61 @@ impl StateStore {
                 ),
             ));
         }
-        fs::create_dir_all(dir)?;
 
         if is_taskfast_dir {
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+                create_private_dir(dir)?;
+            }
+            #[cfg(not(unix))]
+            {
+                fs::create_dir_all(dir)?;
             }
             ensure_dir_gitignore(dir);
+        } else {
+            fs::create_dir_all(dir)?;
         }
         Ok(())
+    }
+
+    /// Verify a file can be saved at `path` without creating it: hardens the
+    /// parent, rejects a directory destination, and proves a sibling temp
+    /// file can be created. Meant to run before any irreversible remote step.
+    pub fn preflight_file(path: &Path) -> io::Result<()> {
+        if Self::from_config_path(path).is_ephemeral() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            Self::ensure_dir_path(parent)?;
+        }
+        if fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is a directory, not a file", path.display()),
+            ));
+        }
+        let probe = path.with_file_name(format!(
+            "{}.probe.{}",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        opts.open(&probe)?;
+        fs::remove_file(&probe)
+    }
+
+    /// [`Self::preflight_file`] for a state asset; a no-op when ephemeral.
+    pub fn preflight(&self, asset: StateAsset) -> io::Result<()> {
+        match self.path_for(asset) {
+            Some(path) => Self::preflight_file(&path),
+            None => Ok(()),
+        }
     }
 
     /// Atomic file write: writes to sibling `.tmp`, 0600 on Unix from creation, flushes, renames.
@@ -217,30 +261,15 @@ impl StateStore {
             return Ok(());
         };
 
-        let open_append = || {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .mode(0o600)
-                    .open(&path)
-            }
-            #[cfg(not(unix))]
-            {
-                fs::OpenOptions::new().create(true).append(true).open(&path)
-            }
-        };
-
-        let mut f = match open_append() {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                self.ensure_dir()?;
-                open_append()?
-            }
-            Err(e) => return Err(e),
-        };
+        self.ensure_dir()?;
+        let mut open = fs::OpenOptions::new();
+        open.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open.mode(0o600);
+        }
+        let mut f = open.open(&path)?;
 
         writeln!(f, "{id}")?;
         Ok(())
@@ -304,6 +333,25 @@ impl StateStore {
         }
         Ok(())
     }
+}
+
+#[cfg(unix)]
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+
+    if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let handle = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(dir)?;
+    handle.set_permissions(fs::Permissions::from_mode(0o700))
 }
 
 fn ensure_dir_gitignore(dir: &Path) {
@@ -474,6 +522,71 @@ mod tests {
         assert_eq!(mode, 0o755);
         assert!(!shared.join(".gitignore").exists());
         assert!(!shared.join("events.cursor").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_rejects_directory_at_destination() {
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("fee_retries.json");
+        fs::create_dir(&dest).unwrap();
+        let err = StateStore::preflight_file(&dest).unwrap_err();
+        assert!(err.to_string().contains("directory"), "{err}");
+    }
+
+    #[test]
+    fn preflight_leaves_no_temp_file_behind() {
+        let tmp = TempDir::new().unwrap();
+        StateStore::preflight_file(&tmp.path().join("hook.secret")).unwrap();
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn preflight_skips_ephemeral_store() {
+        let store = StateStore::ephemeral();
+        assert!(store.preflight(StateAsset::FeeRetries).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_seen_line_through_symlinked_taskfast_dir_is_refused() {
+        let tmp = TempDir::new().unwrap();
+        let shared = tmp.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        let link = tmp.path().join(".taskfast");
+        std::os::unix::fs::symlink(&shared, &link).unwrap();
+        let store = StateStore::from_config_path(&link.join("config.json"));
+        assert!(store.append_seen_line("evt1").is_err());
+        assert!(!shared.join("events.seen").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_seen_line_hardens_existing_loose_taskfast_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".taskfast");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let store = StateStore::from_config_path(&dir.join("config.json"));
+        store.append_seen_line("evt1").unwrap();
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_taskfast_dir_is_never_wider_than_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".taskfast");
+        StateStore::ensure_dir_path(&dir).unwrap();
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 
     #[test]

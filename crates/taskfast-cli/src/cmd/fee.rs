@@ -263,9 +263,13 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
             ));
         }
 
-        state_store.ensure_dir().map_err(|e| {
-            CmdError::Usage(format!("prepare state directory before broadcasting: {e}"))
-        })?;
+        state_store
+            .preflight(crate::state_store::StateAsset::FeeRetries)
+            .map_err(|e| {
+                CmdError::Usage(format!(
+                    "cannot save the pending fee retry before broadcasting: {e}"
+                ))
+            })?;
 
         let token_address_str = payment
             .token_address
@@ -319,6 +323,7 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
             .await?;
         let tx_hash_hex = format!("{tx_hash:#x}");
 
+        voucher_saved = !state_store.is_ephemeral();
         if let Err(e) = state_store.record_pending_fee_retry(&task_id, &tx_hash_hex) {
             voucher_saved = false;
             eprintln!("taskfast: warning: failed to persist pending fee retry to state store: {e}");
@@ -340,23 +345,19 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
         }
         Err(e) => {
             let server_err = map_api_error(e).await;
+            let mut retry_not_needed = false;
             if let taskfast_client::Error::Validation { code, .. } = &server_err {
                 if code == "retry_not_needed" {
                     let _ = state_store.clear_pending_fee_retry(&task_id);
+                    retry_not_needed = true;
                 }
             }
-            let retry_cmd = format!(
-                "taskfast fee retry {task_id} --submission-fee-voucher {voucher_to_submit}"
-            );
-            let saved_note = if voucher_saved {
-                format!("The pending transaction has been saved locally; re-running `taskfast fee retry {task_id}` will reuse it.\nAlternatively, run:")
-            } else {
-                "The pending transaction was NOT saved locally; do not re-run a plain `fee retry` (it would pay again). Retry only with:".to_string()
-            };
-            eprintln!(
-                "taskfast: fee transfer was broadcast ({voucher_to_submit}) but server retry failed: {server_err}.\n\
-                 {saved_note}\n  {retry_cmd}"
-            );
+            if !retry_not_needed {
+                eprintln!(
+                    "taskfast: fee transfer was broadcast ({voucher_to_submit}) but server retry failed: {server_err}.\n{}",
+                    retry_guidance(&task_id.to_string(), &voucher_to_submit, voucher_saved)
+                );
+            }
             return Err(server_err.into());
         }
     };
@@ -371,4 +372,37 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
             "submission_fee_voucher": voucher_to_submit,
         }),
     ))
+}
+
+fn retry_guidance(task_id: &str, voucher: &str, voucher_saved: bool) -> String {
+    let explicit = format!("taskfast fee retry {task_id} --submission-fee-voucher {voucher}");
+    if voucher_saved {
+        format!(
+            "The pending transaction has been saved locally; re-running `taskfast fee retry {task_id}` will reuse it.\nAlternatively, run:\n  {explicit}"
+        )
+    } else {
+        format!(
+            "The pending transaction was NOT saved locally; do not re-run a plain `fee retry` (it would pay again). Retry only with:\n  {explicit}"
+        )
+    }
+}
+
+#[cfg(test)]
+mod guidance_tests {
+    use super::retry_guidance;
+
+    #[test]
+    fn saved_voucher_allows_plain_retry() {
+        let g = retry_guidance("t1", "0xabc", true);
+        assert!(g.contains("will reuse it"));
+        assert!(g.contains("--submission-fee-voucher 0xabc"));
+    }
+
+    #[test]
+    fn unsaved_voucher_forbids_plain_retry() {
+        let g = retry_guidance("t1", "0xabc", false);
+        assert!(g.contains("do not re-run a plain"));
+        assert!(!g.contains("will reuse it"));
+        assert!(g.contains("--submission-fee-voucher 0xabc"));
+    }
 }

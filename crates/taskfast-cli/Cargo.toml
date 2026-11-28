@@ -57,6 +57,9 @@ futures-util = "0.3.34"
 url = "2.5.8"
 rust_decimal = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Integration tests run against the in-memory node. Path-only on purpose: a
 # version here would make `cargo publish` look the package up on crates.io.

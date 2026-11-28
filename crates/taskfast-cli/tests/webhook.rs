@@ -336,3 +336,25 @@ async fn register_refuses_unwritable_secret_dir_before_any_put() {
     assert!(err.to_string().contains("symlink"), "{err}");
     assert!(server.received_requests().await.unwrap().is_empty());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn register_refuses_directory_at_secret_path_before_any_put() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let secret_path = tmp.path().join("hook.secret");
+    fs::create_dir(&secret_path).unwrap();
+
+    let err = webhook::run(
+        &ctx_for(&server, false),
+        Command::Register(RegisterArgs {
+            url: "https://example.com/hook".into(),
+            secret_file: Some(secret_path),
+            events: vec![],
+        }),
+    )
+    .await
+    .expect_err("directory at the secret path must be refused");
+    assert!(err.to_string().contains("directory"), "{err}");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}

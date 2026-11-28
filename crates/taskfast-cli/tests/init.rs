@@ -1316,3 +1316,22 @@ async fn unfunded_wallet_at_init_end_surfaces_machine_signals_and_stays_ok() {
         "https://wallet.tempo.xyz/"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn init_refuses_unwritable_config_path_before_any_request() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::os::unix::fs::symlink(&shared, tmp.path().join(".taskfast")).unwrap();
+
+    let err = run(
+        &ctx_for(&server, Some("test-key"), config_path_in(tmp.path()), false),
+        keyless_args(),
+    )
+    .await
+    .expect_err("symlinked .taskfast must be refused");
+    assert!(err.to_string().contains("symlink"), "{err}");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
