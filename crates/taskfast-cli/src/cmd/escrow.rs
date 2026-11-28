@@ -22,7 +22,7 @@
 //! Memo is server-driven: `memo_hash` in the params payload selects
 //! `openWithMemo` vs `open`. No `--memo` flag.
 //!
-//! Error mapping delegates to `map_api_error` (401|403→Auth, 409|422→
+//! Error mapping delegates to `TaskFastClient::call` (401|403→Auth, 409|422→
 //! Validation). Keystore / signing failures surface as `Wallet` (exit 5).
 //!
 //! Every chain touch goes through [`ChainConnection`]: the escrow params'
@@ -53,7 +53,7 @@ use taskfast_client::api::types::{
     BidEscrowFinalizeRequest, BidEscrowFinalizeRequestPosterApprovalDeadline,
     BidEscrowParamsResponse, GetBidEscrowParamsReviewClock, RecordPayoutApprovalBody,
 };
-use taskfast_client::{map_api_error, TaskFastClient};
+use taskfast_client::TaskFastClient;
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
@@ -452,10 +452,9 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
             poster_approval_deadline,
             memo_hash: params.memo_hash.clone(),
         };
-        match client.inner().finalize_bid_escrow(&bid_id, &body).await {
-            Ok(r) => break r.into_inner(),
-            Err(e) => {
-                let mapped = map_api_error(e).await;
+        match client.call(|c| c.finalize_bid_escrow(&bid_id, &body)).await {
+            Ok(r) => break r,
+            Err(mapped) => {
                 if attempts == 0 && approval.is_some() && is_deadline_below_minimum(&mapped) {
                     attempts += 1;
                     let fresh = fetch_params(&client, &bid_id).await?;
@@ -497,14 +496,9 @@ async fn fetch_params(
     client: &TaskFastClient,
     bid_id: &Uuid,
 ) -> Result<BidEscrowParamsResponse, taskfast_client::Error> {
-    match client
-        .inner()
-        .get_bid_escrow_params(bid_id, Some(GetBidEscrowParamsReviewClock::X2))
+    client
+        .call(|c| c.get_bid_escrow_params(bid_id, Some(GetBidEscrowParamsReviewClock::X2)))
         .await
-    {
-        Ok(v) => Ok(v.into_inner()),
-        Err(e) => Err(map_api_error(e).await),
-    }
 }
 
 /// Largest window the browser accepts (`Number.isSafeInteger`). A client-side
@@ -775,10 +769,7 @@ pub(super) async fn submit_work(
     auto: bool,
 ) -> Result<serde_json::Value, CmdError> {
     let client = ctx.client()?;
-    let task = match client.inner().get_task(task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let task = client.call(|c| c.get_task(task_id)).await?;
     let skipped = |reason: &str| json!({ "action": "skipped", "reason": reason });
     if auto && task.escrow_id.is_none() {
         return Ok(skipped("task has no escrow to start a review clock on"));
@@ -999,10 +990,7 @@ async fn record_payout_approval(
     auto: bool,
 ) -> Result<serde_json::Value, CmdError> {
     let client = ctx.client()?;
-    let task = match client.inner().get_task(task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let task = client.call(|c| c.get_task(task_id)).await?;
     if auto && task.escrow_id.is_none() {
         return Ok(json!({ "action": "skipped", "reason": "task has no escrow" }));
     }
@@ -1080,21 +1068,19 @@ async fn record_payout_approval(
         deadline: i64::try_from(deadline)
             .map_err(|_| CmdError::Signing("approval deadline overflows i64".into()))?,
     };
-    match client.inner().record_payout_approval(task_id, &body).await {
+    match client
+        .call(|c| c.record_payout_approval(task_id, &body))
+        .await
+    {
         Ok(_) => {
             data["action"] = json!("payout_approval_recorded");
             Ok(data)
         }
-        Err(e) => match map_api_error(e).await {
+        Err(e) => match e {
             taskfast_client::Error::Validation { code, message }
                 if code == "payout_not_awaiting_approval" =>
             {
-                let current = client
-                    .inner()
-                    .get_task(task_id)
-                    .await
-                    .ok()
-                    .map(|t| t.into_inner());
+                let current = client.call(|c| c.get_task(task_id)).await.ok();
                 let payment = current
                     .as_ref()
                     .and_then(|t| t.settlement.as_ref())

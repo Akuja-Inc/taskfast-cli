@@ -43,7 +43,6 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// Per-request timeout for upload complete: the server waits on its ingest
 /// Worker hashing the whole object, which can outlast the default 30s.
 const COMPLETE_REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
-/// First backoff between upload complete retries.
 const COMPLETE_BASE_DELAY: Duration = Duration::from_millis(500);
 /// Backoff ceiling between upload complete retries.
 const MAX_COMPLETE_BACKOFF: Duration = Duration::from_secs(10);
@@ -112,6 +111,26 @@ impl TaskFastClient {
     /// same connection pool + default headers).
     pub fn http_client(&self) -> reqwest::Client {
         self.inner.client().clone()
+    }
+
+    /// The keyed HTTP client for a JSON-RPC `rpc_url` on this deployment's own origin.
+    /// Any other origin is refused, so `X-API-Key` cannot reach another host.
+    pub fn rpc_client(&self, rpc_url: &str) -> Result<reqwest::Client> {
+        let same_origin = matches!(
+            (reqwest::Url::parse(rpc_url), reqwest::Url::parse(self.inner.baseurl())),
+            (Ok(rpc), Ok(base)) if rpc.origin() == base.origin()
+        );
+        if same_origin {
+            Ok(self.http_client())
+        } else {
+            Err(Error::Validation {
+                code: "rpc_url_off_origin".to_string(),
+                message: format!(
+                    "rpc url is not on the API origin {}; refusing to attach the API key",
+                    self.inner.baseurl()
+                ),
+            })
+        }
     }
 
     /// Direct access to the generated typed client, for callers that need the raw
@@ -265,8 +284,6 @@ impl TaskFastClient {
         retry_until(
             deadline,
             || jiff::Timestamp::now() >= expires_at,
-            COMPLETE_BASE_DELAY,
-            MAX_COMPLETE_BACKOFF,
             || async {
                 let sent = self
                     .send(
@@ -797,20 +814,18 @@ enum Step<T> {
 async fn retry_until<T, F, Fut>(
     deadline: tokio::time::Instant,
     expired: impl Fn() -> bool,
-    base: Duration,
-    cap: Duration,
     mut op: F,
 ) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Step<T>>,
 {
-    let mut delay = base;
+    let mut delay = COMPLETE_BASE_DELAY;
     loop {
         match op().await {
             Step::Done(result) => return result,
             Step::Retry(err) => {
-                if tokio::time::Instant::now() + delay >= deadline {
+                if tokio::time::Instant::now() + delay >= deadline || expired() {
                     return Err(err);
                 }
                 tracing::warn!(?delay, error = err.kind(), "retrying after transient error");
@@ -818,7 +833,7 @@ where
                 if tokio::time::Instant::now() >= deadline || expired() {
                     return Err(err);
                 }
-                delay = (delay * 2).min(cap);
+                delay = (delay * 2).min(MAX_COMPLETE_BACKOFF);
             }
         }
     }
@@ -840,13 +855,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn retry_until_doubles_the_delay_to_the_cap_and_stops_before_the_deadline() {
         let start = Instant::now();
-        let deadline = start + Duration::from_secs(40);
         let mut at = Vec::new();
         let result: crate::Result<()> = retry_until(
-            deadline,
+            start + Duration::from_secs(40),
             || false,
-            Duration::from_millis(500),
-            Duration::from_secs(10),
             || {
                 at.push(Instant::now() - start);
                 async { Step::Retry(transient()) }
@@ -859,14 +871,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn retry_until_returns_a_finished_result_without_sleeping() {
+    async fn retry_until_returns_a_finished_result_after_the_waits_it_needed() {
         let start = Instant::now();
         let mut calls = 0;
         let result = retry_until(
             start + Duration::from_mins(1),
             || false,
-            Duration::from_secs(1),
-            Duration::from_secs(10),
             || {
                 calls += 1;
                 let n = calls;
@@ -881,7 +891,7 @@ mod tests {
         )
         .await;
         assert_eq!(result.unwrap(), 3);
-        assert_eq!(Instant::now() - start, Duration::from_secs(3));
+        assert_eq!(Instant::now() - start, Duration::from_millis(1500));
     }
 
     #[tokio::test(start_paused = true)]
@@ -890,8 +900,6 @@ mod tests {
         let result: crate::Result<()> = retry_until(
             Instant::now() + Duration::from_mins(1),
             || false,
-            Duration::from_secs(1),
-            Duration::from_secs(10),
             || {
                 calls += 1;
                 async { Step::Done(Err(Error::Auth("no".into()))) }
@@ -903,25 +911,39 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn retry_until_sends_nothing_once_the_wall_clock_expiry_passes_during_the_backoff() {
+    async fn retry_until_stops_without_a_wait_when_the_wall_clock_has_already_expired() {
         let start = Instant::now();
-        let expired = std::cell::Cell::new(false);
         let mut calls = 0;
         let result: crate::Result<()> = retry_until(
             start + Duration::from_mins(1),
-            || expired.get(),
-            Duration::from_secs(1),
-            Duration::from_secs(10),
+            || true,
             || {
                 calls += 1;
-                expired.set(true);
                 async { Step::Retry(transient()) }
             },
         )
         .await;
         assert!(matches!(result, Err(Error::Server(_))));
         assert_eq!(calls, 1);
-        assert_eq!(Instant::now() - start, Duration::from_secs(1));
+        assert_eq!(Instant::now() - start, Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_until_sends_nothing_once_the_wall_clock_expires_during_the_wait() {
+        let start = Instant::now();
+        let mut calls = 0;
+        let result: crate::Result<()> = retry_until(
+            start + Duration::from_mins(1),
+            || Instant::now() - start >= Duration::from_millis(500),
+            || {
+                calls += 1;
+                async { Step::Retry(transient()) }
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(Error::Server(_))));
+        assert_eq!(calls, 1);
+        assert_eq!(Instant::now() - start, Duration::from_millis(500));
     }
 
     #[tokio::test(start_paused = true)]
@@ -932,8 +954,6 @@ mod tests {
         let result: crate::Result<()> = retry_until(
             start + Duration::from_mins(1),
             || false,
-            Duration::from_secs(1),
-            Duration::from_secs(10),
             || {
                 calls += 1;
                 async { Step::Retry(transient()) }

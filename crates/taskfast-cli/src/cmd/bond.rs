@@ -21,7 +21,7 @@
 //! contract/token/taskRef/amount and does not pin salt, so a random salt is
 //! accepted.
 //!
-//! Error mapping delegates to `map_api_error` (401|403→Auth, 409|422→
+//! Error mapping delegates to `TaskFastClient::call` (401|403→Auth, 409|422→
 //! Validation). Keystore / signing failures surface as `Wallet` (exit 5).
 //!
 //! Every chain touch goes through [`ChainConnection`]: the deployment's entry
@@ -46,7 +46,6 @@ use taskfast_agent::chain::{compute_task_ref, TaskBond};
 use taskfast_client::api::types::{
     GetStakeQuoteStakeSource, ReportStakePostTxBody, ReportStakePostTxBodyStakeSource,
 };
-use taskfast_client::map_api_error;
 
 /// Server-side `BondPosted` verification is asynchronous, so after reporting we
 /// re-quote until `bond_status=posted`. Bounded so the command still returns if
@@ -162,14 +161,9 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
 
     // 2. Quote. Server prices from task value; if a bond already exists the
     //    recorded pricing is authoritative. An already-`posted` bond is a no-op.
-    let quote = match client
-        .inner()
-        .get_stake_quote(&task_id, Some(args.source.to_quote()))
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let quote = client
+        .call(|c| c.get_stake_quote(&task_id, Some(args.source.to_quote())))
+        .await?;
     if quote.bond_status.as_deref() == Some("posted") {
         return Ok(Envelope::success(
             ctx.environment,
@@ -339,10 +333,9 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
         tx_hash: post_tx_hex.clone(),
         stake_source: args.source.to_report(),
     };
-    let report = match client.inner().report_stake_post_tx(&task_id, &body).await {
-        Ok(r) => r.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let report = client
+        .call(|c| c.report_stake_post_tx(&task_id, &body))
+        .await?;
 
     // 12. Poll the quote until `bond_status=posted` (async verification). A
     //     timeout is not a failure — the tx is on-chain and confirmed.
@@ -380,11 +373,10 @@ async fn poll_until_posted(
     let mut last: Option<String> = None;
     loop {
         if let Ok(v) = client
-            .inner()
-            .get_stake_quote(task_id, Some(source.to_quote()))
+            .call(|c| c.get_stake_quote(task_id, Some(source.to_quote())))
             .await
         {
-            last = v.into_inner().bond_status;
+            last = v.bond_status;
             if last.as_deref() == Some("posted") {
                 return last;
             }

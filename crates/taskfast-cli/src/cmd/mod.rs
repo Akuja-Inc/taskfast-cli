@@ -219,7 +219,11 @@ impl Ctx {
     /// Pick the reqwest client to use for a JSON-RPC URL: the deployment's
     /// authenticated proxy client when the URL shares `api_base`'s origin,
     /// a bare client otherwise.
-    pub fn rpc_http_client(&self, client: &TaskFastClient, rpc_url: &str) -> reqwest::Client {
+    pub fn rpc_http_client(
+        &self,
+        client: &TaskFastClient,
+        rpc_url: &str,
+    ) -> Result<reqwest::Client, CmdError> {
         crate::tempo_session::rpc_http_client(self, client, rpc_url)
     }
 

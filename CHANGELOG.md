@@ -15,6 +15,13 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Changed
 
+- Internal: `task`, `escrow`, `escalate`, `bond`, `post` and `settle` call the API
+  through `TaskFastClient::call`. Output, errors and exit codes are unchanged.
+- Added `TaskFastClient::rpc_client(rpc_url)`: the JSON-RPC proxy gets the API-key
+  client only when the RPC URL is on the API's own origin, and `TempoSession` uses it.
+  An off-origin URL that reached it would now fail with `rpc_url_off_origin` instead
+  of receiving the key; the existing same-origin check already routes such URLs to a
+  keyless client, so no command's behavior changes.
 - Internal: the `agent`, `backer`, `bid`, `discover`, `dispute`, `message`, `payment`,
   `platform`, `review`, `wallet` and `artifact` commands call the API through
   `TaskFastClient::call`. Output, errors and exit codes are unchanged.
@@ -99,8 +106,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   no CLI API call was retried through it, but it was a public Rust API. The artifact
   upload `complete` call keeps its own retry loop, which does not replace downstream
   uses of `call_with_retry`. That loop is now bounded by a monotonic deadline and the
-  upload's wall-clock expiry, both rechecked after each wait, so no request is sent
-  once either has passed.
+  upload's wall-clock expiry: no retry starts, and no wait begins, once either has
+  passed. The first attempt still runs, and an in-flight request keeps its own timeout.
 
 - **BREAKING (Rust):** Removed `taskfast-agent::bootstrap::{validate_auth, get_readiness}` and
   the six `taskfast-agent::webhooks` HTTP wrappers (`configure_webhook`, `get_webhook`,
