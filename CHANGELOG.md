@@ -13,6 +13,52 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Changed
+
+- Every on-chain command (`escrow sign`, `escrow submit-work`,
+  `escrow payout-approval` (and so `task approve`'s payout approval),
+  `escalate sign`, `escalate timeout-resolve`, `bond post`, `cast send`, `post`,
+  `fee retry`, `settle`) sets up its chain session through one seam: endpoint
+  guards, `GET /config/network` (with the env→network invariant, so
+  `TASKFAST_STRICT_ENV_NETWORK=1` now also fail-closes `bond post` and `cast`
+  on a multi-network deployment), keystore unlock, node `eth_chainId` check
+  and the receipt timeout. A server-issued `chain_id` must be advertised by
+  the deployment and belong to the configured network (testnet vs mainnet);
+  otherwise `chain_id_mismatch`, `escrow sign --dry-run` included, since
+  dry-run signs (`escrow sign --dry-run` now reports `rpc_url`). The keystore
+  and `--wallet-address` are validated before any node I/O, except that
+  `escrow submit-work` and `escrow payout-approval` read the escrow first, to
+  tell a legacy no-clock escrow from one that needs a wallet. `--dry-run` of a
+  signing command opens no RPC; `escalate timeout-resolve`, `escrow
+  submit-work` and `escrow payout-approval` still read the chain under
+  `--dry-run`, as before.
+- Every transaction is signed for the chain id the node reported (the EIP-155
+  chain id is pinned from the verified `eth_chainId`), not whatever the node
+  answers when the tx is signed. `TempoSession::new`, which skips both, is
+  deprecated.
+- `taskfast_cli::tempo_session` exports the in-memory `MockTempoRpc` and
+  `register_mock_rpc` so integration tests drive the live signing commands
+  without per-command JSON-RPC wiremocks; the mock signs for real and
+  reports the chain id each tx was signed for.
+
+### Fixed
+
+- `escalate sign` resolved the deployment's proxy by the environment's network
+  entry instead of the server-issued chain id, so a Tempo Zone task failed
+  with `chain_id_mismatch`. It now selects the entry (L1 or Zone) by chain id,
+  under the never-cross-networks rule `escalate timeout-resolve`, `escrow
+  submit-work` and `escrow payout-approval` already followed; all four share
+  the one lookup.
+- `escrow sign` did not check the node's `eth_chainId`; it now refuses a node
+  on another chain before any transaction, like `escalate` and `bond post`.
+- `escrow sign` skipped the poster balance preflight under
+  `--skip-allowance-check`; that flag now only skips the ERC-20 allowance
+  check and `approve`, as `bond post` does.
+- `escalate` and `escrow` flattened `RateLimited`/`Network` errors from the
+  network-config fetch into `Server`; they now keep the typed error (exit 4
+  with `retry_after` for a 429).
+- A wallet lock failure exited **2** (`usage`); it now exits **5** (`wallet`).
+
 ## [0.27.0] - 2026-11-28
 
 ### Added

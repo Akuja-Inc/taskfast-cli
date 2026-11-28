@@ -321,7 +321,7 @@ async fn approve(ctx: &Ctx, args: ApproveArgs) -> CmdResult {
         super::escrow::payout_approval_after_approve(
             ctx,
             &task_id,
-            &super::escrow::WalletOpts {
+            &crate::tempo_session::WalletOpts {
                 keystore: args.keystore.as_deref(),
                 password_file: args.wallet_password_file.as_deref(),
                 wallet_address: args.wallet_address.as_deref(),
@@ -487,7 +487,7 @@ async fn submit(ctx: &Ctx, args: SubmitArgs, kind: SubmitKind) -> CmdResult {
         super::escrow::submit_work_after_handin(
             ctx,
             &task_id,
-            &super::escrow::WalletOpts {
+            &crate::tempo_session::WalletOpts {
                 keystore: args.keystore.as_deref(),
                 password_file: args.wallet_password_file.as_deref(),
                 wallet_address: args.wallet_address.as_deref(),

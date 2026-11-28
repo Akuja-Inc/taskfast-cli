@@ -19,11 +19,14 @@
 //! Refuse-to-sign guards (all before any transaction; signing safety is the
 //! CLI's one unique job, so these deliberately do not trust the server blindly):
 //!  1. keystore address ≠ a non-nil `poster_wallet_address`;
-//!  2. `chain_id` ≠ the configured network's chain id, or ≠ the RPC node's;
+//!  2. `chain_id` is not advertised by the deployment (`GET /config/network`,
+//!     L1 or a Tempo Zone venue), or ≠ the RPC node's;
 //!  3. `task_escrow_contract` / `escrow_id` malformed, or the contract is zero;
 //!  4. keystore address ≠ `--wallet-address` / configured wallet address.
 //!
-//! `--dry-run` runs guards 1–4 except the node check (it opens no RPC).
+//! Every chain touch goes through [`ChainConnection`]: endpoint choice,
+//! same-host proxy guard, node `eth_chainId`, wallet unlock. `--dry-run` runs
+//! guards 1–4 except the node check (it opens no RPC).
 //!
 //! `escalate timeout-resolve <task_id>` is the worker's fallback when the
 //! arbitrator never rules: once `disputedAt + DISPUTE_TIMEOUT` (120 days) has
@@ -47,17 +50,14 @@ use clap::Parser;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{
-    is_proxy_rpc_url, network_policy_for_chain_id, parse_duration, validate_override_rpc_url,
-    CmdError, CmdResult, Ctx,
-};
+use super::{parse_duration, CmdError, CmdResult, Ctx};
 use crate::envelope::{Envelope, SecurityWarning};
+use crate::tempo_session::{ChainConnection, ChainTarget, WalletOpts};
 
 use taskfast_agent::chain::{
     decode_escrow_state, decode_u256, dispute_calldata, dispute_timeout_calldata,
     disputed_at_calldata, get_escrow_calldata, timeout_resolve_calldata, ESCROW_STATE_DISPUTED,
 };
-use taskfast_agent::tempo_rpc::TempoRpcClient;
 use taskfast_client::map_api_error;
 
 #[derive(Debug, clap::Subcommand)]
@@ -225,8 +225,6 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         Err(e) => return Err(refusal(map_api_error(e).await)),
     };
     let chain_id = params.chain_id.ok_or_else(|| missing("chain_id"))?;
-    let chain_id_u64 = u64::try_from(chain_id)
-        .map_err(|_| CmdError::Decode(format!("signing-params chain_id={chain_id} is negative")))?;
     let raw_contract = params
         .task_escrow_contract
         .as_deref()
@@ -253,19 +251,23 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         ))
     })?;
 
-    // 2. Signer + guards 4 and 1.
-    let keystore_path = super::wallet_args::resolve_keystore_path(
-        args.keystore.as_deref(),
-        ctx.keystore_path.as_deref(),
-    );
-    let signer = super::wallet_args::load_signer_and_validate(
-        keystore_path.as_deref(),
-        args.wallet_password_file.as_deref(),
-        args.wallet_address
-            .as_deref()
-            .or(ctx.wallet_address.as_deref()),
-        "escrow dispute",
-    )?;
+    // 2. Guard 2 + endpoint: the deployment must advertise the server-issued
+    //    chain (L1 or a Tempo Zone venue), the proxy must be same-host, and —
+    //    live only — the node must be on that chain.
+    let wallet = WalletOpts {
+        keystore: args.keystore.as_deref(),
+        password_file: args.wallet_password_file.as_deref(),
+        wallet_address: args.wallet_address.as_deref(),
+        rpc_url: args.rpc_url.as_deref(),
+        receipt_timeout: args.receipt_timeout,
+    };
+    let conn =
+        ChainConnection::resolve(ctx, &client, wallet.rpc_url, ChainTarget::ChainId(chain_id))
+            .await?;
+
+    // 3. Signer (guard 4) + guard 1. The node's chain id is verified here too
+    //    (`--dry-run` skips that).
+    let session = conn.into_session(ctx, &wallet, "escrow dispute").await?;
     let mut warnings: Vec<SecurityWarning> = Vec::new();
     match params.poster_wallet_address.as_deref() {
         Some(poster) => {
@@ -274,11 +276,11 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
                     "server poster_wallet_address `{poster}` not a valid EVM address: {e}"
                 ))
             })?;
-            if poster_addr != signer.address() {
+            if poster_addr != session.address() {
                 return Err(CmdError::Usage(format!(
                     "keystore address {:#x} is not the escrow's poster_wallet_address {poster}; \
                      connect the wallet that funded this escrow",
-                    signer.address()
+                    session.address()
                 )));
             }
         }
@@ -302,48 +304,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         });
     }
 
-    // 3. Guard 2 (configured network) + RPC URL.
-    let cfg = client.fetch_network_config().await.map_err(|e| {
-        CmdError::Server(format!("fetch network config from {}: {e}", ctx.base_url()))
-    })?;
-    let network = ctx.environment.network();
-    let entry = cfg.entry(network.as_str()).map_err(|e| {
-        CmdError::Server(format!(
-            "deployment at {} does not advertise network `{}`: {e}",
-            ctx.base_url(),
-            network.as_str()
-        ))
-    })?;
-    if entry.chain_id != chain_id {
-        return Err(CmdError::Validation {
-            code: "chain_id_mismatch".into(),
-            message: format!(
-                "signing-params chain_id={chain_id} but the configured network `{}` is chain_id={}; refusing to sign",
-                network.as_str(),
-                entry.chain_id
-            ),
-        });
-    }
-    let rpc_url = if let Some(ref url) = args.rpc_url {
-        validate_override_rpc_url(
-            url,
-            network_policy_for_chain_id(chain_id_u64),
-            ctx.allow_custom_endpoints,
-        )?;
-        url.clone()
-    } else {
-        if !is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
-            return Err(CmdError::Server(format!(
-                "deployment at {} returned rpc_url {:?} for chain_id={chain_id}, which is not on \
-                 the same host. Refusing to route RPC traffic off-host.",
-                ctx.base_url(),
-                entry.rpc_url,
-            )));
-        }
-        entry.rpc_url.clone()
-    };
-
-    let signer_address = signer.address();
+    let signer_address = session.address();
     let calldata: Bytes = dispute_calldata(escrow_id).into();
     let common = |action: &str| {
         json!({
@@ -366,28 +327,7 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
         );
     }
 
-    // 4. Live: guard 2 against the node, then send.
-    let http = ctx.rpc_http_client(&client, &rpc_url);
-    let rpc = TempoRpcClient::new(http, rpc_url.clone());
-    let node_chain = rpc
-        .chain_id()
-        .await
-        .map_err(|e| CmdError::Server(format!("eth_chainId from {rpc_url}: {e}")))?;
-    if node_chain != chain_id_u64 {
-        return Err(CmdError::Validation {
-            code: "chain_id_mismatch".into(),
-            message: format!(
-                "RPC node reports chain_id={node_chain} but signing-params say {chain_id}; refusing to sign"
-            ),
-        });
-    }
-    let receipt_timeout = super::resolve_duration(
-        args.receipt_timeout,
-        ctx.receipt_timeout,
-        crate::tempo_session::default_receipt_timeout_for_chain_id(chain_id_u64),
-    );
-    let session =
-        crate::tempo_session::TempoSession::new(signer, keystore_path, rpc, receipt_timeout);
+    // 4. Live: send (the node's chain id is already verified and pinned).
     let tx = session
         .send_transaction_and_wait(
             contract,
@@ -409,18 +349,17 @@ async fn sign(ctx: &Ctx, args: SignArgs) -> CmdResult {
 
 /// Chain coordinates of a task's escrow, validated against the server's
 /// `settlement_domain` (venue-scoped, so a zone escrow is addressed correctly, gh#111).
-pub(super) struct ChainTarget {
+pub(super) struct EscrowTarget {
     pub contract: Address,
     pub escrow_id: B256,
     pub chain_id: i64,
-    pub chain_id_u64: u64,
 }
 
 /// `what_next` finishes the `escrow_not_initialized` message ("nothing to resolve").
 pub(super) fn chain_target(
     task: &taskfast_client::api::types::TaskDetail,
     what_next: &str,
-) -> Result<ChainTarget, CmdError> {
+) -> Result<EscrowTarget, CmdError> {
     let raw_escrow_id = task
         .escrow_id
         .as_ref()
@@ -443,9 +382,6 @@ pub(super) fn chain_target(
                 .into(),
         })?;
     let chain_id = domain.chain_id;
-    let chain_id_u64 = u64::try_from(chain_id).map_err(|_| {
-        CmdError::Decode(format!("settlement_domain chain_id={chain_id} is negative"))
-    })?;
     let raw_contract = domain.verifying_contract.to_string();
     let contract: Address = raw_contract.parse().map_err(|e| {
         CmdError::Decode(format!(
@@ -462,89 +398,11 @@ pub(super) fn chain_target(
             "server escrow_id `{raw_escrow_id}` not a 0x-prefixed 32-byte hex: {e}"
         ))
     })?;
-    Ok(ChainTarget {
+    Ok(EscrowTarget {
         contract,
         escrow_id,
         chain_id,
-        chain_id_u64,
     })
-}
-
-/// Configured-network chain-id check, RPC url choice (override or the
-/// deployment's same-host proxy), then the node's own chain id, so a wrong node
-/// is never trusted for later state reads.
-pub(super) async fn connect_rpc(
-    ctx: &Ctx,
-    client: &taskfast_client::TaskFastClient,
-    target: &ChainTarget,
-    rpc_override: Option<&str>,
-) -> Result<(TempoRpcClient, String), CmdError> {
-    let (chain_id, chain_id_u64) = (target.chain_id, target.chain_id_u64);
-    let cfg = client.fetch_network_config().await.map_err(|e| {
-        CmdError::Server(format!("fetch network config from {}: {e}", ctx.base_url()))
-    })?;
-    let network = ctx.environment.network();
-    let by_env = cfg.entry(network.as_str());
-    let entry = match &by_env {
-        Ok(e) if e.chain_id == chain_id => e,
-        _ => match cfg
-            .entry_by_chain_id(chain_id)
-            .ok()
-            .filter(|_| network_policy_for_chain_id(chain_id_u64) == network)
-        {
-            Some((_, e)) => e,
-            None => {
-                return Err(match &by_env {
-                    Ok(e) => CmdError::Validation {
-                        code: "chain_id_mismatch".into(),
-                        message: format!(
-                            "task settlement_domain chain_id={chain_id} but the configured network `{}` is chain_id={}; refusing to send",
-                            network.as_str(),
-                            e.chain_id
-                        ),
-                    },
-                    Err(e) => CmdError::Server(format!(
-                        "deployment at {} does not advertise network `{}`: {e}",
-                        ctx.base_url(),
-                        network.as_str()
-                    )),
-                })
-            }
-        },
-    };
-    let rpc_url = if let Some(url) = rpc_override {
-        validate_override_rpc_url(
-            url,
-            network_policy_for_chain_id(chain_id_u64),
-            ctx.allow_custom_endpoints,
-        )?;
-        url.to_string()
-    } else {
-        if !is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
-            return Err(CmdError::Server(format!(
-                "deployment at {} returned rpc_url {:?} for chain_id={chain_id}, which is not on \
-                 the same host. Refusing to route RPC traffic off-host.",
-                ctx.base_url(),
-                entry.rpc_url,
-            )));
-        }
-        entry.rpc_url.clone()
-    };
-    let http = ctx.rpc_http_client(client, &rpc_url);
-    let rpc = TempoRpcClient::new(http, rpc_url.clone());
-    let node_chain = rpc
-        .chain_id()
-        .await
-        .map_err(|e| CmdError::Server(format!("eth_chainId from {rpc_url}: {e}")))?;
-    if node_chain != chain_id_u64 {
-        return Err(CmdError::Validation {
-            code: "chain_id_mismatch".into(),
-            message: format!(
-                "RPC node reports chain_id={node_chain} but the task's settlement_domain says {chain_id}; refusing to send"
-            ),
-        });
-    }
-    Ok((rpc, rpc_url))
 }
 
 pub(super) fn chain_read_err(what: &str, e: impl std::fmt::Display) -> CmdError {
@@ -563,27 +421,23 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
     let target = chain_target(&task, "nothing to resolve")?;
     let (contract, escrow_id, chain_id) = (target.contract, target.escrow_id, target.chain_id);
 
-    // 2. Signer + wallet-address preflight. Any wallet may send this call, so
-    //    there is no "must be the worker" guard.
-    let keystore_path = super::wallet_args::resolve_keystore_path(
-        args.keystore.as_deref(),
-        ctx.keystore_path.as_deref(),
-    );
-    let signer = super::wallet_args::load_signer_and_validate(
-        keystore_path.as_deref(),
-        args.wallet_password_file.as_deref(),
-        args.wallet_address
-            .as_deref()
-            .or(ctx.wallet_address.as_deref()),
-        "escrow timeout-resolve",
-    )?;
-
-    // 3 + 4. Chain id vs the configured network, RPC url, node chain id. Reads
-    //    below also run under --dry-run (read-only).
-    let (rpc, _rpc_url) = connect_rpc(ctx, &client, &target, args.rpc_url.as_deref()).await?;
-    let chain_id_u64 = target.chain_id_u64;
+    // 2 + 3. Chain id vs the deployment's advertised chains, RPC url, wallet
+    //    preflight, node chain id — in that order. The reads below also run
+    //    under --dry-run (read-only), so the node is verified even then.
+    let wallet = WalletOpts {
+        keystore: args.keystore.as_deref(),
+        password_file: args.wallet_password_file.as_deref(),
+        wallet_address: args.wallet_address.as_deref(),
+        rpc_url: args.rpc_url.as_deref(),
+        receipt_timeout: args.receipt_timeout,
+    };
+    let session =
+        ChainConnection::resolve(ctx, &client, wallet.rpc_url, ChainTarget::ChainId(chain_id))
+            .await?
+            .into_verified_session(ctx, &wallet, "escrow timeout-resolve")
+            .await?;
     let read = |what: &'static str, data: Vec<u8>| {
-        let rpc = &rpc;
+        let rpc = &session;
         async move {
             rpc.eth_call(contract, &data.into())
                 .await
@@ -612,7 +466,7 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
     }
     let eligible_at = disputed_at.saturating_add(timeout);
     // The contract compares block.timestamp, so we compare the latest block's.
-    let block = rpc
+    let block = session
         .raw_call("eth_getBlockByNumber", json!(["latest", false]))
         .await
         .map_err(|e| chain_read_err("eth_getBlockByNumber", e))?;
@@ -635,7 +489,9 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
         });
     }
 
-    let signer_address = signer.address();
+    // 4. Any wallet may send this call, so there is no "must be the worker"
+    //    guard.
+    let signer_address = session.address();
     let calldata: Bytes = timeout_resolve_calldata(escrow_id).into();
     let common = |action: &str| {
         json!({
@@ -659,13 +515,6 @@ async fn timeout_resolve(ctx: &Ctx, args: TimeoutResolveArgs) -> CmdResult {
     }
 
     // 5. Send.
-    let receipt_timeout = super::resolve_duration(
-        args.receipt_timeout,
-        ctx.receipt_timeout,
-        crate::tempo_session::default_receipt_timeout_for_chain_id(chain_id_u64),
-    );
-    let session =
-        crate::tempo_session::TempoSession::new(signer, keystore_path, rpc, receipt_timeout);
     let tx = session
         .send_transaction_and_wait(
             contract,

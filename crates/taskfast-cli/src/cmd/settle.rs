@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
+use crate::tempo_session::{load_wallet, WalletOpts};
 
 use taskfast_agent::bootstrap;
 use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
@@ -180,19 +181,20 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     })?;
     let deadline = U256::from(deadline_unix);
 
-    // 6. Load keystore and validate --wallet-address preflight.
-    //    Bead spec calls for the signature to appear in the dry-run envelope,
-    //    so we sign even in dry-run and never short-circuit before keystore resolution.
-    let keystore_path = super::wallet_args::resolve_keystore_path(
-        args.keystore.as_deref(),
-        ctx.keystore_path.as_deref(),
-    );
-    let signer = super::wallet_args::load_signer_and_validate(
-        keystore_path.as_deref(),
-        args.wallet_password_file.as_deref(),
-        args.wallet_address
-            .as_deref()
-            .or(ctx.wallet_address.as_deref()),
+    // 6. Load keystore and validate --wallet-address preflight (the same
+    //    wallet seam every signing command uses). The spec calls for the
+    //    signature to appear in the dry-run envelope, so we sign even in
+    //    dry-run and never short-circuit before keystore resolution. No RPC:
+    //    the approval is an EIP-712 signature over server-issued values.
+    let (signer, _) = load_wallet(
+        ctx,
+        &WalletOpts {
+            keystore: args.keystore.as_deref(),
+            password_file: args.wallet_password_file.as_deref(),
+            wallet_address: args.wallet_address.as_deref(),
+            rpc_url: None,
+            receipt_timeout: None,
+        },
         "settlement approval",
     )?;
 

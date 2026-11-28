@@ -219,18 +219,12 @@ impl Ctx {
 
     /// Pick the reqwest client to use for a JSON-RPC URL.
     ///
-    /// Any URL whose prefix is `{api_base}/rpc/` is this deployment's
+    /// Any URL whose origin matches `{api_base}` is this deployment's
     /// authenticated proxy and **must** be hit with the X-API-Key-bearing
-    /// client; otherwise the proxy short-circuits with 401 "missing API key"
-    /// before reaching the upstream RPC. Anything else (a bare upstream
-    /// Tempo gateway via `--rpc-url`/`TEMPO_RPC_URL`) gets a fresh client
-    /// with no TaskFast headers.
-    ///
-    /// This is selected by URL origin (same host as `api_base`), not by which
-    /// resolution branch the URL came from, so a user who points `--rpc-url` /
-    /// `TEMPO_RPC_URL` at the proxy still gets the authenticated client.
+    /// client; anything else gets a fresh client with no TaskFast headers.
+    /// Selected by origin, not by how the URL was resolved.
     pub fn rpc_http_client(&self, client: &TaskFastClient, rpc_url: &str) -> reqwest::Client {
-        if is_proxy_rpc_url(rpc_url, self.base_url()) {
+        if crate::tempo_session::is_proxy_rpc_url(rpc_url, self.base_url()) {
             client.http_client()
         } else {
             reqwest::Client::new()
@@ -275,27 +269,6 @@ impl Ctx {
             )));
         }
         Ok(())
-    }
-}
-
-/// True when `rpc_url` is served from the same origin (scheme + host + port)
-/// as this deployment's `base_url` — i.e. it is this deployment's own
-/// authenticated proxy, whatever path it is mounted at (`/rpc/…` or
-/// `/api/rpc/…`). Used both to gate off-host RPC routing and to decide
-/// whether the authenticated reqwest client (with the `X-API-Key` default
-/// header) is required for the call.
-///
-/// The path is deliberately irrelevant: every route on `base_url` is a
-/// TaskFast route that already accepts the key, so the only boundary that
-/// matters is the host — we never leak the key off-host. `Url::origin()`
-/// folds in the scheme, so an `https`→`http` downgrade is a different origin
-/// and is correctly rejected.
-pub(crate) fn is_proxy_rpc_url(rpc_url: &str, base_url: &str) -> bool {
-    match (url::Url::parse(rpc_url), url::Url::parse(base_url)) {
-        // Two opaque origins are never equal, so a match here is always a
-        // genuine same-host tuple origin.
-        (Ok(rpc), Ok(base)) => rpc.origin() == base.origin(),
-        _ => false,
     }
 }
 
@@ -391,67 +364,24 @@ fn enforce_endpoint_guard(
 }
 
 /// Runtime cross-system check for the env→network invariant. The
-/// compile-time table in [`Environment::network`] says each env runs
-/// exactly one Tempo network; this verifies that the deployment at
-/// `ctx.base_url()` agrees by inspecting `/config/network`.
-///
-/// **Default: warn-only.** Today's deployments still advertise multiple
-/// networks in one response (server-side one-network-per-deployment
-/// tracked in #62). Until that lands, a mismatch logs a `tracing::warn!`
-/// and continues. Set `TASKFAST_STRICT_ENV_NETWORK=1` to fail-closed
-/// instead. The default flips to strict in a follow-up CLI release once
-/// #62 is deployed across prod + staging.
-///
-/// Bypassed entirely for [`Environment::Local`] (sandboxed dev) and when
-/// `--allow-custom-endpoints` is set, matching the F2 endpoint guard.
+/// compile-time table in [`Environment::network`] says each env runs exactly
+/// one Tempo network; this verifies the deployment at `ctx.base_url()` agrees
+/// by inspecting `/config/network`. Policy lives in
+/// `crate::tempo_session::enforce_network_invariant` (warn-only unless
+/// `TASKFAST_STRICT_ENV_NETWORK=1`), the same gate every on-chain command's
+/// proxy lookup passes through.
 pub async fn enforce_server_network_invariant(
     ctx: &Ctx,
     client: &TaskFastClient,
 ) -> Result<(), CmdError> {
-    if ctx.allow_custom_endpoints || ctx.environment == Environment::Local {
+    if crate::tempo_session::network_invariant_bypassed(ctx) {
         return Ok(());
     }
     let cfg = client
         .fetch_network_config()
         .await
         .map_err(CmdError::from)?;
-    let strict = std::env::var("TASKFAST_STRICT_ENV_NETWORK")
-        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-    let advertised: Vec<String> = cfg.networks.keys().cloned().collect();
-    check_network_invariant(ctx.environment, ctx.base_url(), &advertised, strict)
-}
-
-/// Pure-logic core of [`enforce_server_network_invariant`]. Split out so
-/// the strict / warn / bypass branches are unit-testable without spinning
-/// up a wiremock server.
-fn check_network_invariant(
-    env: Environment,
-    api_base: &str,
-    advertised: &[String],
-    strict: bool,
-) -> Result<(), CmdError> {
-    let expected = env.network().as_str();
-    if advertised.len() == 1 && advertised[0] == expected {
-        return Ok(());
-    }
-    if strict {
-        return Err(CmdError::Server(format!(
-            "deployment at {api_base} advertises networks {advertised:?}; env {} requires \
-             exactly [{expected}]. Server-side fix tracked in issue #62. Unset \
-             TASKFAST_STRICT_ENV_NETWORK or pass --allow-custom-endpoints to bypass.",
-            env.as_str(),
-        )));
-    }
-    tracing::warn!(
-        api_base = %api_base,
-        env = env.as_str(),
-        expected = expected,
-        advertised = ?advertised,
-        "deployment advertises a different network shape than env requires; \
-         server-side fix tracked in issue #62. Set TASKFAST_STRICT_ENV_NETWORK=1 \
-         to fail-closed."
-    );
-    Ok(())
+    crate::tempo_session::enforce_network_invariant(ctx, cfg)
 }
 
 /// Parse a human-readable duration (`3min`, `90s`, `1h`). jiff replaces
@@ -719,43 +649,6 @@ mod tests {
             Some(Duration::from_secs(30))
         );
         assert!(sample("auth").retry_after().is_none());
-    }
-
-    #[test]
-    fn is_proxy_rpc_url_matches_same_origin() {
-        let base = "https://staging.api.taskfast.app";
-        // Proxy mounted at /rpc/ — same origin, authenticated client.
-        assert!(is_proxy_rpc_url(
-            "https://staging.api.taskfast.app/rpc/testnet",
-            base
-        ));
-        // Proxy mounted at /api/rpc/ (gh#79) — same origin, still ours.
-        // The path differs but the host is the one the endpoint-guard
-        // already approved, so the API key belongs here.
-        assert!(is_proxy_rpc_url(
-            "https://staging.api.taskfast.app/api/rpc/testnet",
-            base
-        ));
-        // Trailing slash on base must not break the match.
-        assert!(is_proxy_rpc_url(
-            "https://staging.api.taskfast.app/rpc/mainnet",
-            "https://staging.api.taskfast.app/"
-        ));
-        // Bare upstream Tempo gateway — different host, bare client is
-        // correct (no TaskFast auth header to leak off-host).
-        assert!(!is_proxy_rpc_url("https://rpc.moderato.tempo.xyz", base));
-        // Different host, even one that pretends to be a proxy path,
-        // must not pick up the authenticated client.
-        assert!(!is_proxy_rpc_url(
-            "https://attacker.example/rpc/testnet",
-            base
-        ));
-        // Scheme downgrade is a *different* origin — never send the key
-        // over plaintext, even to the same host.
-        assert!(!is_proxy_rpc_url(
-            "http://staging.api.taskfast.app/rpc/testnet",
-            base
-        ));
     }
 
     #[test]
@@ -1186,77 +1079,6 @@ mod tests {
         )
         .expect("no api_base = no guard");
         assert!(ctx.api_base.is_none());
-    }
-
-    #[test]
-    fn network_invariant_ok_when_single_advertised_matches() {
-        let res = check_network_invariant(
-            Environment::Prod,
-            "https://api.taskfast.app",
-            &["mainnet".into()],
-            true,
-        );
-        assert!(res.is_ok(), "exact match passes strict mode: {res:?}");
-    }
-
-    #[test]
-    fn network_invariant_strict_rejects_wrong_single_network() {
-        let err = check_network_invariant(
-            Environment::Prod,
-            "https://api.taskfast.app",
-            &["testnet".into()],
-            true,
-        )
-        .expect_err("strict mode must reject wrong network");
-        match err {
-            CmdError::Server(msg) => {
-                assert!(msg.contains("testnet"), "msg: {msg}");
-                assert!(msg.contains("mainnet"), "msg: {msg}");
-                assert!(msg.contains("issue #62"), "remediation hint: {msg}");
-            }
-            other => panic!("expected Server, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn network_invariant_strict_rejects_extra_advertised() {
-        let err = check_network_invariant(
-            Environment::Prod,
-            "https://api.taskfast.app",
-            &["mainnet".into(), "testnet".into()],
-            true,
-        )
-        .expect_err("strict mode must reject len != 1");
-        assert!(matches!(err, CmdError::Server(_)));
-    }
-
-    #[test]
-    fn network_invariant_warn_passes_under_today_server_shape() {
-        // Today's deployments advertise both networks. Warn-only mode
-        // (default) keeps the CLI usable until issue #62 closes.
-        let res = check_network_invariant(
-            Environment::Staging,
-            "https://staging.api.taskfast.app",
-            &["mainnet".into(), "testnet".into()],
-            false,
-        );
-        assert!(
-            res.is_ok(),
-            "non-strict mode must let today's multi-network deployments through: {res:?}"
-        );
-    }
-
-    #[test]
-    fn network_invariant_warn_passes_when_wrong_single_network() {
-        // Even a wrong-single-network advertised should warn-only —
-        // strict mode is opt-in.
-        let res = check_network_invariant(
-            Environment::Prod,
-            "https://api.taskfast.app",
-            &["testnet".into()],
-            false,
-        );
-        assert!(res.is_ok(), "non-strict mode warns rather than errors");
     }
 
     #[test]

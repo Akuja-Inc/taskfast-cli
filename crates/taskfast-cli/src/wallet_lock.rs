@@ -37,6 +37,9 @@ pub struct WalletGuard(#[allow(dead_code)] File);
 /// `<keystore_dir>/.taskfast-wallet.lock`; same-directory placement
 /// means two processes with different `--keystore` inputs that resolve
 /// to the same canonical path end up on the same lock.
+/// A lock failure is a wallet problem (exit 5, the `keystore` bucket): the
+/// keystore directory is unwritable or another holder crashed mid-lock. It is
+/// not a usage error the operator can fix by editing the invocation.
 pub fn acquire(keystore_path: &Path) -> Result<WalletGuard, CmdError> {
     let lock_path = lock_path_for(keystore_path);
     let f = OpenOptions::new()
@@ -45,12 +48,14 @@ pub fn acquire(keystore_path: &Path) -> Result<WalletGuard, CmdError> {
         .create(true)
         .truncate(false)
         .open(&lock_path)
-        .map_err(|e| CmdError::Usage(format!("open wallet lock {}: {e}", lock_path.display())))?;
+        .map_err(|e| {
+            CmdError::Keystore(format!("open wallet lock {}: {e}", lock_path.display()))
+        })?;
     // fs4 1.0 renamed `lock_exclusive` -> `lock` to mirror std's stabilized
     // file-locking API; semantics are identical (blocking exclusive lock).
     // UFCS keeps this on fs4's trait rather than std's inherent `File::lock`.
     FileExt::lock(&f).map_err(|e| {
-        CmdError::Usage(format!("acquire wallet lock {}: {e}", lock_path.display()))
+        CmdError::Keystore(format!("acquire wallet lock {}: {e}", lock_path.display()))
     })?;
     Ok(WalletGuard(f))
 }
@@ -102,6 +107,22 @@ mod tests {
         assert_eq!(
             lock_path_for(p),
             PathBuf::from("/some/dir/.taskfast-wallet.lock")
+        );
+    }
+
+    #[test]
+    fn lock_failure_is_a_wallet_error_not_a_usage_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("read-only");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let err = acquire(&dir.join("keystore.json"))
+            .err()
+            .expect("unwritable dir");
+        assert!(
+            matches!(&err, CmdError::Keystore(m) if m.contains("wallet lock")),
+            "got {err:?}"
         );
     }
 }

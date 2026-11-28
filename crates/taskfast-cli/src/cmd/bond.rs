@@ -23,6 +23,11 @@
 //!
 //! Error mapping delegates to `map_api_error` (401|403→Auth, 409|422→
 //! Validation). Keystore / signing failures surface as `Wallet` (exit 5).
+//!
+//! Every chain touch goes through [`ChainConnection`]: the deployment's entry
+//! for the environment's network supplies the token, the TaskBond contract and
+//! the proxy URL (same-host guarded); the node's `eth_chainId` must match the
+//! entry's advertised chain; the keystore unlocks behind the same seam.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -33,14 +38,11 @@ use clap::{Parser, ValueEnum};
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{
-    is_proxy_rpc_url, parse_duration, resolve_duration, validate_override_rpc_url, CmdError,
-    CmdResult, Ctx,
-};
+use super::{parse_duration, CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
+use crate::tempo_session::{ChainConnection, ChainTarget, WalletOpts};
 
 use taskfast_agent::chain::{compute_task_ref, TaskBond};
-use taskfast_agent::tempo_rpc::TempoRpcClient;
 use taskfast_client::api::types::{
     GetStakeQuoteStakeSource, ReportStakePostTxBody, ReportStakePostTxBodyStakeSource,
 };
@@ -51,13 +53,6 @@ use taskfast_client::map_api_error;
 /// verification lags; a timeout is reported as `posting`, not a failure.
 const DEFAULT_VERIFY_TIMEOUT: Duration = Duration::from_mins(1);
 const VERIFY_POLL_INTERVAL: Duration = Duration::from_secs(3);
-
-fn default_receipt_timeout(chain_id: i64) -> Duration {
-    match u64::try_from(chain_id) {
-        Ok(id) => crate::tempo_session::default_receipt_timeout_for_chain_id(id),
-        _ => crate::tempo_session::DEFAULT_RECEIPT_TIMEOUT_TESTNET,
-    }
-}
 
 /// clap-friendly mirror of the generated stake-source enums (kept local so
 /// codegen needn't grow clap derives). kebab-case
@@ -220,24 +215,22 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
         })
         .transpose()?;
 
-    // 5. Load signer + preflight the wallet address.
-    let keystore_path = super::wallet_args::resolve_keystore_path(
-        args.keystore.as_deref(),
-        ctx.keystore_path.as_deref(),
-    );
-    let signer = super::wallet_args::load_signer_and_validate(
-        keystore_path.as_deref(),
-        args.wallet_password_file.as_deref(),
-        args.wallet_address
-            .as_deref()
-            .or(ctx.wallet_address.as_deref()),
-        "bond post",
-    )?;
-
-    // 6. Resolve chain + token + contracts + RPC URL from the deployment's
-    //    network config.
-    let (rpc_url, chain_id, default_stablecoin, task_bond_contract) =
+    // 5 + 6. Resolve chain + token + contracts + RPC endpoint from the
+    //    deployment's network config (through the chain-session seam), and —
+    //    live only — refuse a node on another chain than the entry advertises.
+    let wallet = WalletOpts {
+        keystore: args.keystore.as_deref(),
+        password_file: args.wallet_password_file.as_deref(),
+        wallet_address: args.wallet_address.as_deref(),
+        rpc_url: args.rpc_url.as_deref(),
+        receipt_timeout: args.receipt_timeout,
+    };
+    let (conn, chain_id, default_stablecoin, task_bond_contract) =
         resolve_network(ctx, &client, &args).await?;
+    let rpc_url = conn.rpc_url().to_string();
+    // Unlocks the wallet (validated under --dry-run too), then verifies the
+    // node's chain id unless --dry-run.
+    let session = conn.into_session(ctx, &wallet, "bond post").await?;
     let task_bond: Address = match task_bond_override {
         Some(a) => a,
         None => {
@@ -308,16 +301,6 @@ async fn post(ctx: &Ctx, args: PostArgs) -> CmdResult {
             }),
         ));
     }
-
-    let http = ctx.rpc_http_client(&client, &rpc_url);
-    let rpc = TempoRpcClient::new(http, rpc_url.clone());
-    let receipt_timeout = resolve_duration(
-        args.receipt_timeout,
-        ctx.receipt_timeout,
-        default_receipt_timeout(chain_id),
-    );
-    let session =
-        crate::tempo_session::TempoSession::new(signer, keystore_path, rpc, receipt_timeout);
 
     // Balance preflight always runs — independent of --skip-allowance-check,
     // which governs only the allowance + approve path — so an underfunded
@@ -410,51 +393,31 @@ async fn poll_until_posted(
     }
 }
 
-/// Resolve `(rpc_url, chain_id, default_stablecoin, task_bond_contract)` from
-/// `GET /config/network` for this environment's network. Mirrors
-/// `post::resolve_proxy_rpc_url`'s same-host proxy guard, but
-/// also surfaces `chain_id` and the bond token + contract addresses, which
-/// the bond flow needs from the same entry.
+/// The deployment's `GET /config/network` entry for this environment's
+/// network, through the chain-session seam (override guard or same-host proxy).
 async fn resolve_network(
     ctx: &Ctx,
     client: &taskfast_client::TaskFastClient,
     args: &PostArgs,
-) -> Result<(String, i64, Option<String>, Option<String>), CmdError> {
+) -> Result<(ChainConnection, i64, Option<String>, Option<String>), CmdError> {
     let network = ctx.environment.network();
-    let cfg = client.fetch_network_config().await.map_err(|e| match e {
-        taskfast_client::Error::Auth(_) | taskfast_client::Error::Validation { .. } => {
-            CmdError::Server(format!("fetch network config from {}: {e}", ctx.base_url()))
-        }
-        other => CmdError::from(other),
+    let conn = ChainConnection::resolve(
+        ctx,
+        client,
+        args.rpc_url.as_deref(),
+        ChainTarget::Network(network),
+    )
+    .await?;
+    // A `Network` target always selects an entry.
+    let entry = conn.entry().cloned().ok_or_else(|| {
+        CmdError::Server(
+            "deployment does not advertise a network entry for this environment; pass \
+             --task-bond and --token to override"
+                .into(),
+        )
     })?;
-    let name = network.as_str();
-    let entry = cfg.entry(name).map_err(|e| {
-        CmdError::Server(format!(
-            "deployment at {} does not advertise network `{name}`: {e}",
-            ctx.base_url()
-        ))
-    })?;
-
-    let rpc_url = if let Some(ref override_url) = args.rpc_url {
-        // Validate against the env-derived network policy (as post/escrow do),
-        // not the advertised chain_id — the env is the trust anchor.
-        validate_override_rpc_url(override_url, network, ctx.allow_custom_endpoints)?;
-        override_url.clone()
-    } else {
-        // Same-host guard: the proxy may be mounted at any path on api_base, but
-        // must live on the same host so the API key never leaves the deployment.
-        if !is_proxy_rpc_url(&entry.rpc_url, ctx.base_url()) {
-            return Err(CmdError::Server(format!(
-                "deployment at {} returned rpc_url {:?} for network `{name}`, which is not on \
-                 the same host. Refusing to route RPC traffic off-host.",
-                ctx.base_url(),
-                entry.rpc_url,
-            )));
-        }
-        entry.rpc_url.clone()
-    };
     Ok((
-        rpc_url,
+        conn,
         entry.chain_id,
         entry.default_stablecoin.clone(),
         entry.task_bond_contract.clone(),

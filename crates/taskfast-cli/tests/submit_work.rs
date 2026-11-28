@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: MIT
 //! `escrow submit-work` and the automatic `submitWork` after `task submit` /
-//! `task remedy` (taskfast#2044). wiremock only: a mock Tempo RPC answers the
-//! reads and (for the send tests) the broadcast; signing uses a throwaway key.
+//! `task remedy` (taskfast#2044). wiremock serves the API; the chain is the
+//! in-memory [`MockTempoRpc`] registered at the deployment's proxy URL, so the
+//! real command signs with a throwaway key and broadcasts to it.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256, U256};
 use alloy_signer_local::PrivateKeySigner;
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+use taskfast_agent::chain::get_escrow_calldata;
 use taskfast_cli::cmd::{escrow, task, CmdError, Ctx};
 use taskfast_cli::exit::ExitCode;
+use taskfast_cli::tempo_session::{register_mock_rpc, MockTempoRpc};
 use taskfast_cli::{Envelope, Environment};
 
 const TASK_ID: &str = "00000000-0000-0000-0000-0000000000aa";
@@ -23,7 +28,17 @@ const WINDOW: u64 = 86_400;
 /// `review_deadline` of the current hand-in (2027-01-15T08:00:00Z).
 const DEADLINE: u64 = 1_800_000_000;
 const DEADLINE_ISO: &str = "2027-01-15T08:00:00Z";
-const SELECTOR: &str = "0x3a9cfef2"; // submitWork(bytes32)
+const SELECTOR: &str = "3a9cfef2"; // submitWork(bytes32)
+const REVIEW_WINDOW_OF: &str = "ec853c7d"; // reviewWindowOf(bytes32)
+const SUBMITTED_AT: &str = "53fff8ac"; // submittedAt(bytes32)
+
+fn selector(hex_sel: &str) -> [u8; 4] {
+    hex::decode(hex_sel).unwrap().try_into().unwrap()
+}
+
+fn calldata_selector(calldata: &[u8]) -> [u8; 4] {
+    calldata[..4].try_into().unwrap()
+}
 
 fn ctx_for(server: &MockServer) -> Ctx {
     Ctx {
@@ -73,7 +88,8 @@ enum Send {
     BroadcastFails,
 }
 
-/// Mock chain: `window` / `submitted_at` / `state` / `worker` served per selector.
+/// Chain facts the node serves: `window` / `submitted_at` / `state` /
+/// `worker` per selector.
 struct Chain {
     window: u64,
     submitted_at: u64,
@@ -82,52 +98,6 @@ struct Chain {
     send: Send,
     /// Pre-review-clock contract: `reviewWindowOf` reverts.
     window_reverts: bool,
-}
-
-impl wiremock::Respond for Chain {
-    fn respond(&self, req: &wiremock::Request) -> ResponseTemplate {
-        let body: Value = serde_json::from_slice(&req.body).unwrap();
-        let ok = |r: Value| {
-            ResponseTemplate::new(200).set_body_json(json!({"jsonrpc":"2.0","id":1,"result":r}))
-        };
-        match body["method"].as_str().unwrap() {
-            "eth_chainId" => ok(json!(format!("0x{:x}", CHAIN_ID))),
-            "eth_getTransactionCount" => ok(json!("0x1")),
-            "eth_gasPrice" => ok(json!("0x1")),
-            "eth_estimateGas" => ok(json!("0x5208")),
-            "eth_sendRawTransaction" if self.send == Send::BroadcastFails => {
-                ResponseTemplate::new(200).set_body_json(json!({
-                    "jsonrpc":"2.0","id":1,
-                    "error": {"code": -32000, "message": "insufficient funds"}
-                }))
-            }
-            "eth_sendRawTransaction" => ok(json!(format!("0x{}", "11".repeat(32)))),
-            "eth_getTransactionReceipt" => ok(json!({"status": "0x1"})),
-            "eth_call" => {
-                let data = body["params"][0]["data"].as_str().unwrap();
-                if data.starts_with("0xec853c7d") && self.window_reverts {
-                    ResponseTemplate::new(200).set_body_json(json!({
-                        "jsonrpc":"2.0","id":1,
-                        "error": {"code": 3, "message": "execution reverted"}
-                    }))
-                } else if data.starts_with("0xec853c7d") {
-                    ok(json!(format!("0x{}", word(self.window))))
-                } else if data.starts_with("0x53fff8ac") {
-                    ok(json!(format!("0x{}", word(self.submitted_at))))
-                } else {
-                    // getEscrow: poster, worker, platform, arbitrator, token, deposit, fee, state
-                    let worker = format!("{:0>64}", format!("{:x}", self.worker));
-                    ok(json!(format!(
-                        "0x{}{worker}{}{}",
-                        word(0),
-                        "00".repeat(32 * 5),
-                        word(self.state as u64)
-                    )))
-                }
-            }
-            m => panic!("unexpected rpc method {m}"),
-        }
-    }
 }
 
 fn chain(keys: &Keys) -> Chain {
@@ -141,7 +111,43 @@ fn chain(keys: &Keys) -> Chain {
     }
 }
 
-async fn serve(server: &MockServer, status: &str, c: Chain) {
+/// Programme the in-memory node with `c` and register it at the proxy URL the
+/// mocked `/config/network` advertises.
+fn mount_chain(server: &MockServer, c: Chain) -> Arc<MockTempoRpc> {
+    let node = Arc::new(MockTempoRpc::new());
+    node.set_chain_id(CHAIN_ID as u64);
+    if c.window_reverts {
+        node.set_call_revert(selector(REVIEW_WINDOW_OF));
+    } else {
+        node.set_call_result(
+            selector(REVIEW_WINDOW_OF),
+            hex::decode(word(c.window)).unwrap(),
+        );
+    }
+    node.set_call_result(
+        selector(SUBMITTED_AT),
+        hex::decode(word(c.submitted_at)).unwrap(),
+    );
+    // getEscrow: poster, worker, platform, arbitrator, token, deposit, fee, state
+    let get_escrow = format!(
+        "{}{:064x}{}{}",
+        word(0),
+        U256::from_be_slice(c.worker.as_slice()),
+        "00".repeat(32 * 5),
+        word(u64::from(c.state))
+    );
+    node.set_call_result(
+        calldata_selector(&get_escrow_calldata(ESCROW_ID.parse::<B256>().unwrap())),
+        hex::decode(get_escrow).unwrap(),
+    );
+    if c.send == Send::BroadcastFails {
+        node.reject_broadcast(selector(SELECTOR), "insufficient funds");
+    }
+    register_mock_rpc(&format!("{}/rpc", server.uri()), node.clone());
+    node
+}
+
+async fn serve(server: &MockServer, status: &str, c: Chain) -> Arc<MockTempoRpc> {
     Mock::given(method("GET"))
         .and(path(format!("/tasks/{TASK_ID}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -165,11 +171,7 @@ async fn serve(server: &MockServer, status: &str, c: Chain) {
         })))
         .mount(server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/rpc"))
-        .respond_with(c)
-        .mount(server)
-        .await;
+    mount_chain(server, c)
 }
 
 fn sw_args(keys: Option<&Keys>) -> escrow::SubmitWorkArgs {
@@ -189,23 +191,18 @@ async fn sw(server: &MockServer, keys: Option<&Keys>, dry: bool) -> Result<Envel
     escrow::run(&ctx, escrow::Command::SubmitWork(sw_args(keys))).await
 }
 
-async fn rpc_bodies(server: &MockServer) -> Vec<String> {
+async fn requests_to(server: &MockServer, prefix: &str) -> usize {
     server
         .received_requests()
         .await
         .unwrap()
         .iter()
-        .filter(|r| r.url.path() == "/rpc")
-        .map(|r| String::from_utf8_lossy(&r.body).into_owned())
-        .collect()
+        .filter(|r| r.url.path().starts_with(prefix))
+        .count()
 }
 
-async fn sends(server: &MockServer) -> usize {
-    rpc_bodies(server)
-        .await
-        .iter()
-        .filter(|b| b.contains("sendRawTransaction"))
-        .count()
+fn sends(node: &MockTempoRpc) -> usize {
+    node.sent_transactions().len()
 }
 
 fn code_of(e: &CmdError) -> &str {
@@ -223,26 +220,26 @@ async fn legacy_escrow_sends_nothing_and_needs_no_wallet() {
     let server = MockServer::start().await;
     let mut c = chain(&fresh_keys());
     c.window = 0;
-    serve(&server, "under_review", c).await;
+    let node = serve(&server, "under_review", c).await;
     let v = val(&sw(&server, None, false).await.expect("legacy is success"));
     assert_eq!(v["data"]["action"], "no_review_clock");
-    assert_eq!(sends(&server).await, 0);
+    assert_eq!(sends(&node), 0);
 }
 
 #[tokio::test]
 async fn first_hand_in_builds_submit_work_from_the_worker_wallet() {
     let server = MockServer::start().await;
     let keys = fresh_keys();
-    serve(&server, "under_review", chain(&keys)).await;
+    let node = serve(&server, "under_review", chain(&keys)).await;
     let v = val(&sw(&server, Some(&keys), true).await.expect("dry-run"));
     assert_eq!(v["data"]["action"], "would_submit_work");
     assert_eq!(v["data"]["to"], CONTRACT);
     assert_eq!(v["data"]["from"], format!("{:#x}", keys.address));
     assert_eq!(
         v["data"]["calldata"],
-        format!("{SELECTOR}{}", &ESCROW_ID[2..])
+        format!("0x{SELECTOR}{}", &ESCROW_ID[2..])
     );
-    assert_eq!(sends(&server).await, 0);
+    assert_eq!(sends(&node), 0);
 }
 
 #[tokio::test]
@@ -264,10 +261,10 @@ async fn same_hand_in_is_not_sent_twice() {
     let keys = fresh_keys();
     let mut c = chain(&keys);
     c.submitted_at = DEADLINE - WINDOW;
-    serve(&server, "under_review", c).await;
+    let node = serve(&server, "under_review", c).await;
     let v = val(&sw(&server, Some(&keys), false).await.unwrap());
     assert_eq!(v["data"]["action"], "already_submitted");
-    assert_eq!(sends(&server).await, 0);
+    assert_eq!(sends(&node), 0);
 }
 
 #[tokio::test]
@@ -275,10 +272,10 @@ async fn refuses_a_task_that_is_not_under_review() {
     for status in ["in_progress", "assigned", "complete", "disputed"] {
         let server = MockServer::start().await;
         let keys = fresh_keys();
-        serve(&server, status, chain(&keys)).await;
+        let node = serve(&server, status, chain(&keys)).await;
         let err = sw(&server, Some(&keys), false).await.unwrap_err();
         assert_eq!(code_of(&err), "task_not_under_review", "{status}");
-        assert_eq!(sends(&server).await, 0);
+        assert_eq!(sends(&node), 0);
     }
 }
 
@@ -289,10 +286,10 @@ async fn refuses_every_non_open_escrow_state() {
         let keys = fresh_keys();
         let mut c = chain(&keys);
         c.state = state;
-        serve(&server, "under_review", c).await;
+        let node = serve(&server, "under_review", c).await;
         let err = sw(&server, Some(&keys), false).await.unwrap_err();
         assert_eq!(code_of(&err), "escrow_not_open", "state {state}");
-        assert_eq!(sends(&server).await, 0);
+        assert_eq!(sends(&node), 0);
     }
 }
 
@@ -302,10 +299,10 @@ async fn refuses_a_wallet_that_is_not_the_escrow_worker() {
     let keys = fresh_keys();
     let mut c = chain(&keys);
     c.worker = fresh_keys().address;
-    serve(&server, "under_review", c).await;
+    let node = serve(&server, "under_review", c).await;
     let err = sw(&server, Some(&keys), false).await.unwrap_err();
     assert_eq!(code_of(&err), "not_escrow_worker");
-    assert_eq!(sends(&server).await, 0);
+    assert_eq!(sends(&node), 0);
 }
 
 #[tokio::test]
@@ -319,18 +316,29 @@ async fn server_refusal_makes_no_rpc_call() {
     let keys = fresh_keys();
     let err = sw(&server, Some(&keys), false).await.unwrap_err();
     assert!(matches!(err, CmdError::Auth(_)), "{err:?}");
-    assert_eq!(rpc_bodies(&server).await, Vec::<String>::new());
+    assert_eq!(requests_to(&server, "/rpc").await, 0, "no chain call");
 }
 
 #[tokio::test]
 async fn live_send_broadcasts_once_and_reports_the_tx() {
     let server = MockServer::start().await;
     let keys = fresh_keys();
-    serve(&server, "under_review", chain(&keys)).await;
+    let node = serve(&server, "under_review", chain(&keys)).await;
     let v = val(&sw(&server, Some(&keys), false).await.expect("send"));
     assert_eq!(v["data"]["action"], "submit_work_submitted");
-    assert_eq!(v["data"]["tx_hash"], format!("0x{}", "11".repeat(32)));
-    assert_eq!(sends(&server).await, 1);
+    let tx_hash = v["data"]["tx_hash"].as_str().unwrap();
+    assert!(
+        tx_hash.starts_with("0x") && tx_hash.len() == 66,
+        "{tx_hash}"
+    );
+    let sent = node.sent_transactions();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].0,
+        CONTRACT.parse::<Address>().unwrap(),
+        "targets the escrow"
+    );
+    assert_eq!(&sent[0].1[..4], selector(SELECTOR));
 }
 
 // ─── automatic send after `task submit` ───────────────────────────────────
@@ -349,17 +357,21 @@ async fn mount_submit(server: &MockServer, status: u16) {
     mount_hand_in(server, "submit", status, "under_review").await;
 }
 
+fn hand_in_response(status: u16, task_status: &str) -> ResponseTemplate {
+    ResponseTemplate::new(status).set_body_json(json!({
+        "success": status == 200,
+        "task_id": TASK_ID,
+        "status": task_status,
+        "message": "submitted",
+        "error": "invalid_status",
+        "evaluation": {"passed": true, "criteria_results": [], "evaluated_at": "2026-04-13T21:00:00Z"},
+    }))
+}
+
 async fn mount_hand_in(server: &MockServer, verb: &str, status: u16, task_status: &str) {
     Mock::given(method("POST"))
         .and(path(format!("/tasks/{TASK_ID}/{verb}")))
-        .respond_with(ResponseTemplate::new(status).set_body_json(json!({
-            "success": status == 200,
-            "task_id": TASK_ID,
-            "status": task_status,
-            "message": "submitted",
-            "error": "invalid_status",
-            "evaluation": {"passed": true, "criteria_results": [], "evaluated_at": "2026-04-13T21:00:00Z"},
-        })))
+        .respond_with(hand_in_response(status, task_status))
         .mount(server)
         .await;
 }
@@ -377,14 +389,14 @@ async fn server_refusal_means_no_chain_call_at_all() {
     // Mutation: send on chain before/without the server accepting → rpc is hit.
     let server = MockServer::start().await;
     let keys = fresh_keys();
-    serve(&server, "under_review", chain(&keys)).await;
+    let node = serve(&server, "under_review", chain(&keys)).await;
     mount_submit(&server, 409).await;
     let err = run_submit(&server, Some(&keys)).await.unwrap_err();
     assert!(
         !matches!(err, CmdError::HandedInClockNotStarted(_)),
         "{err:?}"
     );
-    assert_eq!(rpc_bodies(&server).await, Vec::<String>::new());
+    assert_eq!(node.request_count(), 0, "no chain call at all");
 }
 
 #[tokio::test]
@@ -392,16 +404,26 @@ async fn good_hand_in_then_chain_send_in_that_order() {
     // Mutation: drop the automatic send → sends == 0.
     let server = MockServer::start().await;
     let keys = fresh_keys();
-    serve(&server, "under_review", chain(&keys)).await;
-    mount_submit(&server, 200).await;
+    let node = serve(&server, "under_review", chain(&keys)).await;
+    // Record how many txs the node had seen when the hand-in arrived.
+    let sends_at_hand_in = Arc::new(AtomicUsize::new(usize::MAX));
+    {
+        let node = node.clone();
+        let sends_at_hand_in = sends_at_hand_in.clone();
+        Mock::given(method("POST"))
+            .and(path(format!("/tasks/{TASK_ID}/submit")))
+            .respond_with(move |_: &Request| {
+                sends_at_hand_in.store(node.sent_transactions().len(), Ordering::SeqCst);
+                hand_in_response(200, "under_review")
+            })
+            .mount(&server)
+            .await;
+    }
     let v = val(&run_submit(&server, Some(&keys)).await.expect("submit"));
     assert_eq!(v["data"]["chain"]["action"], "submit_work_submitted");
     assert_eq!(v["data"]["submission"]["status"], "under_review");
-    let reqs = server.received_requests().await.unwrap();
-    let pos = |pred: &dyn Fn(&wiremock::Request) -> bool| reqs.iter().position(pred);
-    let hand_in = pos(&|r| r.url.path().ends_with("/submit")).unwrap();
-    let send = pos(&|r| String::from_utf8_lossy(&r.body).contains("sendRawTransaction")).unwrap();
-    assert!(hand_in < send);
+    assert_eq!(sends_at_hand_in.load(Ordering::SeqCst), 0, "hand-in first");
+    assert_eq!(sends(&node), 1, "then the send");
 }
 
 #[tokio::test]
@@ -409,11 +431,11 @@ async fn legacy_escrow_submit_prompts_for_no_wallet_and_sends_nothing() {
     let server = MockServer::start().await;
     let mut c = chain(&fresh_keys());
     c.window = 0;
-    serve(&server, "under_review", c).await;
+    let node = serve(&server, "under_review", c).await;
     mount_submit(&server, 200).await;
     let v = val(&run_submit(&server, None).await.expect("legacy submit"));
     assert_eq!(v["data"]["chain"]["action"], "no_review_clock");
-    assert_eq!(sends(&server).await, 0);
+    assert_eq!(sends(&node), 0);
 }
 
 #[tokio::test]
@@ -423,9 +445,10 @@ async fn chain_failure_after_good_hand_in_is_not_a_failed_hand_in() {
     let keys = fresh_keys();
     let mut c = chain(&keys);
     c.send = Send::BroadcastFails;
-    serve(&server, "under_review", c).await;
+    let node = serve(&server, "under_review", c).await;
     mount_submit(&server, 200).await;
     let err = run_submit(&server, Some(&keys)).await.unwrap_err();
+    assert_eq!(sends(&node), 1, "the node was asked and refused");
     assert!(
         matches!(err, CmdError::HandedInClockNotStarted(_)),
         "{err:?}"
@@ -455,7 +478,7 @@ async fn chain_failure_after_good_hand_in_is_not_a_failed_hand_in() {
 #[tokio::test]
 async fn missing_wallet_on_a_review_clock_escrow_reports_clock_not_started() {
     let server = MockServer::start().await;
-    serve(&server, "under_review", chain(&fresh_keys())).await;
+    let node = serve(&server, "under_review", chain(&fresh_keys())).await;
     mount_submit(&server, 200).await;
     let err = run_submit(&server, None).await.unwrap_err();
     assert!(
@@ -463,7 +486,7 @@ async fn missing_wallet_on_a_review_clock_escrow_reports_clock_not_started() {
         "{err:?}"
     );
     assert!(err.to_string().contains("escrow submit-work"));
-    assert_eq!(sends(&server).await, 0);
+    assert_eq!(sends(&node), 0);
 }
 
 #[tokio::test]
@@ -471,11 +494,11 @@ async fn auto_approved_task_has_no_clock_to_start() {
     // Server already completed the task: not an error, nothing sent.
     let server = MockServer::start().await;
     let keys = fresh_keys();
-    serve(&server, "complete", chain(&keys)).await;
+    let node = serve(&server, "complete", chain(&keys)).await;
     mount_submit(&server, 200).await;
     let v = val(&run_submit(&server, Some(&keys)).await.expect("submit"));
     assert_eq!(v["data"]["chain"]["action"], "skipped");
-    assert_eq!(sends(&server).await, 0);
+    assert_eq!(sends(&node), 0);
 }
 
 // ─── review-fix cases ─────────────────────────────────────────────────────
@@ -487,11 +510,11 @@ async fn pre_review_clock_contract_revert_is_a_legacy_escrow() {
     let server = MockServer::start().await;
     let mut c = chain(&fresh_keys());
     c.window_reverts = true;
-    serve(&server, "under_review", c).await;
+    let node = serve(&server, "under_review", c).await;
     mount_submit(&server, 200).await;
     let v = val(&run_submit(&server, None).await.expect("legacy submit"));
     assert_eq!(v["data"]["chain"]["action"], "no_review_clock");
-    assert_eq!(sends(&server).await, 0);
+    assert_eq!(sends(&node), 0);
 }
 
 #[tokio::test]
@@ -499,11 +522,11 @@ async fn remedy_also_starts_the_clock() {
     // Mutation: send only for `task submit` → remedy sends nothing.
     let server = MockServer::start().await;
     let keys = fresh_keys();
-    serve(&server, "under_review", chain(&keys)).await;
+    let node = serve(&server, "under_review", chain(&keys)).await;
     mount_hand_in(&server, "remedy", 200, "under_review").await;
     let v = val(&run_remedy(&server, Some(&keys)).await.expect("remedy"));
     assert_eq!(v["data"]["chain"]["action"], "submit_work_submitted");
-    assert_eq!(sends(&server).await, 1);
+    assert_eq!(sends(&node), 1);
 }
 
 #[tokio::test]
@@ -511,11 +534,11 @@ async fn remedy_that_ends_the_task_starts_no_clock() {
     for end in ["complete", "cancelled"] {
         let server = MockServer::start().await;
         let keys = fresh_keys();
-        serve(&server, end, chain(&keys)).await;
+        let node = serve(&server, end, chain(&keys)).await;
         mount_hand_in(&server, "remedy", 200, end).await;
         let v = val(&run_remedy(&server, Some(&keys)).await.expect("remedy"));
         assert_eq!(v["data"]["chain"]["action"], "skipped", "{end}");
-        assert!(rpc_bodies(&server).await.is_empty(), "{end}");
+        assert_eq!(node.request_count(), 0, "no chain call, {end}");
     }
 }
 
@@ -524,7 +547,7 @@ async fn missing_password_on_a_review_clock_escrow_reports_clock_not_started() {
     // Keystore set, no password file and no env password.
     let server = MockServer::start().await;
     let keys = fresh_keys();
-    serve(&server, "under_review", chain(&keys)).await;
+    let node = serve(&server, "under_review", chain(&keys)).await;
     mount_submit(&server, 200).await;
     let mut args = submit_args(Some(&keys));
     args.wallet_password_file = None;
@@ -536,7 +559,7 @@ async fn missing_password_on_a_review_clock_escrow_reports_clock_not_started() {
         "{err:?}"
     );
     assert!(err.to_string().contains("escrow submit-work"));
-    assert_eq!(sends(&server).await, 0);
+    assert_eq!(sends(&node), 0);
 }
 
 #[tokio::test]

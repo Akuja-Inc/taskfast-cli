@@ -9,8 +9,9 @@
 //! When `--submission-fee-voucher` is omitted, the CLI fetches the payment parameters
 //! (`GET /tasks/{id}/retry-fee`), validates the network allowlists, verifies that
 //! the calldata matches the payment parameters, signs and broadcasts the payment
-//! using the poster's keystore wallet under the per-wallet lock, and submits the
-//! transaction hash to the server.
+//! using the poster's keystore wallet under the per-wallet lock (all through the
+//! chain-session seam: endpoint guards, node chain id, wallet unlock), and submits
+//! the transaction hash to the server.
 //!
 //! If the broadcast succeeds but the server submission fails, the transaction hash
 //! is persisted in `.taskfast/` via `StateStore`. Re-running the command reuses
@@ -29,6 +30,7 @@ use uuid::Uuid;
 
 use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
+use crate::tempo_session::{ChainConnection, ChainTarget, WalletOpts};
 
 use taskfast_client::api::types::RetrySubmissionFeeRequest;
 use taskfast_client::map_api_error;
@@ -289,41 +291,27 @@ async fn retry(ctx: &Ctx, args: RetryArgs) -> CmdResult {
             payment.memo_hash.as_ref().map(|s| s.as_str()),
         )?;
 
-        let rpc_url = match args.rpc_url {
-            Some(override_url) => {
-                super::validate_override_rpc_url(
-                    &override_url,
-                    ctx.environment.network(),
-                    ctx.allow_custom_endpoints,
-                )?;
-                override_url
-            }
-            None => super::wallet_args::resolve_proxy_rpc_url(&client, ctx).await?,
+        // Endpoint guards + node chain id + wallet unlock, behind the seam.
+        // No server-issued chain id here, so the node's own chain id is what
+        // the fee guards key on.
+        let wallet = WalletOpts {
+            keystore: args.keystore.as_deref(),
+            password_file: args.wallet_password_file.as_deref(),
+            wallet_address: args.wallet_address.as_deref(),
+            rpc_url: args.rpc_url.as_deref(),
+            receipt_timeout: None,
         };
-
-        let keystore_path = super::wallet_args::resolve_keystore_path(
-            args.keystore.as_deref(),
-            ctx.keystore_path.as_deref(),
-        );
-        let signer = super::wallet_args::load_signer_and_validate(
-            keystore_path.as_deref(),
-            args.wallet_password_file.as_deref(),
-            args.wallet_address
-                .as_deref()
-                .or(ctx.wallet_address.as_deref()),
-            "submission fee",
-        )?;
-
-        let tx_hash = super::wallet_args::sign_and_send_submission_fee(
-            ctx,
-            &client,
-            &rpc_url,
-            keystore_path,
-            signer,
-            token_address_str,
-            alloy_primitives::Bytes::from(calldata),
-        )
-        .await?;
+        let session = ChainConnection::resolve(ctx, &client, wallet.rpc_url, ChainTarget::Node)
+            .await?
+            .into_session(ctx, &wallet, "submission fee")
+            .await?;
+        let tx_hash = session
+            .send_fee_transfer(
+                ctx,
+                token_address_str,
+                alloy_primitives::Bytes::from(calldata),
+            )
+            .await?;
         let tx_hash_hex = format!("{tx_hash:#x}");
 
         if let Err(e) = state_store.record_pending_fee_retry(&task_id, &tx_hash_hex) {

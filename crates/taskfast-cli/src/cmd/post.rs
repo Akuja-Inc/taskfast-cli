@@ -18,7 +18,9 @@
 //!
 //! `payload_to_sign` (despite its historical name) is **not** an ECDSA signing
 //! payload — it's the encoded ERC-20 `transfer` calldata. We wrap it in a
-//! replay-safe legacy tx and broadcast via [`crate::tempo_session::TempoSession::send_transaction`].
+//! replay-safe legacy tx and broadcast via
+//! [`TempoSession::send_fee_transfer`](crate::tempo_session::TempoSession::send_fee_transfer),
+//! behind the chain-session seam (endpoint guards, node chain id, wallet).
 
 use std::path::PathBuf;
 
@@ -26,9 +28,10 @@ use alloy_primitives::{Address, Bytes};
 use clap::Parser;
 use serde_json::json;
 
-use super::wallet_args::{decode_0x_bytes, resolve_proxy_rpc_url, sign_and_send_submission_fee};
+use super::wallet_args::decode_0x_bytes;
 use super::{validate_override_rpc_url, CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
+use crate::tempo_session::{ChainConnection, ChainTarget, WalletOpts};
 
 use taskfast_client::api::types::{
     CompletionCriterionInput, TaskDraftPrepareRequest, TaskDraftPrepareRequestAssignmentType,
@@ -187,14 +190,19 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
 
     let client = ctx.client()?;
 
-    // Resolve the RPC URL. Default path: pull it from the deployment's
-    // `GET /config/network` (public). Override path: user supplied
-    // `--rpc-url` / `TEMPO_RPC_URL` and must also pass
-    // `--allow-custom-endpoints` (already checked in preflight).
-    let rpc_url = match pre.rpc_url_override {
-        Some(override_url) => override_url,
-        None => resolve_proxy_rpc_url(&client, ctx).await?,
+    // Resolve the RPC endpoint through the chain-session seam. Default path:
+    // the deployment's `GET /config/network` (public) proxy. Override path:
+    // the user-supplied `--rpc-url` / `TEMPO_RPC_URL` (already checked in
+    // preflight). No server-issued chain id here, so the node's own chain id
+    // is what the fee guards key on.
+    let wallet = WalletOpts {
+        keystore: args.keystore.as_deref(),
+        password_file: args.wallet_password_file.as_deref(),
+        wallet_address: Some(pre.wallet_address.as_str()),
+        rpc_url: pre.rpc_url_override.as_deref(),
+        receipt_timeout: None,
     };
+    let conn = ChainConnection::resolve(ctx, &client, wallet.rpc_url, ChainTarget::Node).await?;
 
     // Phase 1 — prepare. Server returns ERC-20 transfer calldata + draft_id.
     let prep = match client.inner().prepare_task_draft(&prep_body).await {
@@ -205,29 +213,14 @@ pub async fn run(ctx: &Ctx, args: Args) -> CmdResult {
     let calldata = decode_0x_bytes(&prep.payload_to_sign)
         .map_err(|e| CmdError::Server(format!("server returned invalid payload_to_sign: {e}")))?;
 
-    // Load signer only after prepare succeeds — avoids prompting the user for
-    // a keystore password on a request that never leaves local validation.
-    let keystore_path = super::wallet_args::resolve_keystore_path(
-        args.keystore.as_deref(),
-        ctx.keystore_path.as_deref(),
-    );
-    let signer = super::wallet_args::load_signer_and_validate(
-        keystore_path.as_deref(),
-        args.wallet_password_file.as_deref(),
-        Some(&pre.wallet_address),
-        "submission fee",
-    )?;
-
-    let tx_hash = sign_and_send_submission_fee(
-        ctx,
-        &client,
-        &rpc_url,
-        keystore_path,
-        signer,
-        &prep.token_address,
-        Bytes::from(calldata),
-    )
-    .await?;
+    // Unlock the keystore only after prepare succeeds — avoids prompting the
+    // user for a keystore password on a request that never leaves local
+    // validation. The node's chain id is pinned next: a `Node` target has no
+    // server-issued chain to compare it against, and the fee guards key on it.
+    let session = conn.into_session(ctx, &wallet, "submission fee").await?;
+    let tx_hash = session
+        .send_fee_transfer(ctx, &prep.token_address, Bytes::from(calldata))
+        .await?;
     let tx_hash_hex = format!("{tx_hash:#x}");
 
     // Phase 2 — submit voucher. The field is named `signature` for historical

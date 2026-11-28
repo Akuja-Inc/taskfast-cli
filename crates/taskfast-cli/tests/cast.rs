@@ -1,19 +1,18 @@
 // SPDX-License-Identifier: MIT
 //! End-to-end tests for `taskfast cast` (gh#101).
 //!
-//! Unlike `bond post` / `escrow sign`, `cast` needs no TaskFast API mock when
-//! `--rpc-url` is given: the override path talks straight to the RPC endpoint,
-//! so a single wiremock server standing in for the Tempo node covers all three
-//! verbs — including the full live `send` leg (chainId → nonce → gasPrice →
-//! estimateGas → sendRawTransaction → receipt), which bond/escrow defer to
-//! manual E2E because their RPC URL arrives via the authenticated config path.
+//! `cast` needs no TaskFast API at all when `--rpc-url` is given: the override
+//! path talks straight to the RPC endpoint, here the in-memory
+//! [`MockTempoRpc`] registered under a fresh URL.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use alloy_primitives::{keccak256, Address};
 use alloy_signer_local::PrivateKeySigner;
 use serde_json::{json, Value};
-use wiremock::matchers::{body_partial_json, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use taskfast_cli::tempo_session::{register_mock_rpc, MockTempoRpc};
 
 use taskfast_cli::cmd::cast::{run, CallArgs, Command, RpcArgs, SendArgs};
 use taskfast_cli::cmd::{CmdError, Ctx};
@@ -37,22 +36,18 @@ fn envelope_value(env: &Envelope) -> Value {
     serde_json::to_value(env).expect("serialize envelope")
 }
 
-/// JSON-RPC success envelope, mirroring `tempo_rpc.rs`'s test helper.
-fn rpc_ok(result: Value) -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_json(json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "result": result,
-    }))
+/// A fresh `--rpc-url` served by an in-memory testnet node.
+fn node() -> (String, Arc<MockTempoRpc>) {
+    let url = format!("http://node-{}/", uuid::Uuid::new_v4().simple());
+    let node = Arc::new(MockTempoRpc::new());
+    node.set_chain_id(42431);
+    register_mock_rpc(&url, node.clone());
+    (url, node)
 }
 
-async fn mount_rpc(server: &MockServer, rpc_method: &str, result: Value) {
-    Mock::given(method("POST"))
-        .and(path("/"))
-        .and(body_partial_json(json!({"method": rpc_method})))
-        .respond_with(rpc_ok(result))
-        .mount(server)
-        .await;
+/// ABI selector of a Solidity signature.
+fn selector(sig: &str) -> [u8; 4] {
+    keccak256(sig.as_bytes())[..4].try_into().unwrap()
 }
 
 struct Keys {
@@ -92,10 +87,10 @@ fn send_args(keys: &Keys, rpc_url: String) -> SendArgs {
 
 #[tokio::test]
 async fn call_decodes_declared_outputs() {
-    let server = MockServer::start().await;
+    let (url, node) = node();
     // bool true, ABI-encoded: 32 bytes ending in 0x01.
     let word = format!("0x{}{}", "00".repeat(31), "01");
-    mount_rpc(&server, "eth_call", json!(word)).await;
+    node.set_call_result(selector("paused()"), hex::decode(&word[2..]).unwrap());
 
     let env = run(
         &ctx(false),
@@ -103,7 +98,7 @@ async fn call_decodes_declared_outputs() {
             to: TARGET.into(),
             sig: "paused()(bool)".into(),
             args: vec![],
-            rpc_url: Some(server.uri()),
+            rpc_url: Some(url),
         }),
     )
     .await
@@ -112,13 +107,14 @@ async fn call_decodes_declared_outputs() {
     let v = envelope_value(&env);
     assert_eq!(v["data"]["decoded"], json!([true]));
     assert_eq!(v["data"]["raw"], json!(word));
+    assert_eq!(node.request_count(), 1, "one eth_call, nothing else");
 }
 
 #[tokio::test]
 async fn call_without_declared_outputs_returns_raw_only() {
-    let server = MockServer::start().await;
+    let (url, node) = node();
     let word = format!("0x{}{}", "00".repeat(31), "01");
-    mount_rpc(&server, "eth_call", json!(word)).await;
+    node.set_call_result(selector("paused()"), hex::decode(&word[2..]).unwrap());
 
     let env = run(
         &ctx(false),
@@ -126,7 +122,7 @@ async fn call_without_declared_outputs_returns_raw_only() {
             to: TARGET.into(),
             sig: "paused()".into(),
             args: vec![],
-            rpc_url: Some(server.uri()),
+            rpc_url: Some(url),
         }),
     )
     .await
@@ -215,28 +211,26 @@ async fn send_dry_run_builds_calldata_without_network() {
 
 #[tokio::test]
 async fn send_broadcasts_and_reports_tx_hash() {
-    let server = MockServer::start().await;
-    let tx_hash = format!("0x{}", "ab".repeat(32));
-    mount_rpc(&server, "eth_chainId", json!("0xa5bf")).await;
-    mount_rpc(&server, "eth_getTransactionCount", json!("0x0")).await;
-    mount_rpc(&server, "eth_gasPrice", json!("0x3b9aca00")).await;
-    mount_rpc(&server, "eth_estimateGas", json!("0x5208")).await;
-    mount_rpc(&server, "eth_sendRawTransaction", json!(tx_hash)).await;
-    mount_rpc(
-        &server,
-        "eth_getTransactionReceipt",
-        json!({"status": "0x1"}),
-    )
-    .await;
+    let (url, node) = node();
 
     let keys = fresh_keys();
-    let env = run(&ctx(false), Command::Send(send_args(&keys, server.uri())))
+    let env = run(&ctx(false), Command::Send(send_args(&keys, url)))
         .await
         .expect("send succeeds");
 
+    // The live leg: chain id checked, one tx to the target signed for that
+    // chain, and its hash reported.
+    let sent = node.sent_transactions();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, TARGET.parse::<Address>().unwrap());
+    assert!(sent[0].1.starts_with(&selector("approve(address,uint256)")));
+    assert_eq!(node.broadcast_chain_ids(), [Some(42431)]);
     let v = envelope_value(&env);
     assert_eq!(v["data"]["action"], json!("sent"));
-    assert_eq!(v["data"]["tx_hash"], json!(tx_hash));
+    assert_eq!(
+        v["data"]["tx_hash"],
+        json!(format!("{:#x}", node.tx_hashes()[0]))
+    );
 }
 
 #[tokio::test]
@@ -271,23 +265,15 @@ async fn send_rejects_wallet_address_mismatch() {
 
 #[tokio::test]
 async fn rpc_passes_through_method_params_and_result() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/"))
-        .and(body_partial_json(json!({
-            "method": "tempo_fundAddress",
-            "params": [HOLDER],
-        })))
-        .respond_with(rpc_ok(json!({"funded": true})))
-        .mount(&server)
-        .await;
+    let (url, node) = node();
+    node.set_raw("tempo_fundAddress", json!({"funded": true}));
 
     let env = run(
         &ctx(false),
         Command::Rpc(RpcArgs {
             method: "tempo_fundAddress".into(),
             params: Some(format!("[\"{HOLDER}\"]")),
-            rpc_url: Some(server.uri()),
+            rpc_url: Some(url),
         }),
     )
     .await
@@ -295,6 +281,10 @@ async fn rpc_passes_through_method_params_and_result() {
 
     let v = envelope_value(&env);
     assert_eq!(v["data"]["result"], json!({"funded": true}));
+    assert_eq!(
+        node.raw_calls(),
+        [("tempo_fundAddress".to_string(), json!([HOLDER]))]
+    );
 }
 
 #[tokio::test]
