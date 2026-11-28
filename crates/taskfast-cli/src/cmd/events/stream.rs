@@ -92,12 +92,6 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const RECONNECT_CAP: Duration = Duration::from_secs(30);
 const RECONNECT_INITIAL: Duration = Duration::from_secs(1);
 
-#[derive(Default)]
-struct Session {
-    ever_joined: bool,
-    joined_this_attempt: bool,
-}
-
 struct Backoff {
     current: Duration,
 }
@@ -109,10 +103,11 @@ impl Backoff {
         }
     }
 
-    fn next_wait(&mut self, joined: bool) -> Duration {
-        if joined {
-            self.current = RECONNECT_INITIAL;
-        }
+    fn reset(&mut self) {
+        self.current = RECONNECT_INITIAL;
+    }
+
+    fn next_wait(&mut self) -> Duration {
         let wait = self.current;
         self.current = (self.current * 2).min(RECONNECT_CAP);
         wait
@@ -155,7 +150,7 @@ async fn run_with(
     let (mut ack_lines, shutdown) = live();
 
     let mut backoff = Backoff::new();
-    let mut session = Session::default();
+    let mut ever_joined = false;
 
     let mut intake = super::intake::EventIntake::from_ctx(ctx, None);
 
@@ -165,13 +160,12 @@ async fn run_with(
             return ExitCode::SUCCESS;
         }
 
-        session.joined_this_attempt = false;
-
         match run_once(
             &mut *out,
             &ws_url,
             &api_key,
-            &mut session,
+            &mut ever_joined,
+            &mut backoff,
             args.once,
             &shutdown,
             ack_lines.as_mut(),
@@ -208,7 +202,7 @@ async fn run_with(
             report_output_error(&e);
             return crate::exit::ExitCode::Server.into();
         }
-        let wait = backoff.next_wait(session.joined_this_attempt);
+        let wait = backoff.next_wait();
         tokio::select! {
             () = sleep(wait) => {},
             () = shutdown.cancelled() => {
@@ -226,10 +220,14 @@ fn output_error_line(e: &std::io::Error) -> Option<String> {
     Some(format!("taskfast: events stream: stdout write failed: {e}"))
 }
 
-fn report_output_error(e: &std::io::Error) {
+fn write_diagnostic(err: &mut dyn Write, e: &std::io::Error) {
     if let Some(line) = output_error_line(e) {
-        eprintln!("{line}");
+        let _ = writeln!(err, "{line}");
     }
+}
+
+fn report_output_error(e: &std::io::Error) {
+    write_diagnostic(&mut std::io::stderr(), e);
 }
 
 fn output_failed(e: &std::io::Error) -> ConnectOutcome {
@@ -249,7 +247,8 @@ async fn run_once(
     out: &mut (dyn Write + Send),
     ws_url: &str,
     api_key: &str,
-    session: &mut Session,
+    ever_joined: &mut bool,
+    backoff: &mut Backoff,
     once: bool,
     shutdown: &ShutdownToken,
     mut ack_lines: Option<&mut UnboundedReceiver<String>>,
@@ -291,120 +290,120 @@ async fn run_once(
 
     loop {
         tokio::select! {
-                    () = shutdown.cancelled() => {
-                        let _ = sink.send(Message::Close(None)).await;
-                        return ConnectOutcome::Shutdown;
+            () = shutdown.cancelled() => {
+                let _ = sink.send(Message::Close(None)).await;
+                return ConnectOutcome::Shutdown;
+            }
+            () = sleep_until(heartbeat_next) => {
+                msg_ref += 1;
+                let hb = phx_frame_null_join(&msg_ref.to_string(), "phoenix", "heartbeat", json!({}));
+                if sink.send(Message::Text(hb.into())).await.is_err() {
+                    return ConnectOutcome::Disconnected;
+                }
+                heartbeat_next = Instant::now() + HEARTBEAT_INTERVAL;
+            }
+            // Acks only make sense on a joined channel.
+            line = next_ack(&mut ack_lines), if join_acked => match line {
+                Some(id) => {
+                    let id = id.trim();
+                    if id.is_empty() {
+                        continue;
                     }
-                    () = sleep_until(heartbeat_next) => {
-                        msg_ref += 1;
-                        let hb = phx_frame_null_join(&msg_ref.to_string(), "phoenix", "heartbeat", json!({}));
-                        if sink.send(Message::Text(hb.into())).await.is_err() {
-                            return ConnectOutcome::Disconnected;
-                        }
-                        heartbeat_next = Instant::now() + HEARTBEAT_INTERVAL;
-                    }
-                    // Acks only make sense on a joined channel.
-                    line = next_ack(&mut ack_lines), if join_acked => match line {
-                        Some(id) => {
-                            let id = id.trim();
-                            if id.is_empty() {
-                                continue;
-                            }
-                            msg_ref += 1;
-                            let ack = phx_frame(JOIN_REF, &msg_ref.to_string(), TOPIC, "ack", json!({ "event_id": id }));
-                            if sink.send(Message::Text(ack.into())).await.is_err() {
-                                return ConnectOutcome::Disconnected;
-                            }
-                        }
-                        // EOF or unreadable stdin: stop reading, keep streaming.
-                        None => ack_lines = None,
-                    },
-                    frame = source.next() => {
-                        match frame {
-                            Some(Ok(Message::Text(text))) => {
-                                let parsed: Value = match serde_json::from_str(&text) {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            target: "taskfast::events",
-                                            error = %e,
-                                            "WS text frame was not valid JSON; surfacing as unparseable"
-                                        );
-                                        intake.record_unparseable();
-                                        if let Err(e) = emit_unparseable(out, &text, &e.to_string()) {
-         return output_failed(&e);
-        }
-                                        continue;
-                                    }
-                                };
-                                match classify_frame(&parsed) {
-                                    FrameKind::JoinOk => {
-                                        if !join_acked {
-                                            join_acked = true;
-                                            let sentinel = if session.ever_joined { "resumed" } else { "connected" };
-                                            session.ever_joined = true;
-                                            session.joined_this_attempt = true;
-                                            if let Err(e) = emit_sentinel(out, sentinel) {
-         return output_failed(&e);
-        }
-                                        }
-                                    }
-                                    FrameKind::JoinError => {
-                                        return ConnectOutcome::AuthFailed;
-                                    }
-                                    FrameKind::Event(payload) => {
-                                        match intake.classify_stream_payload(&payload) {
-                                            super::intake::StreamItemOutcome::Duplicate { event_id } => {
-                                                // Duplicate (replay after a lost ack): re-ack so the
-                                                // server moves on, print nothing.
-                                                msg_ref += 1;
-                                                let ack = phx_frame(JOIN_REF, &msg_ref.to_string(), TOPIC, "ack", json!({ "event_id": event_id }));
-                                                if sink.send(Message::Text(ack.into())).await.is_err() {
-                                                    return ConnectOutcome::Disconnected;
-                                                }
-                                            }
-                                            super::intake::StreamItemOutcome::Accepted { event_id } => {
-                                                if let Err(e) = emit_event(out, &payload) {
-         return output_failed(&e);
-        }
-                                                intake.mark_stream_event_seen(&event_id);
-                                                if once {
-                                                    let _ = sink.send(Message::Close(None)).await;
-                                                    return ConnectOutcome::OnceDone;
-                                                }
-                                            }
-                                            super::intake::StreamItemOutcome::Malformed { error } => {
-                                                if let Err(e) = emit_unparseable(out, &payload.to_string(), &error) {
-         return output_failed(&e);
-        }
-                                                if once {
-                                                    let _ = sink.send(Message::Close(None)).await;
-                                                    return ConnectOutcome::OnceDone;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    FrameKind::Acked(id) => {
-                                        if let Err(e) = emit_event(out, &json!({ "sentinel": "acked", "event_id": id })) {
-                                            return output_failed(&e);
-                                        }
-                                    }
-                                    FrameKind::Ignored => {}
-                                }
-                            }
-                            Some(Ok(Message::Ping(payload))) => {
-                                let _ = sink.send(Message::Pong(payload)).await;
-                            }
-                            Some(Ok(Message::Close(_))) | None => {
-                                return ConnectOutcome::Disconnected;
-                            }
-                            Some(Err(_)) => {
-                                return ConnectOutcome::Disconnected;
-                            }
-                            _ => {}
-                        }
+                    msg_ref += 1;
+                    let ack = phx_frame(JOIN_REF, &msg_ref.to_string(), TOPIC, "ack", json!({ "event_id": id }));
+                    if sink.send(Message::Text(ack.into())).await.is_err() {
+                        return ConnectOutcome::Disconnected;
                     }
                 }
+                // EOF or unreadable stdin: stop reading, keep streaming.
+                None => ack_lines = None,
+            },
+            frame = source.next() => {
+                match frame {
+                    Some(Ok(Message::Text(text))) => {
+                        let parsed: Value = match serde_json::from_str(&text) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "taskfast::events",
+                                    error = %e,
+                                    "WS text frame was not valid JSON; surfacing as unparseable"
+                                );
+                                intake.record_unparseable();
+                                if let Err(e) = emit_unparseable(out, &text, &e.to_string()) {
+                                    return output_failed(&e);
+                                }
+                                continue;
+                            }
+                        };
+                        match classify_frame(&parsed) {
+                            FrameKind::JoinOk => {
+                                if !join_acked {
+                                    join_acked = true;
+                                    let sentinel = if *ever_joined { "resumed" } else { "connected" };
+                                    *ever_joined = true;
+                                    backoff.reset();
+                                    if let Err(e) = emit_sentinel(out, sentinel) {
+                                        return output_failed(&e);
+                                    }
+                                }
+                            }
+                            FrameKind::JoinError => {
+                                return ConnectOutcome::AuthFailed;
+                            }
+                            FrameKind::Event(payload) => {
+                                match intake.classify_stream_payload(&payload) {
+                                    super::intake::StreamItemOutcome::Duplicate { event_id } => {
+                                        // Duplicate (replay after a lost ack): re-ack so the
+                                        // server moves on, print nothing.
+                                        msg_ref += 1;
+                                        let ack = phx_frame(JOIN_REF, &msg_ref.to_string(), TOPIC, "ack", json!({ "event_id": event_id }));
+                                        if sink.send(Message::Text(ack.into())).await.is_err() {
+                                            return ConnectOutcome::Disconnected;
+                                        }
+                                    }
+                                    super::intake::StreamItemOutcome::Accepted { event_id } => {
+                                        if let Err(e) = emit_event(out, &payload) {
+                                            return output_failed(&e);
+                                        }
+                                        intake.mark_stream_event_seen(&event_id);
+                                        if once {
+                                            let _ = sink.send(Message::Close(None)).await;
+                                            return ConnectOutcome::OnceDone;
+                                        }
+                                    }
+                                    super::intake::StreamItemOutcome::Malformed { error } => {
+                                        if let Err(e) = emit_unparseable(out, &payload.to_string(), &error) {
+                                            return output_failed(&e);
+                                        }
+                                        if once {
+                                            let _ = sink.send(Message::Close(None)).await;
+                                            return ConnectOutcome::OnceDone;
+                                        }
+                                    }
+                                }
+                            }
+                            FrameKind::Acked(id) => {
+                                if let Err(e) = emit_event(out, &json!({ "sentinel": "acked", "event_id": id })) {
+                                    return output_failed(&e);
+                                }
+                            }
+                            FrameKind::Ignored => {}
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        let _ = sink.send(Message::Pong(payload)).await;
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        return ConnectOutcome::Disconnected;
+                    }
+                    Some(Err(_)) => {
+                        return ConnectOutcome::Disconnected;
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }
 
@@ -955,10 +954,11 @@ mod tests {
     #[test]
     fn backoff_doubles_to_the_cap_without_a_join_and_resets_after_one() {
         let mut b = Backoff::new();
-        let waits: Vec<u64> = (0..7).map(|_| b.next_wait(false).as_secs()).collect();
+        let waits: Vec<u64> = (0..7).map(|_| b.next_wait().as_secs()).collect();
         assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30]);
-        assert_eq!(b.next_wait(true), Duration::from_secs(1));
-        assert_eq!(b.next_wait(false), Duration::from_secs(2));
+        b.reset();
+        assert_eq!(b.next_wait(), Duration::from_secs(1));
+        assert_eq!(b.next_wait(), Duration::from_secs(2));
     }
 
     #[test]
@@ -969,6 +969,93 @@ mod tests {
         assert!(output_error_line(&full)
             .unwrap()
             .starts_with("taskfast: events stream: stdout write failed:"));
+    }
+
+    struct AlwaysFails;
+
+    impl Write for AlwaysFails {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from_raw_os_error(28))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::from_raw_os_error(28))
+        }
+    }
+
+    #[test]
+    fn a_failing_diagnostic_stream_is_ignored() {
+        write_diagnostic(&mut AlwaysFails, &std::io::Error::from_raw_os_error(28));
+    }
+
+    #[allow(clippy::result_large_err)]
+    async fn join_once_then_refuse(listener: TcpListener) {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_hdr_async(tcp, |_: &Request, mut resp: Response| {
+            resp.headers_mut().insert(
+                "sec-websocket-protocol",
+                HeaderValue::from_static("taskfast.v1"),
+            );
+            Ok(resp)
+        })
+        .await
+        .unwrap();
+        while let Some(Ok(msg)) = ws.next().await {
+            let Message::Text(raw) = msg else { continue };
+            let frame: Value = serde_json::from_str(&raw).unwrap();
+            if frame[3].as_str() == Some("phx_join") {
+                let reply = json!([&frame[0], &frame[1], "agent:me", "phx_reply",
+                    { "status": "ok", "response": {} }]);
+                ws.send(text(reply)).await.unwrap();
+                break;
+            }
+        }
+        drop(ws);
+        loop {
+            let (refused, _) = listener.accept().await.unwrap();
+            drop(refused);
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_wait_grows_again_when_handshakes_fail_after_a_join() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(join_once_then_refuse(listener));
+        let cfg = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(port, cfg.path());
+        let shutdown = ShutdownToken::new();
+        let mut writer = StopOn {
+            buf: Vec::new(),
+            shutdown: shutdown.clone(),
+            needle: "\"reconnecting\"",
+            stop_after: 3,
+            times: Vec::new(),
+        };
+
+        let code = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_with(
+                &ctx,
+                StreamArgs {
+                    once: false,
+                    no_reconnect: false,
+                    ack_stdin: false,
+                },
+                &mut writer,
+                || (None, shutdown),
+            ),
+        )
+        .await
+        .expect("stream did not finish");
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        let reconnecting = sentinel_times(&writer.times, "reconnecting");
+        assert_eq!(reconnecting.len(), 3);
+        let first = reconnecting[1] - reconnecting[0];
+        let second = reconnecting[2] - reconnecting[1];
+        assert!(first < Duration::from_millis(1800), "{first:?}");
+        assert!(second > Duration::from_millis(1800), "{second:?}");
     }
 
     fn sentinel_times(

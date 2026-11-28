@@ -187,3 +187,38 @@ async fn closed_stdout_pipe_exits_6_without_recording_the_event() {
     let seen = std::fs::read_to_string(cfg.path().join("events.seen")).unwrap_or_default();
     assert!(!seen.contains(EVENT_A), "{seen:?}");
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn full_stdout_and_stderr_still_exit_6() {
+    let _serial = BINARY_TESTS.lock().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(fake_channel(listener, None));
+    let cfg = tempfile::tempdir().unwrap();
+    let full = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap()
+    };
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_taskfast"))
+        .args(["--env", "local", "--allow-custom-endpoints", "--no-trace"])
+        .args(["--api-base", &format!("http://127.0.0.1:{port}")])
+        .args(["--api-key", "test-key"])
+        .args(["events", "stream"])
+        .env("TASKFAST_CONFIG", cfg.path().join("config.json"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(full()))
+        .stderr(Stdio::from(full()))
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("stream hung with a full stdout")
+        .unwrap();
+    assert_eq!(status.code(), Some(6));
+}
