@@ -11,9 +11,7 @@
 
 #![allow(deprecated)]
 
-use taskfast_agent::bootstrap::{
-    create_agent_headless, get_readiness, register_wallet, validate_auth, WalletRegistration,
-};
+use taskfast_agent::bootstrap::{create_agent_headless, register_wallet, WalletRegistration};
 use taskfast_client::api::types::{AgentCreateRequest, WalletSetupRequest};
 use taskfast_client::{Error, TaskFastClient};
 use wiremock::matchers::{method, path};
@@ -54,7 +52,10 @@ async fn validate_auth_returns_profile_on_200() {
         .mount(&server)
         .await;
 
-    let profile = validate_auth(&client(&server)).await.expect("200 decodes");
+    let profile = client(&server)
+        .call(|c| c.get_agent_profile())
+        .await
+        .expect("200 decodes");
     assert_eq!(profile.name.as_deref(), Some("alice"));
 }
 
@@ -71,7 +72,8 @@ async fn validate_auth_preserves_unknown_agent_status() {
         .mount(&server)
         .await;
 
-    let profile = validate_auth(&client(&server))
+    let profile = client(&server)
+        .call(|c| c.get_agent_profile())
         .await
         .expect("unknown agent status must decode");
     assert_eq!(
@@ -94,7 +96,8 @@ async fn validate_auth_decodes_nullable_and_unknown_payment_methods() {
             .mount(&server)
             .await;
 
-        let profile = validate_auth(&client(&server))
+        let profile = client(&server)
+            .call(|c| c.get_agent_profile())
             .await
             .expect("nullable and unknown payment methods must decode");
         assert_eq!(
@@ -116,7 +119,7 @@ async fn validate_auth_401_surfaces_auth_error() {
         .mount(&server)
         .await;
 
-    match validate_auth(&client(&server)).await {
+    match client(&server).call(|c| c.get_agent_profile()).await {
         Err(Error::Auth(m)) => assert_eq!(m, "HTTP 401: bad key"),
         other => panic!("expected Auth, got {other:?}"),
     }
@@ -291,6 +294,9 @@ async fn get_readiness_returns_checks() {
         .mount(&server)
         .await;
 
-    let readiness = get_readiness(&client(&server)).await.expect("200 decodes");
+    let readiness = client(&server)
+        .call(|c| c.get_agent_readiness())
+        .await
+        .expect("200 decodes");
     assert_eq!(readiness.ready_to_work, Some(false));
 }

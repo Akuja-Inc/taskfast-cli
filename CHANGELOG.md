@@ -62,6 +62,14 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   `cargo install taskfast-cli` refused it. `taskfast-chains` now publishes
   with the next release.
 
+- **`events stream` stops on a failed write.** An event now counts as seen only
+  after its line is written and flushed. If a write for an event, an
+  `unparseable` record or a non-terminal sentinel (`connected`, `resumed`,
+  `reconnecting`, `acked`) fails, the stream stops with exit code 6 instead of
+  exiting 0 or reconnecting. If the server replays the event whose write failed,
+  a restarted stream prints it instead of acking it unseen. A failed `closing`
+  or `auth_failed` write is still best effort.
+
 - The `x-request-id` that joins a command's trace line to the server log is now
   recorded through one send path for the hand-written `taskfast-client` methods
   (`users/me`, artifact upload, `config/network`, `agents/me`, the events page).
@@ -96,6 +104,13 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   pre-signed voucher. The replacement command can sign the fee transfer locally.
 
 ### Removed
+
+- **BREAKING (Rust):** Removed `taskfast-agent::bootstrap::{validate_auth, get_readiness}` and
+  the six `taskfast-agent::webhooks` HTTP wrappers (`configure_webhook`, `get_webhook`,
+  `delete_webhook`, `test_webhook`, `get_subscriptions`, `update_subscriptions`). Call
+  the new `taskfast_client::TaskFastClient::call`, for example
+  `client.call(|c| c.get_agent_readiness()).await`, which unwraps the body and maps the
+  error in one place and returns the same `Error` variants. CLI commands are unchanged.
 
 - **BREAKING (Rust):** Removed the unused `taskfast-agent::poster` and
   `taskfast-agent::retry` modules, the event stream and its options and defaults,

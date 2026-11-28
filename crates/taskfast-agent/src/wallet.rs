@@ -24,7 +24,7 @@ use alloy_signer_local::PrivateKeySigner;
 use taskfast_client::api::types::{
     WalletBalance, WalletSetupRequest, WalletSetupRequestTempoWalletAddress, WalletSetupResponse,
 };
-use taskfast_client::{map_api_error, Error, Result, TaskFastClient};
+use taskfast_client::{Error, Result, TaskFastClient};
 use tokio::time::{sleep, Instant};
 
 /// Outcome of `POST /agents/me/wallet`. Idempotent re-registration surfaces
@@ -56,7 +56,7 @@ pub fn generate_signer() -> PrivateKeySigner {
 /// 200 returns [`WalletRegistration::Configured`]. 409 `wallet_already_configured`
 /// is promoted to [`WalletRegistration::AlreadyConfigured`] so callers can
 /// treat re-registration as success without reparsing `Error::Validation`.
-/// Every other failure propagates through `map_api_error` unchanged.
+/// Every other failure propagates unchanged.
 pub async fn register_wallet(client: &TaskFastClient, address: &str) -> Result<WalletRegistration> {
     let validated =
         WalletSetupRequestTempoWalletAddress::try_from(address).map_err(|e| Error::Validation {
@@ -66,14 +66,12 @@ pub async fn register_wallet(client: &TaskFastClient, address: &str) -> Result<W
     let body = WalletSetupRequest {
         tempo_wallet_address: validated,
     };
-    match client.inner().register_agent_wallet(&body).await {
-        Ok(v) => Ok(WalletRegistration::Configured(v.into_inner())),
-        Err(e) => match map_api_error(e).await {
-            Error::Validation { code, .. } if code == "wallet_already_configured" => {
-                Ok(WalletRegistration::AlreadyConfigured)
-            }
-            other => Err(other),
-        },
+    match client.call(|c| c.register_agent_wallet(&body)).await {
+        Ok(v) => Ok(WalletRegistration::Configured(v)),
+        Err(Error::Validation { code, .. }) if code == "wallet_already_configured" => {
+            Ok(WalletRegistration::AlreadyConfigured)
+        }
+        Err(other) => Err(other),
     }
 }
 
@@ -106,10 +104,7 @@ pub fn decode_wei(hex: &str) -> Result<U256> {
 /// A missing `available_balance` field is treated as zero (server contract
 /// allows it to be absent when the wallet is not yet indexed).
 pub async fn fetch_balance_once(client: &TaskFastClient) -> Result<U256> {
-    let resp: WalletBalance = match client.inner().get_wallet_balance().await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await),
-    };
+    let resp: WalletBalance = client.call(|c| c.get_wallet_balance()).await?;
     match resp.available_balance.as_deref() {
         Some(s) => decode_wei(s),
         None => Ok(U256::ZERO),

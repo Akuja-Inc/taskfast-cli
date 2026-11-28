@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Webhook registration + HMAC-SHA256 signature verification.
 //!
-//! Six HTTP wrappers around `/agents/me/webhooks*` plus one offline
-//! verifier ([`verify_signature`]) that callers use inside their HTTP
+//! One offline verifier ([`verify_signature`]) that callers use inside their HTTP
 //! handler to authenticate incoming platform deliveries without
 //! round-tripping back to `POST /webhooks/verify`.
 //!
@@ -27,80 +26,12 @@ use std::time::Duration;
 use hmac::{Hmac, KeyInit, Mac};
 use jiff::Timestamp;
 use sha2::Sha256;
-use taskfast_client::api::types::{
-    WebhookConfig, WebhookConfigRequest, WebhookSubscriptions, WebhookSubscriptionsUpdate,
-    WebhookTestSuccess,
-};
-use taskfast_client::{map_api_error, Result, TaskFastClient};
 use thiserror::Error as ThisError;
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// Default replay window matching the server-side contract.
 pub const DEFAULT_MAX_SKEW: Duration = Duration::from_mins(5);
-
-/// `PUT /agents/me/webhooks` — create or replace the webhook configuration.
-///
-/// The returned `secret` is populated **only on first creation**; subsequent
-/// PUTs return `null` per the server contract (see
-/// `spec/openapi.yaml:2264-2269`). Persist the secret the first time or it
-/// is gone forever.
-pub async fn configure_webhook(
-    client: &TaskFastClient,
-    body: &WebhookConfigRequest,
-) -> Result<WebhookConfig> {
-    match client.inner().configure_webhook(body).await {
-        Ok(v) => Ok(v.into_inner()),
-        Err(e) => Err(map_api_error(e).await),
-    }
-}
-
-/// `GET /agents/me/webhooks` — current webhook config (secret always null).
-pub async fn get_webhook(client: &TaskFastClient) -> Result<WebhookConfig> {
-    match client.inner().get_webhook_config().await {
-        Ok(v) => Ok(v.into_inner()),
-        Err(e) => Err(map_api_error(e).await),
-    }
-}
-
-/// `DELETE /agents/me/webhooks` — unsubscribe this agent from deliveries.
-pub async fn delete_webhook(client: &TaskFastClient) -> Result<()> {
-    match client.inner().delete_webhook_config().await {
-        Ok(_) => Ok(()),
-        Err(e) => Err(map_api_error(e).await),
-    }
-}
-
-/// `POST /agents/me/webhooks/test` — ask the platform to deliver a signed
-/// `test` event so the caller can confirm their verifier works end-to-end.
-pub async fn test_webhook(client: &TaskFastClient) -> Result<WebhookTestSuccess> {
-    match client.inner().test_webhook().await {
-        Ok(v) => Ok(v.into_inner()),
-        Err(e) => Err(map_api_error(e).await),
-    }
-}
-
-/// `GET /agents/me/webhooks/subscriptions` — current + available event types.
-pub async fn get_subscriptions(client: &TaskFastClient) -> Result<WebhookSubscriptions> {
-    match client.inner().get_webhook_subscriptions().await {
-        Ok(v) => Ok(v.into_inner()),
-        Err(e) => Err(map_api_error(e).await),
-    }
-}
-
-/// `PUT /agents/me/webhooks/subscriptions` — full-replace subscription list.
-pub async fn update_subscriptions(
-    client: &TaskFastClient,
-    events: Vec<String>,
-) -> Result<WebhookSubscriptions> {
-    let body = WebhookSubscriptionsUpdate {
-        subscribed_event_types: events,
-    };
-    match client.inner().update_webhook_subscriptions(&body).await {
-        Ok(v) => Ok(v.into_inner()),
-        Err(e) => Err(map_api_error(e).await),
-    }
-}
 
 /// Tunables for [`verify_signature`]. `now` is an injection seam for tests
 /// so the 5-min skew check is deterministic without freezing global time.

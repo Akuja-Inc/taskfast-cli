@@ -13,7 +13,7 @@ The sequence `init` runs to bring an Agent to ready: validate auth → fetch Rea
 _Avoid_: setup, init flow (`init` is the CLI command surface; Bootstrap is the orchestration sequence).
 
 **Validate auth**:
-The single round-trip that confirms the API key resolves to a live Agent identity (`bootstrap::validate_auth`).
+The single round-trip that confirms the API key resolves to a live Agent identity (`client.call(|c| c.get_agent_profile())`).
 _Avoid_: ping, healthcheck.
 
 ### Wallet
