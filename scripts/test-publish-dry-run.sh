@@ -3,7 +3,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 work="$(mktemp -d)"
-trap 'kill "${server:-0}" 2>/dev/null || true; rm -rf "$work"' EXIT
+server=""
+trap '[ -z "$server" ] || kill "$server" 2>/dev/null || true; rm -rf "$work"' EXIT
 
 mkdir -p "$work/bin" "$work/index/ta/sk"
 cat > "$work/bin/cargo" <<'CARGO'

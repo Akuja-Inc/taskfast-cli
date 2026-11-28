@@ -74,24 +74,16 @@ jobs:
         run: |
           set -euo pipefail
 
-          # crates.io sparse-index path for a crate name.
-          index_path() {
-            local name="$1"
-            case ${#name} in
-              1) echo "1/${name}" ;;
-              2) echo "2/${name}" ;;
-              3) echo "3/${name}" ;;
-              *) echo "${name:0:2}/${name:2:2}/${name}" ;;
-            esac
-          }
+          . scripts/registry-lookup.sh
 
           # already_published <name> <version>: true if that exact version is
-          # on the registry (queried via the public sparse index — no token).
+          # on the registry; an unreadable index fails the job.
           already_published() {
-            local name="$1" ver="$2" path
-            path="$(index_path "$name")"
-            curl -fsSL "https://index.crates.io/${path}" 2>/dev/null \
-              | grep -q "\"vers\":\"${ver}\""
+            case "$(published_state "$1" "$2")" in
+              published) return 0 ;;
+              new) return 1 ;;
+              *) echo "::error::crates.io index lookup for $1 failed; cannot tell whether $2 is published."; exit 1 ;;
+            esac
           }
 
           # publish_one <name> <version>: skip if already on the registry,

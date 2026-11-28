@@ -170,7 +170,8 @@ cargo xtask bump minor              # or: patch | major
 
 git diff Cargo.toml Cargo.lock      # review
 git commit -am "chore(release): vX.Y.Z"
-git tag taskfast-cli-vX.Y.Z         # cargo-dist Singular Announcement prefix
+scripts/publish-dry-run.sh          # must pass before tagging
+git tag -a taskfast-cli-vX.Y.Z -m "Release X.Y.Z"   # annotated; cargo-dist Singular Announcement prefix
 git push --follow-tags              # tag push triggers release.yml
 ```
 

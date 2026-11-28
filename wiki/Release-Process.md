@@ -17,18 +17,7 @@ Actions tab → **Release bump (patch)** → **Run workflow** on `main`. CI runs
 
 ## Option B — local (minor / major releases, or full manual control)
 
-```bash
-cargo xtask bump minor              # or: patch | major
-#   equivalent: make bump-{patch,minor,major}
-#   --dry-run previews; --no-lock skips the `cargo check` Cargo.lock refresh.
-
-git diff Cargo.toml Cargo.lock      # review
-git commit -am "chore(release): vX.Y.Z"
-git tag taskfast-cli-vX.Y.Z         # cargo-dist Singular Announcement prefix
-git push --follow-tags              # tag push triggers release.yml
-```
-
-> **Memory note:** `--follow-tags` only pushes *annotated* tags. If you used a lightweight tag (`git tag foo` without `-a`), run `git push origin main taskfast-cli-vX.Y.Z` explicitly.
+Follow the recipe in [`CONTRIBUTING.md — Release flow`](https://github.com/Akuja-Inc/taskfast-cli/blob/main/CONTRIBUTING.md#release-flow-maintainers-only), Option B: bump, commit, run `scripts/publish-dry-run.sh`, then create an annotated tag and push.
 
 ## Scope notes
 
