@@ -187,6 +187,14 @@ impl EventIntake {
 
     /// Ingest a single WebSocket event payload.
     pub fn ingest_stream_payload(&mut self, payload: &Value) -> StreamItemOutcome {
+        let outcome = self.classify_stream_payload(payload);
+        if let StreamItemOutcome::Accepted { event_id } = &outcome {
+            self.mark_stream_event_seen(event_id);
+        }
+        outcome
+    }
+
+    pub(super) fn classify_stream_payload(&mut self, payload: &Value) -> StreamItemOutcome {
         self.metrics.total_received += 1;
         let Some(event_id) = payload.get("event_id").and_then(Value::as_str) else {
             self.metrics.unparseable_events += 1;
@@ -214,14 +222,16 @@ impl EventIntake {
             self.metrics.accepted_events += 1;
         }
 
+        StreamItemOutcome::Accepted {
+            event_id: event_id.to_string(),
+        }
+    }
+
+    pub(super) fn mark_stream_event_seen(&mut self, event_id: &str) {
         if self.persistence_enabled {
             self.seen.commit_ids(&[event_id.to_string()]);
         } else {
             self.seen.remember(event_id);
-        }
-
-        StreamItemOutcome::Accepted {
-            event_id: event_id.to_string(),
         }
     }
 

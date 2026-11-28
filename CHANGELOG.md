@@ -55,6 +55,14 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   before broadcasting or registering, and a failed save is never reported as
   saved (gh#269). Trace writes bypass `StateStore` and stay out of scope here. `init`, `fee retry` and `webhook register` run a best-effort check (destination not a directory or other non-file, replaceable, temp file creatable; a corrupt fee ledger stops `fee retry`) before minting an agent, broadcasting or registering. It narrows the window; it does not guarantee the later save. `fee retry` no longer prints a plain retry command, always reports the broadcast hash, keeps the saved hash on `retry_not_needed` (the earlier transfer may still be in flight), only advises replaying a voucher the server did not reject, previews instead of posting on `--dry-run` when a voucher is saved, refuses a fee ledger that is not a regular file, clears only the matching saved hash when the server reports `submission_fee_hash_reused`, says a hash is saved only when it was, hardens a `.taskfast/` ancestor before creating nested state directories, serialises fee-ledger updates under a lock, clears a rejected saved hash on the explicit `--submission-fee-voucher` path too, and makes `webhook register --secret-file` fail when the secret cannot be saved (omit the flag to update without a secret write), and a `.gitignore` that is not a regular file is refused. `.taskfast/` is created `0700` and hardened through a no-follow handle.
 
+- **`events stream` stops on a failed write.** An event now counts as seen only
+  after its line is written and flushed. If a write for an event, an
+  `unparseable` record or a non-terminal sentinel (`connected`, `resumed`,
+  `reconnecting`, `acked`) fails, the stream stops with exit code 6 instead of
+  exiting 0 or reconnecting. If the server replays the event whose write failed,
+  a restarted stream prints it instead of acking it unseen. A failed `closing`
+  or `auth_failed` write is still best effort.
+
 - The `x-request-id` that joins a command's trace line to the server log is now
   recorded through one send path for the hand-written `taskfast-client` methods
   (`users/me`, artifact upload, `config/network`, `agents/me`, the events page).
