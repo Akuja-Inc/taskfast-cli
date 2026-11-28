@@ -47,6 +47,11 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Fixed
 
+- Every write under a fresh `.taskfast/` now hardens the directory (mode `0700`,
+  `.gitignore` of `*`). The events cursor, seen-ids, fee-retry and webhook-secret
+  writes used to create it with the umask default and no `.gitignore` when
+  `taskfast config` had not run first (gh#269).
+
 - `escalate sign` resolved the deployment's proxy by the environment's network
   entry instead of the server-issued chain id, so a Tempo Zone task failed
   with `chain_id_mismatch`. It now selects the entry (L1 or Zone) by chain id

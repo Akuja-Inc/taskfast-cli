@@ -120,11 +120,11 @@ impl StateStore {
 
     /// Atomic file write: writes to sibling `.tmp`, 0600 on Unix from creation, flushes, renames.
     ///
-    /// Cleans up the temporary file if write or rename fails. Does not chmod the parent directory.
+    /// Cleans up the temporary file if write or rename fails. Hardens the parent directory only when it is named `.taskfast`.
     pub fn atomic_write_file(path: &Path, contents: &[u8]) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
+                Self::ensure_dir_path(parent)?;
             }
         }
 
@@ -401,6 +401,58 @@ mod tests {
         queue.push_back("evt_3".to_string());
         store.rewrite_seen_lines(&queue).unwrap();
         assert_eq!(store.load_seen_lines().unwrap(), vec!["evt_3"]);
+    }
+
+    #[cfg(unix)]
+    fn assert_hardened_fresh_dir(dir: &Path, file: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir_mode = fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(fs::read_to_string(dir.join(".gitignore")).unwrap(), "*\n");
+        let file_mode = fs::metadata(file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_cursor_into_missing_taskfast_dir_hardens_it() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".taskfast");
+        let store = StateStore::from_config_path(&dir.join("config.json"));
+        store.write_cursor(Some("cur1")).unwrap();
+        assert_hardened_fresh_dir(&dir, &dir.join("events.cursor"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rewrite_seen_lines_into_missing_taskfast_dir_hardens_it() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".taskfast");
+        let store = StateStore::from_config_path(&dir.join("config.json"));
+        store
+            .rewrite_seen_lines(&VecDeque::from(["a".to_string()]))
+            .unwrap();
+        assert_hardened_fresh_dir(&dir, &dir.join("events.seen"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn record_pending_fee_retry_into_missing_taskfast_dir_hardens_it() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".taskfast");
+        let store = StateStore::from_config_path(&dir.join("config.json"));
+        store
+            .record_pending_fee_retry(&uuid::Uuid::new_v4(), "0xabc")
+            .unwrap();
+        assert_hardened_fresh_dir(&dir, &dir.join("fee_retries.json"));
+    }
+
+    #[test]
+    fn atomic_write_file_into_other_dir_writes_no_gitignore() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("secrets");
+        StateStore::atomic_write_file(&dir.join("hook.secret"), b"s").unwrap();
+        assert!(!dir.join(".gitignore").exists());
     }
 
     #[test]
