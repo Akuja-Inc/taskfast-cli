@@ -484,23 +484,30 @@ pub(super) async fn connect_rpc(
         CmdError::Server(format!("fetch network config from {}: {e}", ctx.base_url()))
     })?;
     let network = ctx.environment.network();
-    let entry = cfg.entry(network.as_str()).map_err(|e| {
-        CmdError::Server(format!(
-            "deployment at {} does not advertise network `{}`: {e}",
-            ctx.base_url(),
-            network.as_str()
-        ))
-    })?;
-    if entry.chain_id != chain_id {
-        return Err(CmdError::Validation {
-            code: "chain_id_mismatch".into(),
-            message: format!(
-                "task settlement_domain chain_id={chain_id} but the configured network `{}` is chain_id={}; refusing to send",
-                network.as_str(),
-                entry.chain_id
-            ),
-        });
-    }
+    let by_env = cfg.entry(network.as_str());
+    let entry = match &by_env {
+        Ok(e) if e.chain_id == chain_id => e,
+        _ => match cfg.entry_by_chain_id(chain_id) {
+            Ok((_, e)) => e,
+            Err(_) => {
+                return Err(match &by_env {
+                    Ok(e) => CmdError::Validation {
+                        code: "chain_id_mismatch".into(),
+                        message: format!(
+                            "task settlement_domain chain_id={chain_id} but the configured network `{}` is chain_id={}; refusing to send",
+                            network.as_str(),
+                            e.chain_id
+                        ),
+                    },
+                    Err(e) => CmdError::Server(format!(
+                        "deployment at {} does not advertise network `{}`: {e}",
+                        ctx.base_url(),
+                        network.as_str()
+                    )),
+                })
+            }
+        },
+    };
     let rpc_url = if let Some(url) = rpc_override {
         validate_override_rpc_url(
             url,

@@ -173,6 +173,7 @@ Poll `taskfast task get <id>` for status changes. If stuck for >5 minutes after 
 | `auth: …` on `/escrow/params` or `/escrow/finalize` | 3 | Caller is not the poster of the parent task | Use the right API key |
 | `validation [bid_not_in_accepted_pending_escrow]: …` | 7 | Bid was never `accept`ed, already finalized, or was rejected | `taskfast bid accept <bid_id>` first, or check current status |
 | `handed_in_clock_not_started: …` | 8 | `task submit` / `task remedy` was accepted (work IS handed in) but the on-chain `submitWork` failed, so the review clock did not start | **Do not submit again.** Fix the wallet/RPC cause, then `taskfast escrow submit-work <task_id>` (safe to repeat) |
+| `approved_payout_not_signed: …` | 9 | `task approve` was accepted (the task IS approved) but signing or recording the v3 payout approval failed: no wallet or wrong password, RPC read failed, or the server refused the deadline (`approval_lifetime_out_of_range`: check this machine's clock) | **Do not approve again.** Fix the wallet/RPC/clock cause, then `taskfast escrow payout-approval <task_id>` (safe to repeat; `action: "not_needed"` means a payout is already underway or paid) |
 
 ### Payment shows failed
 
