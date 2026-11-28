@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_signer_local::PrivateKeySigner;
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path, query_param};
@@ -272,8 +272,11 @@ async fn escrow_sign_refuses_an_underfunded_poster_before_any_tx() {
         matches!(&err, CmdError::Usage(m) if m.contains("poster balance")),
         "{err:?}"
     );
-    assert!(mock.sent_transactions().is_empty());
-    assert!(requests_to(&server, "/escrow/finalize").await.is_empty());
+    assert_eq!(mock.sent_transactions(), Vec::<(Address, Bytes)>::new());
+    assert_eq!(
+        requests_to(&server, "/escrow/finalize").await,
+        Vec::<Value>::new()
+    );
 }
 
 #[tokio::test]
@@ -292,7 +295,7 @@ async fn escrow_sign_balance_preflight_runs_even_when_the_allowance_check_is_ski
         matches!(&err, CmdError::Usage(m) if m.contains("poster balance")),
         "{err:?}"
     );
-    assert!(mock.sent_transactions().is_empty());
+    assert_eq!(mock.sent_transactions(), Vec::<(Address, Bytes)>::new());
 }
 
 #[tokio::test]
@@ -321,7 +324,10 @@ async fn escrow_sign_aborts_finalize_when_the_open_reverts_on_chain() {
         selectors_sent(&mock),
         vec![hex_sel(TaskEscrow::openCall::SELECTOR)]
     );
-    assert!(requests_to(&server, "/escrow/finalize").await.is_empty());
+    assert_eq!(
+        requests_to(&server, "/escrow/finalize").await,
+        Vec::<Value>::new()
+    );
 }
 
 #[tokio::test]
@@ -399,7 +405,7 @@ async fn escrow_sign_refuses_a_node_on_another_chain_before_any_tx() {
         matches!(&err, CmdError::Validation { code, .. } if code == "chain_id_mismatch"),
         "{err:?}"
     );
-    assert!(mock.sent_transactions().is_empty());
+    assert_eq!(mock.sent_transactions(), Vec::<(Address, Bytes)>::new());
 }
 
 #[tokio::test]
@@ -524,8 +530,11 @@ async fn bond_post_checks_the_balance_even_when_the_allowance_check_is_skipped()
         matches!(&err, CmdError::Usage(m) if m.contains("poster balance")),
         "{err:?}"
     );
-    assert!(mock.sent_transactions().is_empty());
-    assert!(requests_to(&server, "/stake/report").await.is_empty());
+    assert_eq!(mock.sent_transactions(), Vec::<(Address, Bytes)>::new());
+    assert_eq!(
+        requests_to(&server, "/stake/report").await,
+        Vec::<Value>::new()
+    );
 }
 
 #[tokio::test]
@@ -541,8 +550,11 @@ async fn bond_post_refuses_a_node_on_another_chain() {
         matches!(&err, CmdError::Validation { code, .. } if code == "chain_id_mismatch"),
         "{err:?}"
     );
-    assert!(mock.sent_transactions().is_empty());
-    assert!(requests_to(&server, "/stake/report").await.is_empty());
+    assert_eq!(mock.sent_transactions(), Vec::<(Address, Bytes)>::new());
+    assert_eq!(
+        requests_to(&server, "/stake/report").await,
+        Vec::<Value>::new()
+    );
 }
 
 #[tokio::test]
@@ -564,8 +576,11 @@ async fn bond_post_never_reports_a_post_that_reverted() {
         matches!(&err, CmdError::Server(m) if m.contains("execution reverted")),
         "{err:?}"
     );
-    assert!(mock.sent_transactions().is_empty());
-    assert!(requests_to(&server, "/stake/report").await.is_empty());
+    assert_eq!(mock.sent_transactions(), Vec::<(Address, Bytes)>::new());
+    assert_eq!(
+        requests_to(&server, "/stake/report").await,
+        Vec::<Value>::new()
+    );
 }
 
 // ─── escalate ─────────────────────────────────────────────────────────────
@@ -672,7 +687,7 @@ async fn escalate_sign_refuses_a_chain_the_deployment_does_not_advertise() {
         matches!(&err, CmdError::Validation { code, .. } if code == "chain_id_mismatch"),
         "{err:?}"
     );
-    assert!(mock.sent_transactions().is_empty());
+    assert_eq!(mock.sent_transactions(), Vec::<(Address, Bytes)>::new());
 }
 
 /// The by-chain-id lookup never crosses networks: a testnet environment
@@ -811,7 +826,7 @@ async fn timeout_resolve_sends_nothing_for_a_non_disputed_escrow() {
         matches!(&err, CmdError::Validation { code, .. } if code == "escrow_not_disputed"),
         "{err:?}"
     );
-    assert!(mock.sent_transactions().is_empty());
+    assert_eq!(mock.sent_transactions(), Vec::<(Address, Bytes)>::new());
 }
 
 #[tokio::test]
@@ -833,7 +848,7 @@ async fn timeout_resolve_judges_elapsed_time_by_the_chain_not_the_local_clock() 
         matches!(&err, CmdError::Validation { code, .. } if code == "dispute_timeout_not_elapsed"),
         "{err:?}"
     );
-    assert!(mock.sent_transactions().is_empty());
+    assert_eq!(mock.sent_transactions(), Vec::<(Address, Bytes)>::new());
 }
 
 // ─── escrow submit-work ───────────────────────────────────────────────────
