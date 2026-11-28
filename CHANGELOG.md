@@ -121,8 +121,9 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   submit`/`remedy`, `escalate timeout-resolve` and the new payout approval
   resolve `/config/network` by the task's `settlement_domain.chain_id` when the
   configured network is a different chain, instead of failing with
-  `chain_id_mismatch`. A chain that no entry advertises still fails with
-  `chain_id_mismatch`.
+  `chain_id_mismatch`. The fallback never crosses networks: a testnet
+  configuration still refuses a mainnet chain id (and the reverse), and a chain
+  that no entry advertises still fails with `chain_id_mismatch`.
 - **A transient RPC error is no longer read as a legacy escrow.** Only an
   execution revert (JSON-RPC code 3 or a `revert` message) or an empty result
   from `reviewWindowOf` means "no review clock". Any other RPC error (rate
