@@ -214,19 +214,17 @@ impl EventIntake {
             self.metrics.accepted_events += 1;
         }
 
-        if self.persistence_enabled {
-            self.seen.commit_ids(&[event_id.to_string()]);
-        } else {
-            self.seen.remember(event_id);
-        }
-
         StreamItemOutcome::Accepted {
             event_id: event_id.to_string(),
         }
     }
 
-    pub fn forget_stream_event(&mut self, event_id: &str) {
-        self.seen.forget(event_id, self.persistence_enabled);
+    pub fn mark_stream_event_seen(&mut self, event_id: &str) {
+        if self.persistence_enabled {
+            self.seen.commit_ids(&[event_id.to_string()]);
+        } else {
+            self.seen.remember(event_id);
+        }
     }
 
     /// Record an unparseable non-JSON text frame.
@@ -448,6 +446,7 @@ mod tests {
         match intake.ingest_stream_payload(&payload) {
             StreamItemOutcome::Accepted { event_id } => {
                 assert_eq!(event_id, "00000000-0000-0000-0000-000000000001");
+                intake.mark_stream_event_seen(&event_id);
             }
             other => panic!("expected Accepted, got {other:?}"),
         }

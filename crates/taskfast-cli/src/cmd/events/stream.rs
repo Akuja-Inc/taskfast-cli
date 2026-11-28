@@ -282,7 +282,10 @@ async fn run_once(
                                     "WS text frame was not valid JSON; surfacing as unparseable"
                                 );
                                 intake.record_unparseable();
-                                let _ = emit_unparseable(out, &text, &e.to_string());
+                                if emit_unparseable(out, &text, &e.to_string()).is_err() {
+                                    let _ = sink.send(Message::Close(None)).await;
+                                    return ConnectOutcome::OutputClosed;
+                                }
                                 continue;
                             }
                         };
@@ -310,17 +313,20 @@ async fn run_once(
                                     }
                                     super::intake::StreamItemOutcome::Accepted { event_id } => {
                                         if emit_event(out, &payload).is_err() {
-                                            intake.forget_stream_event(&event_id);
                                             let _ = sink.send(Message::Close(None)).await;
                                             return ConnectOutcome::OutputClosed;
                                         }
+                                        intake.mark_stream_event_seen(&event_id);
                                         if once {
                                             let _ = sink.send(Message::Close(None)).await;
                                             return ConnectOutcome::OnceDone;
                                         }
                                     }
                                     super::intake::StreamItemOutcome::Malformed { error } => {
-                                        let _ = emit_unparseable(out, &payload.to_string(), &error);
+                                        if emit_unparseable(out, &payload.to_string(), &error).is_err() {
+                                            let _ = sink.send(Message::Close(None)).await;
+                                            return ConnectOutcome::OutputClosed;
+                                        }
                                         if once {
                                             let _ = sink.send(Message::Close(None)).await;
                                             return ConnectOutcome::OnceDone;
@@ -521,12 +527,6 @@ struct ShutdownToken {
     flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl Default for ShutdownToken {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ShutdownToken {
     fn new() -> Self {
         Self {
@@ -546,8 +546,6 @@ impl ShutdownToken {
 
     async fn cancelled(&self) {
         let notified = self.inner.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
         if self.is_cancelled() {
             return;
         }
@@ -683,7 +681,7 @@ mod tests {
     }
 
     #[allow(clippy::result_large_err)]
-    async fn fake_channel(listener: TcpListener, replay_a: bool) {
+    async fn fake_channel(listener: TcpListener, initial: Vec<Message>) {
         let (tcp, _) = listener.accept().await.unwrap();
         let mut ws = tokio_tungstenite::accept_hdr_async(tcp, |_: &Request, mut resp: Response| {
             resp.headers_mut().insert(
@@ -704,9 +702,8 @@ mod tests {
                     let reply = json!([join_ref, msg_ref, "agent:me", "phx_reply",
                         { "status": "ok", "response": {} }]);
                     ws.send(text(reply)).await.unwrap();
-                    ws.send(push(EVENT_A)).await.unwrap();
-                    if replay_a {
-                        ws.send(push(EVENT_A)).await.unwrap();
+                    for msg in initial.clone() {
+                        ws.send(msg).await.unwrap();
                     }
                 }
                 "ack" if payload["event_id"] == EVENT_A => {
@@ -753,10 +750,6 @@ mod tests {
     }
 
     impl SharedBuf {
-        fn contains(&self, needle: &str) -> bool {
-            String::from_utf8_lossy(&self.0.lock().unwrap()).contains(needle)
-        }
-
         fn lines(&self) -> Vec<Value> {
             String::from_utf8(self.0.lock().unwrap().clone())
                 .unwrap()
@@ -766,48 +759,26 @@ mod tests {
         }
     }
 
-    struct EventLinesFail;
-
-    impl Write for EventLinesFail {
-        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-            if String::from_utf8_lossy(data).contains("event_id") {
-                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
-            }
-            Ok(data.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[tokio::test]
     async fn replayed_event_is_printed_once_and_still_acked() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(fake_channel(listener, true));
+        tokio::spawn(fake_channel(listener, vec![push(EVENT_A), push(EVENT_A)]));
         let cfg = tempfile::tempdir().unwrap();
         let ctx = ctx_for(port, cfg.path());
         let out = SharedBuf::default();
         let shutdown = ShutdownToken::new();
-        let watcher = {
-            let (out, shutdown) = (out.clone(), shutdown.clone());
-            tokio::spawn(async move {
-                while !out.contains(EVENT_B) {
-                    sleep(Duration::from_millis(10)).await;
-                }
-                shutdown.trigger();
-            })
+        let mut writer = StopOnB {
+            buf: out.clone(),
+            shutdown: shutdown.clone(),
         };
-        let mut writer = out.clone();
 
         let code = tokio::time::timeout(
             Duration::from_secs(10),
             run_with(&ctx, args(false), &mut writer, || (None, shutdown)),
         )
-        .await;
-        watcher.abort();
-        let code = code.expect("stream did not finish");
+        .await
+        .expect("stream did not finish");
 
         assert_eq!(code, ExitCode::SUCCESS);
         let lines = out.lines();
@@ -829,38 +800,16 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::result_large_err)]
     async fn stream_once_terminates_on_malformed_event_frame() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            let (tcp, _) = listener.accept().await.unwrap();
-            let mut ws =
-                tokio_tungstenite::accept_hdr_async(tcp, |_: &Request, mut resp: Response| {
-                    resp.headers_mut().insert(
-                        "sec-websocket-protocol",
-                        HeaderValue::from_static("taskfast.v1"),
-                    );
-                    Ok(resp)
-                })
-                .await
-                .unwrap();
-            while let Some(Ok(msg)) = ws.next().await {
-                let Message::Text(raw) = msg else { continue };
-                let frame: Value = serde_json::from_str(&raw).unwrap();
-                if frame[3].as_str() == Some("phx_join") {
-                    let reply = json!([&frame[0], &frame[1], "agent:me", "phx_reply",
-                        { "status": "ok", "response": {} }]);
-                    ws.send(text(reply)).await.unwrap();
-                    ws.send(text(json!(["1", null, "agent:me", "event", {
-                        "event": "corrupted_event",
-                        "data": {}
-                    }])))
-                    .await
-                    .unwrap();
-                }
-            }
-        });
+        tokio::spawn(fake_channel(
+            listener,
+            vec![text(json!(["1", null, "agent:me", "event", {
+                "event": "corrupted_event",
+                "data": {}
+            }]))],
+        ));
         let cfg = tempfile::tempdir().unwrap();
         let ctx = ctx_for(port, cfg.path());
         let mut out = SharedBuf::default();
@@ -876,27 +825,123 @@ mod tests {
         let lines = out.lines();
         assert_eq!(lines[0], json!({ "sentinel": "connected" }));
         assert_eq!(lines[1]["type"], "unparseable");
-    }
 
-    #[tokio::test]
-    async fn failed_event_write_does_not_mark_the_event_seen() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(fake_channel(listener, false));
-        let cfg = tempfile::tempdir().unwrap();
+        tokio::spawn(fake_channel(
+            listener,
+            vec![text(json!(["1", null, "agent:me", "event", {
+                "event": "corrupted_event",
+                "data": {}
+            }]))],
+        ));
         let ctx = ctx_for(port, cfg.path());
-        let mut out = EventLinesFail;
+        let mut failing = UnparseableWriteFails;
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_with(&ctx, args(true), &mut failing, || {
+                (None, ShutdownToken::new())
+            }),
+        )
+        .await
+        .expect("stream timed out waiting to exit under --once");
+        assert_eq!(code, ExitCode::from(6));
+    }
 
+    struct UnparseableWriteFails;
+
+    impl Write for UnparseableWriteFails {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            if String::from_utf8_lossy(data).contains("unparseable") {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct StopOnB {
+        buf: SharedBuf,
+        shutdown: ShutdownToken,
+    }
+
+    impl Write for StopOnB {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            let n = self.buf.write(data)?;
+            if String::from_utf8_lossy(data).contains(EVENT_B) {
+                self.shutdown.trigger();
+            }
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct EventFlushFails {
+        last_was_event: bool,
+    }
+
+    impl Write for EventFlushFails {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.last_was_event = String::from_utf8_lossy(data).contains("event_id");
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.last_was_event {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn event_is_never_persisted_when_flush_fails_and_a_fresh_run_emits_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let cfg = tempfile::tempdir().unwrap();
+        let seen_path = cfg.path().join("events.seen");
+        std::fs::write(&seen_path, "").unwrap();
+        std::fs::set_permissions(cfg.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(fake_channel(listener, vec![push(EVENT_A)]));
+        let ctx = ctx_for(port, cfg.path());
+        let mut failing = EventFlushFails {
+            last_was_event: false,
+        };
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_with(&ctx, args(true), &mut failing, || {
+                (None, ShutdownToken::new())
+            }),
+        )
+        .await
+        .expect("stream did not finish");
+        assert_eq!(code, ExitCode::from(6));
+        assert_eq!(std::fs::read_to_string(&seen_path).unwrap(), "");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(fake_channel(listener, vec![push(EVENT_A)]));
+        let ctx = ctx_for(port, cfg.path());
+        let mut out = SharedBuf::default();
         let code = tokio::time::timeout(
             Duration::from_secs(5),
             run_with(&ctx, args(true), &mut out, || (None, ShutdownToken::new())),
         )
         .await
         .expect("stream did not finish");
-
-        assert_eq!(code, ExitCode::from(6));
-        let seen = std::fs::read_to_string(cfg.path().join("events.seen")).unwrap_or_default();
-        assert!(!seen.contains(EVENT_A), "{seen:?}");
+        std::fs::set_permissions(cfg.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(out.lines()[1]["event_id"], EVENT_A);
     }
 
     #[tokio::test]

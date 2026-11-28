@@ -68,20 +68,6 @@ impl SeenIds {
         }
     }
 
-    pub fn forget(&mut self, id: &str, persist: bool) {
-        if !self.set.remove(id) {
-            return;
-        }
-        self.order.retain(|x| x != id);
-        if !persist {
-            return;
-        }
-        match self.store.rewrite_seen_lines(&self.order) {
-            Ok(()) => self.file_lines = self.order.len(),
-            Err(e) => self.warn(&format!("rewrite after forget: {e}")),
-        }
-    }
-
     /// Commit a batch of seen IDs into memory and persist to StateStore.
     pub fn commit_ids(&mut self, ids: &[String]) {
         if ids.is_empty() {
