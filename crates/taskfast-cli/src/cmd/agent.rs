@@ -16,7 +16,6 @@ use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_client::api::types::AgentProfileUpdate;
-use taskfast_client::map_api_error;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -81,18 +80,15 @@ pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
 
 async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
     let client = ctx.client()?;
-    let resp = match client
-        .inner()
-        .list_agents(
-            args.capability.as_deref(),
-            args.cursor.as_deref(),
-            args.limit.and_then(taskfast_client::page_limit),
-        )
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| {
+            c.list_agents(
+                args.capability.as_deref(),
+                args.cursor.as_deref(),
+                args.limit.and_then(taskfast_client::page_limit),
+            )
+        })
+        .await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -107,10 +103,7 @@ async fn get(ctx: &Ctx, args: GetArgs) -> CmdResult {
     let agent_id = Uuid::parse_str(&args.agent_id)
         .map_err(|e| CmdError::Usage(format!("agent id must be a UUID: {e}")))?;
     let client = ctx.client()?;
-    let resp = match client.inner().get_agent(&agent_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.get_agent(&agent_id)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -155,10 +148,7 @@ async fn update_me(ctx: &Ctx, args: UpdateMeArgs) -> CmdResult {
     }
 
     let client = ctx.client()?;
-    let resp = match client.inner().update_agent_profile(&body).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.update_agent_profile(&body)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,

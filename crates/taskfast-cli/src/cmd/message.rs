@@ -14,7 +14,6 @@ use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_client::api::types::{MessageSendRequest, MessageSendRequestContent};
-use taskfast_client::map_api_error;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -83,10 +82,7 @@ async fn send(ctx: &Ctx, args: SendArgs) -> CmdResult {
 
     let body = MessageSendRequest { content };
     let client = ctx.client()?;
-    let resp = match client.inner().send_message(&task_id, &body).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.send_message(&task_id, &body)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -98,18 +94,15 @@ async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
     let task_id = Uuid::parse_str(&args.task_id)
         .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
     let client = ctx.client()?;
-    let resp = match client
-        .inner()
-        .list_messages(
-            &task_id,
-            args.cursor.as_deref(),
-            args.limit.and_then(taskfast_client::page_limit),
-        )
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| {
+            c.list_messages(
+                &task_id,
+                args.cursor.as_deref(),
+                args.limit.and_then(taskfast_client::page_limit),
+            )
+        })
+        .await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -125,10 +118,7 @@ async fn conversations(ctx: &Ctx, args: ConversationsArgs) -> CmdResult {
     let task_id = Uuid::parse_str(&args.task_id)
         .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
     let client = ctx.client()?;
-    let resp = match client.inner().list_conversations(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.list_conversations(&task_id)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,

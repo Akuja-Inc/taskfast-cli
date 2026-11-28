@@ -17,9 +17,9 @@
 //!      under the configured [`RetryPolicy`], honoring 429 `Retry-After`
 //!      and retrying 5xx with exponential backoff.
 //!
-//! Direct access to the generated client is available via [`TaskFastClient::inner`]
-//! so callers can invoke `client.inner().get_agent_profile().await` and then
-//! pipe the result through [`map_api_error`] or the retry wrapper as they prefer.
+//! Callers invoke generated endpoints through [`TaskFastClient::call`], for example
+//! `client.call(|c| c.get_agent_profile()).await`, which unwraps the body and maps
+//! the error. [`TaskFastClient::inner`] is the raw generated client.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -124,8 +124,8 @@ impl TaskFastClient {
         self
     }
 
-    /// Direct access to the generated typed client. Use to invoke endpoint
-    /// methods; combine with [`map_api_error`] to surface typed errors.
+    /// Direct access to the generated typed client, for callers that need the raw
+    /// response. Prefer [`Self::call`] for endpoint methods.
     pub fn inner(&self) -> &api::Client {
         &self.inner
     }
@@ -136,27 +136,8 @@ impl TaskFastClient {
     }
 
     /// Run `op` under the configured retry policy. `op` receives the attempt
-    /// number (1-indexed) and should produce a typed [`Result`]. Typical use:
-    ///
-    /// ```ignore
-    /// let profile = client.call_with_retry(|_| async {
-    ///     client.inner().get_agent_profile().await
-    ///         .map(|r| r.into_inner())
-    ///         .map_err(map_api_error).await // cannot await inside map_err
-    /// }).await?;
-    /// ```
-    ///
-    /// The callsite ergonomics bite is that [`map_api_error`] is async (it
-    /// reads the response body). Callers should match the Result themselves:
-    ///
-    /// ```ignore
-    /// client.call_with_retry(|_| async {
-    ///     match client.inner().get_agent_profile().await {
-    ///         Ok(ok) => Ok(ok.into_inner()),
-    ///         Err(e) => Err(map_api_error(e).await),
-    ///     }
-    /// }).await
-    /// ```
+    /// number (1-indexed) and should produce a typed [`Result`], for example
+    /// `client.call_with_retry(|_| client.call(|c| c.get_agent_profile())).await`.
     pub async fn call_with_retry<T, F, Fut>(&self, op: F) -> Result<T>
     where
         F: FnMut(u32) -> Fut,

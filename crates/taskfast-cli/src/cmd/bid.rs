@@ -20,7 +20,6 @@ use crate::envelope::Envelope;
 use taskfast_client::api::types::{
     BidRequest, GetAgentBidsStatusItem, RejectBidBody, RejectBidBodyReason,
 };
-use taskfast_client::map_api_error;
 use taskfast_client::TaskFastClient;
 
 #[derive(Debug, Subcommand)]
@@ -139,19 +138,16 @@ async fn list_bids(
     // the `status` query param and return the page as-is. No client-side
     // post-filter, so `meta` describes the result set directly.
     let status = args.status.map(|f| vec![GetAgentBidsStatusItem::from(f)]);
-    let resp = match client
-        .inner()
-        .get_agent_bids(
-            None,
-            args.cursor.as_deref(),
-            taskfast_client::page_limit(args.limit),
-            status.as_ref(),
-        )
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| {
+            c.get_agent_bids(
+                None,
+                args.cursor.as_deref(),
+                taskfast_client::page_limit(args.limit),
+                status.as_ref(),
+            )
+        })
+        .await?;
     Ok(json!({
         "bids": resp.data,
         "meta": resp.meta,
@@ -187,10 +183,7 @@ async fn create(ctx: &Ctx, args: CreateArgs) -> CmdResult {
         price: args.price.clone(),
         pitch: args.pitch.clone(),
     };
-    let bid = match client.inner().create_bid(&task_id, &body).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let bid = client.call(|c| c.create_bid(&task_id, &body)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -214,10 +207,7 @@ async fn cancel(ctx: &Ctx, args: CancelArgs) -> CmdResult {
     }
 
     let client = ctx.client()?;
-    let bid = match client.inner().withdraw_bid(&bid_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let bid = client.call(|c| c.withdraw_bid(&bid_id)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -241,10 +231,7 @@ async fn accept(ctx: &Ctx, args: AcceptArgs) -> CmdResult {
     }
 
     let client = ctx.client()?;
-    let resp = match client.inner().accept_bid(&bid_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.accept_bid(&bid_id)).await?;
     // The 202 pending-escrow response is the happy path (gh#141): echo the
     // server's follow-up contract at the data top level so orchestrators
     // can branch on `next_action` without digging into the full bid
@@ -301,10 +288,7 @@ async fn reject(ctx: &Ctx, args: RejectArgs) -> CmdResult {
     let body = RejectBidBody {
         reason: reason_field,
     };
-    let resp = match client.inner().reject_bid(&bid_id, &body).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.reject_bid(&bid_id, &body)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
