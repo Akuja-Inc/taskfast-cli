@@ -15,6 +15,9 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Changed
 
+- Internal: the `agent`, `backer`, `bid`, `discover`, `dispute`, `message`, `payment`,
+  `platform`, `review`, `wallet` and `artifact` commands call the API through
+  `TaskFastClient::call`. Output, errors and exit codes are unchanged.
 - Every on-chain command (`escrow sign`, `escrow submit-work`,
   `escrow payout-approval` (and so `task approve`'s payout approval),
   `escalate sign`, `escalate timeout-resolve`, `bond post`, `cast send`, `post`,

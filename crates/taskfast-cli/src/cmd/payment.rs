@@ -13,7 +13,6 @@ use super::{CmdError, CmdResult, Ctx};
 use crate::envelope::Envelope;
 
 use taskfast_client::api::types::ListAgentPaymentsStatus;
-use taskfast_client::map_api_error;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -81,10 +80,7 @@ async fn get(ctx: &Ctx, args: GetArgs) -> CmdResult {
     let task_id = Uuid::parse_str(&args.task_id)
         .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
     let client = ctx.client()?;
-    let resp = match client.inner().get_task_payment(&task_id).await {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client.call(|c| c.get_task_payment(&task_id)).await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
@@ -97,20 +93,17 @@ async fn get(ctx: &Ctx, args: GetArgs) -> CmdResult {
 
 async fn list(ctx: &Ctx, args: ListArgs) -> CmdResult {
     let client = ctx.client()?;
-    let resp = match client
-        .inner()
-        .list_agent_payments(
-            args.cursor.as_deref(),
-            args.from.as_ref(),
-            taskfast_client::page_limit(args.limit),
-            args.status.map(Into::into),
-            args.to.as_ref(),
-        )
-        .await
-    {
-        Ok(v) => v.into_inner(),
-        Err(e) => return Err(map_api_error(e).await.into()),
-    };
+    let resp = client
+        .call(|c| {
+            c.list_agent_payments(
+                args.cursor.as_deref(),
+                args.from.as_ref(),
+                taskfast_client::page_limit(args.limit),
+                args.status.map(Into::into),
+                args.to.as_ref(),
+            )
+        })
+        .await?;
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
