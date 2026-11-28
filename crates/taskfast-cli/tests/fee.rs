@@ -848,5 +848,8 @@ async fn fee_retry_directory_at_retry_file_prevents_broadcast() {
         .await
         .expect_err("directory destination must be refused");
     assert!(err.to_string().contains("directory"), "{err}");
-    assert!(node.sent_transactions().is_empty());
+    assert!(
+        node.sent_transactions().is_empty(),
+        "nothing may be broadcast"
+    );
 }
