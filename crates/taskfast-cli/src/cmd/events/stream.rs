@@ -41,7 +41,7 @@
 //! Phoenix Channels v2 JSON envelope: `[join_ref, msg_ref, topic, event, payload]`.
 //! The server pushes marketplace events as `event == "event"`. Heartbeat
 //! every 30s on topic `"phoenix"`. Reconnect uses exponential backoff
-//! (1s → 2s → 4s → … → 30s cap); same backlog replays from cursor on
+//! (1s → 2s → 4s → … → 30s cap, back to 1s after a join); same backlog replays from cursor on
 //! resume (server-side state).
 
 use std::io::{BufRead, Write};
@@ -90,6 +90,34 @@ const JOIN_REF: &str = "1";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// Reconnect backoff ceiling.
 const RECONNECT_CAP: Duration = Duration::from_secs(30);
+const RECONNECT_INITIAL: Duration = Duration::from_secs(1);
+
+#[derive(Default)]
+struct Session {
+    ever_joined: bool,
+    joined_this_attempt: bool,
+}
+
+struct Backoff {
+    current: Duration,
+}
+
+impl Backoff {
+    fn new() -> Self {
+        Self {
+            current: RECONNECT_INITIAL,
+        }
+    }
+
+    fn next_wait(&mut self, joined: bool) -> Duration {
+        if joined {
+            self.current = RECONNECT_INITIAL;
+        }
+        let wait = self.current;
+        self.current = (self.current * 2).min(RECONNECT_CAP);
+        wait
+    }
+}
 
 /// Entry point. Returns a process exit code because the stream sidesteps
 /// the envelope wrapper: error envelopes would contaminate the JSONL
@@ -126,8 +154,8 @@ async fn run_with(
     };
     let (mut ack_lines, shutdown) = live();
 
-    let mut backoff = Duration::from_secs(1);
-    let mut first_connect = true;
+    let mut backoff = Backoff::new();
+    let mut session = Session::default();
 
     let mut intake = super::intake::EventIntake::from_ctx(ctx, None);
 
@@ -137,11 +165,13 @@ async fn run_with(
             return ExitCode::SUCCESS;
         }
 
+        session.joined_this_attempt = false;
+
         match run_once(
             &mut *out,
             &ws_url,
             &api_key,
-            first_connect,
+            &mut session,
             args.once,
             &shutdown,
             ack_lines.as_mut(),
@@ -174,10 +204,11 @@ async fn run_with(
             return ExitCode::from(1);
         }
 
-        if emit_sentinel(out, "reconnecting").is_err() {
+        if let Err(e) = emit_sentinel(out, "reconnecting") {
+            report_output_error(&e);
             return crate::exit::ExitCode::Server.into();
         }
-        let wait = backoff;
+        let wait = backoff.next_wait(session.joined_this_attempt);
         tokio::select! {
             () = sleep(wait) => {},
             () = shutdown.cancelled() => {
@@ -185,9 +216,25 @@ async fn run_with(
                 return ExitCode::SUCCESS;
             }
         }
-        backoff = (backoff * 2).min(RECONNECT_CAP);
-        first_connect = false;
     }
+}
+
+fn output_error_line(e: &std::io::Error) -> Option<String> {
+    if e.kind() == std::io::ErrorKind::BrokenPipe {
+        return None;
+    }
+    Some(format!("taskfast: events stream: stdout write failed: {e}"))
+}
+
+fn report_output_error(e: &std::io::Error) {
+    if let Some(line) = output_error_line(e) {
+        eprintln!("{line}");
+    }
+}
+
+fn output_failed(e: &std::io::Error) -> ConnectOutcome {
+    report_output_error(e);
+    ConnectOutcome::OutputClosed
 }
 
 enum ConnectOutcome {
@@ -202,7 +249,7 @@ async fn run_once(
     out: &mut (dyn Write + Send),
     ws_url: &str,
     api_key: &str,
-    first_connect: bool,
+    session: &mut Session,
     once: bool,
     shutdown: &ShutdownToken,
     mut ack_lines: Option<&mut UnboundedReceiver<String>>,
@@ -244,118 +291,120 @@ async fn run_once(
 
     loop {
         tokio::select! {
-            () = shutdown.cancelled() => {
-                let _ = sink.send(Message::Close(None)).await;
-                return ConnectOutcome::Shutdown;
-            }
-            () = sleep_until(heartbeat_next) => {
-                msg_ref += 1;
-                let hb = phx_frame_null_join(&msg_ref.to_string(), "phoenix", "heartbeat", json!({}));
-                if sink.send(Message::Text(hb.into())).await.is_err() {
-                    return ConnectOutcome::Disconnected;
-                }
-                heartbeat_next = Instant::now() + HEARTBEAT_INTERVAL;
-            }
-            // Acks only make sense on a joined channel.
-            line = next_ack(&mut ack_lines), if join_acked => match line {
-                Some(id) => {
-                    let id = id.trim();
-                    if id.is_empty() {
-                        continue;
+                    () = shutdown.cancelled() => {
+                        let _ = sink.send(Message::Close(None)).await;
+                        return ConnectOutcome::Shutdown;
                     }
-                    msg_ref += 1;
-                    let ack = phx_frame(JOIN_REF, &msg_ref.to_string(), TOPIC, "ack", json!({ "event_id": id }));
-                    if sink.send(Message::Text(ack.into())).await.is_err() {
-                        return ConnectOutcome::Disconnected;
+                    () = sleep_until(heartbeat_next) => {
+                        msg_ref += 1;
+                        let hb = phx_frame_null_join(&msg_ref.to_string(), "phoenix", "heartbeat", json!({}));
+                        if sink.send(Message::Text(hb.into())).await.is_err() {
+                            return ConnectOutcome::Disconnected;
+                        }
+                        heartbeat_next = Instant::now() + HEARTBEAT_INTERVAL;
                     }
-                }
-                // EOF or unreadable stdin: stop reading, keep streaming.
-                None => ack_lines = None,
-            },
-            frame = source.next() => {
-                match frame {
-                    Some(Ok(Message::Text(text))) => {
-                        let parsed: Value = match serde_json::from_str(&text) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tracing::warn!(
-                                    target: "taskfast::events",
-                                    error = %e,
-                                    "WS text frame was not valid JSON; surfacing as unparseable"
-                                );
-                                intake.record_unparseable();
-                                if emit_unparseable(out, &text, &e.to_string()).is_err() {
-                                    return ConnectOutcome::OutputClosed;
-                                }
+                    // Acks only make sense on a joined channel.
+                    line = next_ack(&mut ack_lines), if join_acked => match line {
+                        Some(id) => {
+                            let id = id.trim();
+                            if id.is_empty() {
                                 continue;
                             }
-                        };
-                        match classify_frame(&parsed) {
-                            FrameKind::JoinOk => {
-                                if !join_acked {
-                                    join_acked = true;
-                                    let sentinel = if first_connect { "connected" } else { "resumed" };
-                                    if emit_sentinel(out, sentinel).is_err() {
-                                        return ConnectOutcome::OutputClosed;
+                            msg_ref += 1;
+                            let ack = phx_frame(JOIN_REF, &msg_ref.to_string(), TOPIC, "ack", json!({ "event_id": id }));
+                            if sink.send(Message::Text(ack.into())).await.is_err() {
+                                return ConnectOutcome::Disconnected;
+                            }
+                        }
+                        // EOF or unreadable stdin: stop reading, keep streaming.
+                        None => ack_lines = None,
+                    },
+                    frame = source.next() => {
+                        match frame {
+                            Some(Ok(Message::Text(text))) => {
+                                let parsed: Value = match serde_json::from_str(&text) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            target: "taskfast::events",
+                                            error = %e,
+                                            "WS text frame was not valid JSON; surfacing as unparseable"
+                                        );
+                                        intake.record_unparseable();
+                                        if let Err(e) = emit_unparseable(out, &text, &e.to_string()) {
+         return output_failed(&e);
+        }
+                                        continue;
                                     }
+                                };
+                                match classify_frame(&parsed) {
+                                    FrameKind::JoinOk => {
+                                        if !join_acked {
+                                            join_acked = true;
+                                            let sentinel = if session.ever_joined { "resumed" } else { "connected" };
+                                            session.ever_joined = true;
+                                            session.joined_this_attempt = true;
+                                            if let Err(e) = emit_sentinel(out, sentinel) {
+         return output_failed(&e);
+        }
+                                        }
+                                    }
+                                    FrameKind::JoinError => {
+                                        return ConnectOutcome::AuthFailed;
+                                    }
+                                    FrameKind::Event(payload) => {
+                                        match intake.classify_stream_payload(&payload) {
+                                            super::intake::StreamItemOutcome::Duplicate { event_id } => {
+                                                // Duplicate (replay after a lost ack): re-ack so the
+                                                // server moves on, print nothing.
+                                                msg_ref += 1;
+                                                let ack = phx_frame(JOIN_REF, &msg_ref.to_string(), TOPIC, "ack", json!({ "event_id": event_id }));
+                                                if sink.send(Message::Text(ack.into())).await.is_err() {
+                                                    return ConnectOutcome::Disconnected;
+                                                }
+                                            }
+                                            super::intake::StreamItemOutcome::Accepted { event_id } => {
+                                                if let Err(e) = emit_event(out, &payload) {
+         return output_failed(&e);
+        }
+                                                intake.mark_stream_event_seen(&event_id);
+                                                if once {
+                                                    let _ = sink.send(Message::Close(None)).await;
+                                                    return ConnectOutcome::OnceDone;
+                                                }
+                                            }
+                                            super::intake::StreamItemOutcome::Malformed { error } => {
+                                                if let Err(e) = emit_unparseable(out, &payload.to_string(), &error) {
+         return output_failed(&e);
+        }
+                                                if once {
+                                                    let _ = sink.send(Message::Close(None)).await;
+                                                    return ConnectOutcome::OnceDone;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    FrameKind::Acked(id) => {
+                                        if let Err(e) = emit_event(out, &json!({ "sentinel": "acked", "event_id": id })) {
+                                            return output_failed(&e);
+                                        }
+                                    }
+                                    FrameKind::Ignored => {}
                                 }
                             }
-                            FrameKind::JoinError => {
-                                return ConnectOutcome::AuthFailed;
+                            Some(Ok(Message::Ping(payload))) => {
+                                let _ = sink.send(Message::Pong(payload)).await;
                             }
-                            FrameKind::Event(payload) => {
-                                match intake.classify_stream_payload(&payload) {
-                                    super::intake::StreamItemOutcome::Duplicate { event_id } => {
-                                        // Duplicate (replay after a lost ack): re-ack so the
-                                        // server moves on, print nothing.
-                                        msg_ref += 1;
-                                        let ack = phx_frame(JOIN_REF, &msg_ref.to_string(), TOPIC, "ack", json!({ "event_id": event_id }));
-                                        if sink.send(Message::Text(ack.into())).await.is_err() {
-                                            return ConnectOutcome::Disconnected;
-                                        }
-                                    }
-                                    super::intake::StreamItemOutcome::Accepted { event_id } => {
-                                        if emit_event(out, &payload).is_err() {
-                                            return ConnectOutcome::OutputClosed;
-                                        }
-                                        intake.mark_stream_event_seen(&event_id);
-                                        if once {
-                                            let _ = sink.send(Message::Close(None)).await;
-                                            return ConnectOutcome::OnceDone;
-                                        }
-                                    }
-                                    super::intake::StreamItemOutcome::Malformed { error } => {
-                                        if emit_unparseable(out, &payload.to_string(), &error).is_err() {
-                                            return ConnectOutcome::OutputClosed;
-                                        }
-                                        if once {
-                                            let _ = sink.send(Message::Close(None)).await;
-                                            return ConnectOutcome::OnceDone;
-                                        }
-                                    }
-                                }
+                            Some(Ok(Message::Close(_))) | None => {
+                                return ConnectOutcome::Disconnected;
                             }
-                            FrameKind::Acked(id) => {
-                                if emit_event(out, &json!({ "sentinel": "acked", "event_id": id })).is_err() {
-                                    return ConnectOutcome::OutputClosed;
-                                }
+                            Some(Err(_)) => {
+                                return ConnectOutcome::Disconnected;
                             }
-                            FrameKind::Ignored => {}
+                            _ => {}
                         }
                     }
-                    Some(Ok(Message::Ping(payload))) => {
-                        let _ = sink.send(Message::Pong(payload)).await;
-                    }
-                    Some(Ok(Message::Close(_))) | None => {
-                        return ConnectOutcome::Disconnected;
-                    }
-                    Some(Err(_)) => {
-                        return ConnectOutcome::Disconnected;
-                    }
-                    _ => {}
                 }
-            }
-        }
     }
 }
 
@@ -676,7 +725,8 @@ mod tests {
     }
 
     #[allow(clippy::result_large_err)]
-    async fn fake_channel(listener: TcpListener, initial: Vec<Message>) {
+    async fn fake_channel(listener: TcpListener, initial: Vec<Message>) -> Vec<Message> {
+        let mut received = Vec::new();
         let (tcp, _) = listener.accept().await.unwrap();
         let mut ws = tokio_tungstenite::accept_hdr_async(tcp, |_: &Request, mut resp: Response| {
             resp.headers_mut().insert(
@@ -689,6 +739,7 @@ mod tests {
         .unwrap();
 
         while let Some(Ok(msg)) = ws.next().await {
+            received.push(msg.clone());
             let Message::Text(raw) = msg else { continue };
             let frame: Value = serde_json::from_str(&raw).unwrap();
             let (join_ref, msg_ref, payload) = (&frame[0], &frame[1], &frame[4]);
@@ -708,6 +759,34 @@ mod tests {
                     ws.send(push(EVENT_B)).await.unwrap();
                 }
                 _ => {}
+            }
+        }
+        received
+    }
+
+    #[allow(clippy::result_large_err)]
+    async fn join_then_drop(listener: TcpListener, connections: usize) {
+        for _ in 0..connections {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws =
+                tokio_tungstenite::accept_hdr_async(tcp, |_: &Request, mut resp: Response| {
+                    resp.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        HeaderValue::from_static("taskfast.v1"),
+                    );
+                    Ok(resp)
+                })
+                .await
+                .unwrap();
+            while let Some(Ok(msg)) = ws.next().await {
+                let Message::Text(raw) = msg else { continue };
+                let frame: Value = serde_json::from_str(&raw).unwrap();
+                if frame[3].as_str() == Some("phx_join") {
+                    let reply = json!([&frame[0], &frame[1], "agent:me", "phx_reply",
+                        { "status": "ok", "response": {} }]);
+                    ws.send(text(reply)).await.unwrap();
+                    break;
+                }
             }
         }
     }
@@ -761,9 +840,12 @@ mod tests {
         let cfg = tempfile::tempdir().unwrap();
         let ctx = ctx_for(port, cfg.path());
         let shutdown = ShutdownToken::new();
-        let mut writer = StopOnB {
+        let mut writer = StopOn {
             buf: Vec::new(),
             shutdown: shutdown.clone(),
+            needle: EVENT_B,
+            stop_after: 1,
+            times: Vec::new(),
         };
 
         let code = tokio::time::timeout(
@@ -842,36 +924,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::result_large_err)]
     async fn failed_write_closes_without_a_close_frame_or_ack() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
-        tokio::spawn(async move {
-            let (tcp, _) = listener.accept().await.unwrap();
-            let mut ws =
-                tokio_tungstenite::accept_hdr_async(tcp, |_: &Request, mut resp: Response| {
-                    resp.headers_mut().insert(
-                        "sec-websocket-protocol",
-                        HeaderValue::from_static("taskfast.v1"),
-                    );
-                    Ok(resp)
-                })
-                .await
-                .unwrap();
-            while let Some(Ok(msg)) = ws.next().await {
-                if let Message::Text(raw) = &msg {
-                    let frame: Value = serde_json::from_str(raw).unwrap();
-                    if frame[3].as_str() == Some("phx_join") {
-                        let reply = json!([&frame[0], &frame[1], "agent:me", "phx_reply",
-                            { "status": "ok", "response": {} }]);
-                        ws.send(text(reply)).await.unwrap();
-                        ws.send(push(EVENT_A)).await.unwrap();
-                    }
-                }
-                let _ = tx.send(msg);
-            }
-        });
+        let server = tokio::spawn(fake_channel(listener, vec![push(EVENT_A)]));
         let cfg = tempfile::tempdir().unwrap();
         let ctx = ctx_for(port, cfg.path());
         let mut failing = EventFlushFails {
@@ -888,17 +944,125 @@ mod tests {
         .expect("stream did not finish");
         assert_eq!(code, ExitCode::from(6));
 
-        sleep(Duration::from_millis(200)).await;
-        let mut received = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            received.push(msg);
-        }
-        assert!(
-            received
-                .iter()
-                .all(|m| matches!(m, Message::Text(t) if t.contains("phx_join"))),
-            "{received:?}"
-        );
+        let received = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("server never saw the socket close")
+            .unwrap();
+        assert_eq!(received.len(), 1, "{received:?}");
+        assert!(matches!(&received[0], Message::Text(t) if t.contains("phx_join")));
+    }
+
+    #[test]
+    fn backoff_doubles_to_the_cap_without_a_join_and_resets_after_one() {
+        let mut b = Backoff::new();
+        let waits: Vec<u64> = (0..7).map(|_| b.next_wait(false).as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30]);
+        assert_eq!(b.next_wait(true), Duration::from_secs(1));
+        assert_eq!(b.next_wait(false), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn broken_pipe_is_silent_and_other_output_errors_are_reported() {
+        let broken = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        assert_eq!(output_error_line(&broken), None);
+        let full = std::io::Error::from_raw_os_error(28);
+        assert!(output_error_line(&full)
+            .unwrap()
+            .starts_with("taskfast: events stream: stdout write failed:"));
+    }
+
+    fn sentinel_times(
+        times: &[(std::time::Instant, String)],
+        kind: &str,
+    ) -> Vec<std::time::Instant> {
+        times
+            .iter()
+            .filter(|(_, l)| l.contains(&format!("\"sentinel\":\"{kind}\"")))
+            .map(|(t, _)| *t)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn reconnect_wait_resets_after_every_successful_join() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(join_then_drop(listener, 4));
+        let cfg = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(port, cfg.path());
+        let shutdown = ShutdownToken::new();
+        let mut writer = StopOn {
+            buf: Vec::new(),
+            shutdown: shutdown.clone(),
+            needle: "\"resumed\"",
+            stop_after: 3,
+            times: Vec::new(),
+        };
+
+        let code = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_with(
+                &ctx,
+                StreamArgs {
+                    once: false,
+                    no_reconnect: false,
+                    ack_stdin: false,
+                },
+                &mut writer,
+                || (None, shutdown),
+            ),
+        )
+        .await
+        .expect("stream did not finish");
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        let reconnecting = sentinel_times(&writer.times, "reconnecting");
+        let resumed = sentinel_times(&writer.times, "resumed");
+        assert!(reconnecting.len() >= 3);
+        assert_eq!(resumed.len(), 3);
+        let gap = resumed[2] - reconnecting[2];
+        assert!(gap < Duration::from_secs(3), "{gap:?}");
+    }
+
+    #[tokio::test]
+    async fn connected_is_printed_until_a_join_succeeds() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (refused, _) = listener.accept().await.unwrap();
+            drop(refused);
+            fake_channel(listener, Vec::new()).await;
+        });
+        let cfg = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(port, cfg.path());
+        let shutdown = ShutdownToken::new();
+        let mut writer = StopOn {
+            buf: Vec::new(),
+            shutdown: shutdown.clone(),
+            needle: "\"connected\"",
+            stop_after: 1,
+            times: Vec::new(),
+        };
+
+        let code = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_with(
+                &ctx,
+                StreamArgs {
+                    once: false,
+                    no_reconnect: false,
+                    ack_stdin: false,
+                },
+                &mut writer,
+                || (None, shutdown),
+            ),
+        )
+        .await
+        .expect("stream did not finish");
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        let sentinels: Vec<Value> = lines(&writer.buf);
+        assert_eq!(sentinels[0], json!({ "sentinel": "reconnecting" }));
+        assert_eq!(sentinels[1], json!({ "sentinel": "connected" }));
     }
 
     struct UnparseableWriteFails;
@@ -916,15 +1080,27 @@ mod tests {
         }
     }
 
-    struct StopOnB {
+    struct StopOn {
         buf: Vec<u8>,
         shutdown: ShutdownToken,
+        needle: &'static str,
+        stop_after: usize,
+        times: Vec<(std::time::Instant, String)>,
     }
 
-    impl Write for StopOnB {
+    impl Write for StopOn {
         fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
             self.buf.extend_from_slice(data);
-            if String::from_utf8_lossy(data).contains(EVENT_B) {
+            let line = String::from_utf8_lossy(data).to_string();
+            self.times.push((std::time::Instant::now(), line.clone()));
+            if line.contains(self.needle)
+                && self
+                    .times
+                    .iter()
+                    .filter(|(_, l)| l.contains(self.needle))
+                    .count()
+                    >= self.stop_after
+            {
                 self.shutdown.trigger();
             }
             Ok(data.len())

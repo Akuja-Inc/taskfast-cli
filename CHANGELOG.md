@@ -47,6 +47,13 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Fixed
 
+- **`events stream` reconnects promptly after a healthy connection.** The
+  reconnect wait (1 s, doubling to 30 s) now resets to 1 s once a join
+  succeeds, instead of staying at 30 s from the sixth drop of a process on.
+  The first successful join prints `connected` even if earlier connection
+  attempts failed (it printed `resumed`). A failed stdout write other than a
+  closed pipe now also writes one line to stderr before exiting 6.
+
 - **`events stream` stops on a failed write.** An event now counts as seen only
   after its line is written and flushed. If a write for an event, an
   `unparseable` record or a non-terminal sentinel (`connected`, `resumed`,
