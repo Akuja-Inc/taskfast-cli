@@ -579,8 +579,8 @@ mod tests {
 
     #[test]
     fn bump_writes_the_exact_codegen_requirement_and_every_group() {
-        let root = std::env::temp_dir().join(format!("xtask-bump-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         for krate in ["taskfast-client", "taskfast-codegen", "taskfast-chains"] {
             std::fs::create_dir_all(root.join("crates").join(krate)).unwrap();
         }
@@ -610,7 +610,7 @@ taskfast-agent = { path = "crates/taskfast-agent", version = "0.28.0" }
         }
         std::fs::write(root.join("CHANGELOG.md"), "# Changelog\n\n## Unreleased\n").unwrap();
 
-        run_bump(&root, BumpLevel::Patch, true, false).unwrap();
+        run_bump(root, BumpLevel::Patch, true, false).unwrap();
 
         let manifest: DocumentMut = std::fs::read_to_string(root.join("Cargo.toml"))
             .unwrap()
@@ -637,7 +637,6 @@ taskfast-agent = { path = "crates/taskfast-agent", version = "0.28.0" }
         };
         assert_eq!(package_version("taskfast-codegen"), "0.4.1");
         assert_eq!(package_version("taskfast-chains"), "0.1.1");
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

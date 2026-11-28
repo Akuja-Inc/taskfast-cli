@@ -33,7 +33,6 @@ git push --follow-tags              # tag push triggers release.yml
 ## Scope notes
 
 - `taskfast-cli` + `taskfast-agent` version in lockstep via `version.workspace = true`. `xtask` also inherits, but `publish = false`.
-- `taskfast-client` and `taskfast-chains` version independently — bump their own `crates/<name>/Cargo.toml` and the matching `[workspace.dependencies]` inline ref by hand when releasing those.
 - The `taskfast-cli-v` prefix is a cargo-dist *Singular Announcement*: only the `taskfast-cli` binary is built and published, even though `taskfast-agent`'s Cargo version bumped in lockstep.
 
 ## After the release

@@ -19,3 +19,6 @@ jiff.workspace = true
 clap.workspace = true
 taskfast-codegen.workspace = true
 toml_edit.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -2,8 +2,7 @@
 #
 # Click "Run workflow" in the Actions tab on the `main` branch, pick the bump
 # level (patch / minor / major — default patch). CI will:
-#   1. `cargo xtask bump <level>` (bumps every synced version site of the workspace, taskfast-client,
-#      taskfast-codegen and taskfast-chains + Cargo.lock,
+#   1. `cargo xtask bump <level>` (bumps the synced version sites + Cargo.lock,
 #      and rolls `## Unreleased` -> dated `## [X.Y.Z]` in CHANGELOG.md — gh#102)
 #   2. commit the diff as `chore(release): vX.Y.Z`
 #   3. tag `taskfast-cli-vX.Y.Z` (annotated — lightweight tags get dropped by

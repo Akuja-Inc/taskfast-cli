@@ -5574,6 +5574,7 @@ dependencies = [
  "clap",
  "jiff",
  "taskfast-codegen",
+ "tempfile",
  "toml_edit",
 ]
 
