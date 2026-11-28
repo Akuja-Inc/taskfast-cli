@@ -10,8 +10,7 @@
 //!   only a transport failure is an error. No TaskFast endpoint is
 //!   unauthenticated, so the weaker signal is intentional.
 //!
-//! Both modes are **single-attempt** — the client's [`RetryPolicy`] is
-//! bypassed on purpose. A diagnostic that silently retries hides the
+//! Both modes are **single-attempt** on purpose. A diagnostic that silently retries hides the
 //! signal the operator asked for ("is the server up *right now*?").
 //!
 //! Envelope `data` shape:
@@ -24,8 +23,6 @@
 //!   "authenticated": true
 //! }
 //! ```
-//!
-//! [`RetryPolicy`]: taskfast_client::RetryPolicy
 
 use std::time::{Duration, Instant};
 

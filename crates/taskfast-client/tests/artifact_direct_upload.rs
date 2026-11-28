@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use serde_json::json;
-use taskfast_client::{put_presigned_upload, ArtifactUpload, Error, RetryPolicy, TaskFastClient};
+use taskfast_client::{put_presigned_upload, ArtifactUpload, Error, TaskFastClient};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use wiremock::matchers::{body_json, header, method, path};
@@ -24,12 +24,7 @@ fn client(server: &MockServer) -> TaskFastClient {
 }
 
 fn client_at(base_url: &str) -> TaskFastClient {
-    TaskFastClient::from_api_key(base_url, "test-key-123")
-        .unwrap()
-        .with_retry_policy(RetryPolicy {
-            max_attempts: 3,
-            base_delay: Duration::from_millis(1),
-        })
+    TaskFastClient::from_api_key(base_url, "test-key-123").unwrap()
 }
 
 /// Write `bytes` to a fresh temp file; returns its path (for cleanup) and an

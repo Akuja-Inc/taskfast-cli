@@ -65,3 +65,21 @@ async fn call_sends_one_request_and_does_not_retry_a_503() {
     assert!(matches!(err, Error::Server(_)), "got {err:?}");
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn call_sends_one_request_and_returns_the_429_retry_after() {
+    let (server, client) = serve(
+        ResponseTemplate::new(429)
+            .insert_header("retry-after", "7")
+            .set_body_json(serde_json::json!({ "error": "rate_limited", "message": "slow" })),
+    )
+    .await;
+    let err = client.call(|c| c.get_platform_config()).await.unwrap_err();
+    match err {
+        Error::RateLimited { retry_after } => {
+            assert_eq!(retry_after, std::time::Duration::from_secs(7));
+        }
+        other => panic!("expected RateLimited, got {other:?}"),
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}

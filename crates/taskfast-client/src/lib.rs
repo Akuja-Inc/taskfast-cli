@@ -4,13 +4,12 @@
 //! `build.rs` uses `taskfast_codegen::normalize_spec` and progenitor to generate
 //! [`api`] from `spec/openapi.yaml` without changing the spec on disk.
 //!
-//! [`TaskFastClient`] wraps [`api::Client`] with authentication and retry support.
+//! [`TaskFastClient`] wraps [`api::Client`] with authentication, typed errors and correlation capture.
 //! [`map_api_error`] converts generated client errors into [`Error`].
 
 pub mod client;
 pub mod corr;
 pub mod errors;
-pub mod retry;
 
 pub use client::{
     map_api_error, put_presigned_upload, ArtifactUpload, NetworkConfigEntry, NetworkConfigResponse,
@@ -20,7 +19,6 @@ pub use client::{
 // `ClientHooks` impl in corr.rs) and is re-exported for hand-rolled callers.
 pub use corr::{record_corr, record_corr_response, take_last_corr};
 pub use errors::{Error, Result};
-pub use retry::{with_backoff, RetryPolicy};
 
 /// Re-exported so downstream crates can call the generated client's
 /// `baseurl()` / `client()` accessors — progenitor 0.11+ moved them off the
