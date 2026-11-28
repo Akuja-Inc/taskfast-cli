@@ -93,6 +93,12 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Removed
 
+- **BREAKING (Rust):** Removed the unused retry driver from `taskfast-client`: the
+  `retry` module, `RetryPolicy`, `with_backoff`, `TaskFastClient::{call_with_retry,
+  retry_policy, with_retry_policy}`. No API call was ever retried through it. The
+  artifact upload `complete` call keeps its retry loop, now bounded by a
+  monotonic deadline and tunable with `TaskFastClient::with_complete_backoff`.
+
 - **BREAKING (Rust):** Removed `taskfast-agent::bootstrap::{validate_auth, get_readiness}` and
   the six `taskfast-agent::webhooks` HTTP wrappers (`configure_webhook`, `get_webhook`,
   `delete_webhook`, `test_webhook`, `get_subscriptions`, `update_subscriptions`). Call

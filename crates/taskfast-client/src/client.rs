@@ -13,9 +13,6 @@
 //!      strips non-2xx response declarations from the spec (see
 //!      `taskfast_codegen::normalize_spec`), so every TaskFast failure arrives as
 //!      `UnexpectedResponse` — we are the single funnel.
-//!   3. **Retry** — [`TaskFastClient::call_with_retry`] runs a closure
-//!      under the configured [`RetryPolicy`], honoring 429 `Retry-After`
-//!      and retrying 5xx with exponential backoff.
 //!
 //! Callers invoke generated endpoints through [`TaskFastClient::call`], for example
 //! `client.call(|c| c.get_agent_profile()).await`, which unwraps the body and maps
@@ -32,7 +29,6 @@ use tokio::sync::OnceCell;
 
 use crate::api;
 use crate::errors::{Error, Result};
-use crate::retry::{with_backoff, RetryPolicy};
 
 /// Default connect timeout for the underlying reqwest::Client.
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -47,13 +43,15 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// Per-request timeout for upload complete: the server waits on its ingest
 /// Worker hashing the whole object, which can outlast the default 30s.
 const COMPLETE_REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
+/// First backoff between upload complete retries.
+const DEFAULT_COMPLETE_BASE_DELAY: Duration = Duration::from_millis(500);
 /// Backoff ceiling between upload complete retries.
 const MAX_COMPLETE_BACKOFF: Duration = Duration::from_secs(10);
 
 /// Authenticated TaskFast API client.
 pub struct TaskFastClient {
     inner: api::Client,
-    policy: RetryPolicy,
+    complete_base_delay: Duration,
     /// Per-client cache of the public `GET /config/network` payload.
     /// Fetched lazily on first access; immutable per deployment, so a
     /// process-lifetime cache is sufficient.
@@ -105,7 +103,7 @@ impl TaskFastClient {
 
         Ok(Self {
             inner: api::Client::new_with_client(&resolved, http),
-            policy: RetryPolicy::default(),
+            complete_base_delay: DEFAULT_COMPLETE_BASE_DELAY,
             network_cfg: OnceCell::new(),
         })
     }
@@ -118,9 +116,10 @@ impl TaskFastClient {
         self.inner.client().clone()
     }
 
-    /// Override the retry policy (default: [`RetryPolicy::default`]).
-    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
-        self.policy = policy;
+    /// Set the first backoff between [`Self::complete_artifact_upload`] retries
+    /// (default 500 ms, doubling up to a 10 s cap).
+    pub fn with_complete_backoff(mut self, base: Duration) -> Self {
+        self.complete_base_delay = base;
         self
     }
 
@@ -130,29 +129,13 @@ impl TaskFastClient {
         &self.inner
     }
 
-    /// The retry policy in effect for [`Self::call_with_retry`].
-    pub fn retry_policy(&self) -> RetryPolicy {
-        self.policy
-    }
-
-    /// Run `op` under the configured retry policy. `op` receives the attempt
-    /// number (1-indexed) and should produce a typed [`Result`], for example
-    /// `client.call_with_retry(|_| client.call(|c| c.get_agent_profile())).await`.
-    pub async fn call_with_retry<T, F, Fut>(&self, op: F) -> Result<T>
-    where
-        F: FnMut(u32) -> Fut,
-        Fut: Future<Output = Result<T>>,
-    {
-        with_backoff(self.policy, op).await
-    }
-
     /// `POST /new` — create an unclaimed poster agent with no login
     /// (gh#238, server taskfast#1617). Returns the agent's key together with
     /// the `claim_url` a person opens later to take it over, and the
     /// `expires_at` after which that key stops working.
     ///
     /// Public: build the client with [`Self::anonymous`]. Sent exactly once
-    /// and never through [`Self::call_with_retry`] — the server counts
+    /// and never retried — the server counts
     /// every request against a per-address daily limit, refused ones
     /// included, so a retry would spend the caller's quota for nothing.
     ///
@@ -283,43 +266,43 @@ impl TaskFastClient {
             task_id,
             upload_id
         );
-        let mut delay = self.policy.base_delay;
-        loop {
-            let err = match self
-                .send(
-                    self.inner
-                        .client()
-                        .post(&url)
-                        .timeout(COMPLETE_REQUEST_TIMEOUT),
-                )
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    match read_body_capped(resp, MAX_RESPONSE_BYTES).await {
-                        Ok(bytes) => return Ok(serde_json::from_slice(&bytes)?),
-                        // Headers can arrive before a disconnect or body timeout.
-                        // Recover via idempotent complete, just as for send failures.
-                        Err(err @ Error::Network(_)) => err,
-                        Err(err) => return Err(err),
+        let remaining = jiff::Timestamp::now()
+            .duration_until(expires_at)
+            .max(jiff::SignedDuration::ZERO)
+            .unsigned_abs();
+        let deadline = tokio::time::Instant::now() + remaining;
+        retry_until(
+            deadline,
+            self.complete_base_delay,
+            MAX_COMPLETE_BACKOFF,
+            || async {
+                let sent = self
+                    .send(
+                        self.inner
+                            .client()
+                            .post(&url)
+                            .timeout(COMPLETE_REQUEST_TIMEOUT),
+                    )
+                    .await;
+                match sent {
+                    Ok(resp) if resp.status().is_success() => {
+                        match read_body_capped(resp, MAX_RESPONSE_BYTES).await {
+                            Ok(bytes) => {
+                                Step::Done(serde_json::from_slice(&bytes).map_err(Error::from))
+                            }
+                            Err(err @ Error::Network(_)) => Step::Retry(err),
+                            Err(err) => Step::Done(Err(err)),
+                        }
                     }
+                    Ok(resp) if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                        Step::Retry(classify_response(resp).await)
+                    }
+                    Ok(resp) => Step::Done(Err(classify_response(resp).await)),
+                    Err(err) => Step::Retry(err),
                 }
-                Ok(resp) if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
-                    classify_response(resp).await
-                }
-                Ok(resp) => return Err(classify_response(resp).await),
-                Err(e) => e,
-            };
-            if jiff::Timestamp::now() + delay >= expires_at {
-                return Err(err);
-            }
-            tracing::warn!(
-                ?delay,
-                error = err.kind(),
-                "retrying artifact upload complete"
-            );
-            tokio::time::sleep(delay).await;
-            delay = (delay * 2).min(MAX_COMPLETE_BACKOFF);
-        }
+            },
+        )
+        .await
     }
 
     /// `GET /config/network` — per-network chain metadata.
@@ -812,4 +795,111 @@ fn display_or_status<'a>(body: &'a ErrorBody, status: &'a str) -> &'a str {
 
 fn format_status(code: u16, detail: &str) -> String {
     format!("HTTP {code}: {detail}")
+}
+
+enum Step<T> {
+    Done(Result<T>),
+    Retry(Error),
+}
+
+async fn retry_until<T, F, Fut>(
+    deadline: tokio::time::Instant,
+    base: Duration,
+    cap: Duration,
+    mut op: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Step<T>>,
+{
+    let mut delay = base;
+    loop {
+        match op().await {
+            Step::Done(result) => return result,
+            Step::Retry(err) => {
+                if tokio::time::Instant::now() + delay >= deadline {
+                    return Err(err);
+                }
+                tracing::warn!(?delay, error = err.kind(), "retrying after transient error");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(cap);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::time::Instant;
+
+    use super::{retry_until, Step};
+    use crate::errors::Error;
+
+    fn transient() -> Error {
+        Error::Server("HTTP 503".into())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_until_doubles_the_delay_to_the_cap_and_stops_before_the_deadline() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(40);
+        let mut at = Vec::new();
+        let result: crate::Result<()> = retry_until(
+            deadline,
+            Duration::from_millis(500),
+            Duration::from_secs(10),
+            || {
+                at.push(Instant::now() - start);
+                async { Step::Retry(transient()) }
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(Error::Server(_))));
+        let secs: Vec<f64> = at.iter().map(Duration::as_secs_f64).collect();
+        assert_eq!(secs, [0.0, 0.5, 1.5, 3.5, 7.5, 15.5, 25.5, 35.5]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_until_returns_a_finished_result_without_sleeping() {
+        let start = Instant::now();
+        let mut calls = 0;
+        let result = retry_until(
+            start + Duration::from_mins(1),
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+            || {
+                calls += 1;
+                let n = calls;
+                async move {
+                    if n < 3 {
+                        Step::Retry(transient())
+                    } else {
+                        Step::Done(Ok(n))
+                    }
+                }
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap(), 3);
+        assert_eq!(Instant::now() - start, Duration::from_secs(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_until_does_not_retry_a_fatal_error() {
+        let mut calls = 0;
+        let result: crate::Result<()> = retry_until(
+            Instant::now() + Duration::from_mins(1),
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+            || {
+                calls += 1;
+                async { Step::Done(Err(Error::Auth("no".into()))) }
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(Error::Auth(_))));
+        assert_eq!(calls, 1);
+    }
 }

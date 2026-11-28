@@ -67,6 +67,30 @@ async fn artifact_list_happy_path() {
 }
 
 #[tokio::test]
+async fn artifact_delete_204_reports_deleted() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/tasks/{TASK}/artifacts/{ART}")))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let envelope = run(
+        &ctx_for(&server),
+        Command::Delete(GetArgs {
+            task_id: TASK.into(),
+            artifact_id: ART.into(),
+        }),
+    )
+    .await
+    .expect("delete ok");
+    let v = env_value(&envelope);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["deleted"], true);
+    assert_eq!(v["data"]["artifact_id"], ART);
+}
+
+#[tokio::test]
 async fn artifact_delete_404_maps_to_server() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
