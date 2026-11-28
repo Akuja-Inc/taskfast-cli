@@ -187,6 +187,14 @@ impl EventIntake {
 
     /// Ingest a single WebSocket event payload.
     pub fn ingest_stream_payload(&mut self, payload: &Value) -> StreamItemOutcome {
+        let outcome = self.classify_stream_payload(payload);
+        if let StreamItemOutcome::Accepted { event_id } = &outcome {
+            self.mark_stream_event_seen(event_id);
+        }
+        outcome
+    }
+
+    pub(super) fn classify_stream_payload(&mut self, payload: &Value) -> StreamItemOutcome {
         self.metrics.total_received += 1;
         let Some(event_id) = payload.get("event_id").and_then(Value::as_str) else {
             self.metrics.unparseable_events += 1;
@@ -219,7 +227,7 @@ impl EventIntake {
         }
     }
 
-    pub fn mark_stream_event_seen(&mut self, event_id: &str) {
+    pub(super) fn mark_stream_event_seen(&mut self, event_id: &str) {
         if self.persistence_enabled {
             self.seen.commit_ids(&[event_id.to_string()]);
         } else {
@@ -446,7 +454,6 @@ mod tests {
         match intake.ingest_stream_payload(&payload) {
             StreamItemOutcome::Accepted { event_id } => {
                 assert_eq!(event_id, "00000000-0000-0000-0000-000000000001");
-                intake.mark_stream_event_seen(&event_id);
             }
             other => panic!("expected Accepted, got {other:?}"),
         }

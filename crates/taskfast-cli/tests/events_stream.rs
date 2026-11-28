@@ -38,7 +38,7 @@ fn push(event_id: &str) -> Message {
 /// Fake `AgentChannel`: join → push A → only on `ack` for A, reply and push B.
 // The handshake callback's large `Err` type is fixed by tungstenite's `Callback` trait.
 #[allow(clippy::result_large_err)]
-async fn fake_channel(listener: TcpListener, replay_a: bool) {
+async fn fake_channel(listener: TcpListener) {
     let (tcp, _) = listener.accept().await.unwrap();
     let mut ws = tokio_tungstenite::accept_hdr_async(tcp, |_: &Request, mut resp: Response| {
         // The CLI treats a handshake without this subprotocol as an auth failure.
@@ -61,10 +61,6 @@ async fn fake_channel(listener: TcpListener, replay_a: bool) {
                     { "status": "ok", "response": {} }]);
                 ws.send(text(reply)).await.unwrap();
                 ws.send(push(EVENT_A)).await.unwrap();
-                if replay_a {
-                    // Redelivery of an event whose ack was lost.
-                    ws.send(push(EVENT_A)).await.unwrap();
-                }
             }
             "ack" if payload["event_id"] == EVENT_A => {
                 let reply = json!([join_ref, msg_ref, "agent:me", "phx_reply",
@@ -92,7 +88,7 @@ async fn next_json(lines: &mut Lines<BufReader<ChildStdout>>) -> Value {
 async fn ack_stdin_acks_over_socket_and_unblocks_next_event() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    tokio::spawn(fake_channel(listener, false));
+    tokio::spawn(fake_channel(listener));
     let cfg = tempfile::tempdir().unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_taskfast"))
