@@ -11,11 +11,7 @@
 #      release.yml (cargo-dist). A default GITHUB_TOKEN push would NOT trigger
 #      another workflow (GitHub anti-loop), hence the PAT.
 #
-# Prefer local control? Run:
-#   cargo xtask bump <patch|minor|major>
-#   git commit -am "chore(release): vX.Y.Z"
-#   git tag -a taskfast-cli-vX.Y.Z -m "Release X.Y.Z"
-#   git push --follow-tags
+# Prefer local control? Follow CONTRIBUTING.md (Release flow, Option B).
 #
 # Required secret: RELEASE_PLZ_TOKEN
 #   Fine-grained PAT with `Contents: Read and write` on this repo, owned by a

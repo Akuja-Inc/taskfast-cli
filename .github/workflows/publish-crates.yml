@@ -106,11 +106,11 @@ jobs:
               return $s
             fi
 
-            echo "waiting for index propagation of ${name} ${ver}..."
-            for _ in 1 2 3 4 5 6 7 8 9 10; do
-              if already_published "$name" "$ver"; then return 0; fi
-              sleep 3
-            done
+          echo "waiting for index propagation of ${name} ${ver}..."
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if [ "$(published_state "$name" "$ver")" = "published" ]; then return 0; fi
+            sleep 3
+          done
             echo "::warning::${name} ${ver} uploaded but not yet visible on the sparse index after 30s; the next crate may fail to resolve it. Re-run the workflow if so."
           }
 
@@ -131,6 +131,10 @@ jobs:
           if [ "${DRY_RUN}" = "true" ]; then
             exec scripts/publish-dry-run.sh
           fi
+          case "${GITHUB_REF}" in
+            refs/tags/taskfast-cli-v*|refs/tags/v*) ;;
+            *) echo "::error::a real upload runs only from a release tag, not ${GITHUB_REF}. Run it from the tag, or set dry_run."; exit 1 ;;
+          esac
           for crate in ${crates}; do
             ver="$(pkg_version "$crate")"
             [ -n "$ver" ] || { echo "::error::could not resolve version for ${crate} from cargo metadata"; exit 1; }

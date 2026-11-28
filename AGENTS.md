@@ -31,14 +31,8 @@ These look like violations of the above but are intentional — don't "fix" them
 Releases are cut by **pushing an annotated tag** `taskfast-cli-vX.Y.Z`, which
 triggers `release.yml` (cargo-dist binaries), `docker.yml`, and
 `publish-crates.yml` (crates.io). The intended entry point is the `bump.yml`
-workflow (Actions → "Release bump"), or the documented local fallback:
-
-```bash
-cargo xtask bump <patch|minor|major>   # bumps versions + Cargo.lock
-git commit -am "chore(release): vX.Y.Z"
-git tag -a taskfast-cli-vX.Y.Z -m "Release X.Y.Z"
-git push --follow-tags
-```
+workflow (Actions → "Release bump"), or the local recipe in
+`CONTRIBUTING.md` (Release flow, Option B).
 
 **Cross-crate publish gotcha (load-bearing).** `taskfast-client` is on its own
 `0.x` version line and is consumed by `taskfast-cli`. `cargo publish` verifies

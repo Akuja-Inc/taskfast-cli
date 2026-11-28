@@ -13,13 +13,21 @@ index_path() {
 published_state() {
   local name="$1" ver="$2" body code
   body="$(mktemp)"
-  if ! code="$(curl -sS -o "$body" -w '%{http_code}' "${INDEX_URL}/$(index_path "$name")")"; then
+  if ! code="$(curl -sS --max-time 20 -o "$body" -w '%{http_code}' "${INDEX_URL}/$(index_path "$name")")"; then
     rm -f "$body"
     echo "error"
     return 0
   fi
   case "$code" in
-    200) if grep -q "\"vers\":\"${ver}\"" "$body"; then echo "published"; else echo "new"; fi ;;
+    200)
+      if ! jq -es 'length > 0 and all(.[]; type == "object" and has("vers"))' "$body" > /dev/null 2>&1; then
+        echo "error"
+      elif jq -es --arg v "$ver" 'any(.[]; .vers == $v)' "$body" > /dev/null 2>&1; then
+        echo "published"
+      else
+        echo "new"
+      fi
+      ;;
     404) echo "new" ;;
     *) echo "error" ;;
   esac
