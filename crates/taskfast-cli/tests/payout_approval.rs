@@ -445,6 +445,7 @@ async fn payout_approval_refuses_a_task_not_yet_approved() {
 }
 
 const ZONE_CHAIN_ID: i64 = 4_217_000;
+const MAINNET_CHAIN_ID: i64 = taskfast_chains::tempo::TEMPO_MAINNET_CHAIN_ID as i64;
 
 #[tokio::test]
 async fn tempo_zone_task_resolves_its_own_network_entry() {
@@ -583,4 +584,40 @@ async fn a_409_on_a_permanently_failed_payout_stays_an_error() {
         matches!(&err, CmdError::Validation { code, .. } if code == "payout_not_awaiting_approval"),
         "{err:?}"
     );
+}
+
+#[tokio::test]
+async fn a_testnet_config_never_falls_back_to_a_mainnet_entry() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    serve_task_on(&server, "complete", false, MAINNET_CHAIN_ID, None).await;
+    Mock::given(method("GET"))
+        .and(path("/config/network"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "networks": {
+                "testnet": {
+                    "chain_id": CHAIN_ID,
+                    "rpc_url": format!("{}/rpc", server.uri()),
+                    "wss_url": null,
+                    "explorer_url": "https://explore.testnet.tempo.xyz",
+                },
+                "mainnet": {
+                    "chain_id": MAINNET_CHAIN_ID,
+                    "rpc_url": format!("{}/rpc", server.uri()),
+                    "wss_url": null,
+                    "explorer_url": "https://explore.tempo.xyz",
+                },
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let err = standalone(&server, Some(&keys), false).await.unwrap_err();
+
+    assert!(
+        matches!(&err, CmdError::Validation { code, .. } if code == "chain_id_mismatch"),
+        "{err:?}"
+    );
+    assert_eq!(rpc_calls(&server).await, 0);
+    assert_eq!(count_posts(&server, "/payout-approval").await, 0);
 }

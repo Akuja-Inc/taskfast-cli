@@ -487,9 +487,13 @@ pub(super) async fn connect_rpc(
     let by_env = cfg.entry(network.as_str());
     let entry = match &by_env {
         Ok(e) if e.chain_id == chain_id => e,
-        _ => match cfg.entry_by_chain_id(chain_id) {
-            Ok((_, e)) => e,
-            Err(_) => {
+        _ => match cfg
+            .entry_by_chain_id(chain_id)
+            .ok()
+            .filter(|_| network_policy_for_chain_id(chain_id_u64) == network)
+        {
+            Some((_, e)) => e,
+            None => {
                 return Err(match &by_env {
                     Ok(e) => CmdError::Validation {
                         code: "chain_id_mismatch".into(),
