@@ -24,9 +24,7 @@ fn client(server: &MockServer) -> TaskFastClient {
 }
 
 fn client_at(base_url: &str) -> TaskFastClient {
-    TaskFastClient::from_api_key(base_url, "test-key-123")
-        .unwrap()
-        .with_complete_backoff(Duration::from_millis(1))
+    TaskFastClient::from_api_key(base_url, "test-key-123").unwrap()
 }
 
 /// Write `bytes` to a fresh temp file; returns its path (for cleanup) and an

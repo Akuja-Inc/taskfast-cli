@@ -44,14 +44,13 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// Worker hashing the whole object, which can outlast the default 30s.
 const COMPLETE_REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
 /// First backoff between upload complete retries.
-const DEFAULT_COMPLETE_BASE_DELAY: Duration = Duration::from_millis(500);
+const COMPLETE_BASE_DELAY: Duration = Duration::from_millis(500);
 /// Backoff ceiling between upload complete retries.
 const MAX_COMPLETE_BACKOFF: Duration = Duration::from_secs(10);
 
 /// Authenticated TaskFast API client.
 pub struct TaskFastClient {
     inner: api::Client,
-    complete_base_delay: Duration,
     /// Per-client cache of the public `GET /config/network` payload.
     /// Fetched lazily on first access; immutable per deployment, so a
     /// process-lifetime cache is sufficient.
@@ -103,7 +102,6 @@ impl TaskFastClient {
 
         Ok(Self {
             inner: api::Client::new_with_client(&resolved, http),
-            complete_base_delay: DEFAULT_COMPLETE_BASE_DELAY,
             network_cfg: OnceCell::new(),
         })
     }
@@ -114,13 +112,6 @@ impl TaskFastClient {
     /// same connection pool + default headers).
     pub fn http_client(&self) -> reqwest::Client {
         self.inner.client().clone()
-    }
-
-    /// Set the first backoff between [`Self::complete_artifact_upload`] retries
-    /// (default 500 ms, doubling up to a 10 s cap).
-    pub fn with_complete_backoff(mut self, base: Duration) -> Self {
-        self.complete_base_delay = base;
-        self
     }
 
     /// Direct access to the generated typed client, for callers that need the raw
@@ -273,7 +264,8 @@ impl TaskFastClient {
         let deadline = tokio::time::Instant::now() + remaining;
         retry_until(
             deadline,
-            self.complete_base_delay,
+            || jiff::Timestamp::now() >= expires_at,
+            COMPLETE_BASE_DELAY,
             MAX_COMPLETE_BACKOFF,
             || async {
                 let sent = self
@@ -804,6 +796,7 @@ enum Step<T> {
 
 async fn retry_until<T, F, Fut>(
     deadline: tokio::time::Instant,
+    expired: impl Fn() -> bool,
     base: Duration,
     cap: Duration,
     mut op: F,
@@ -822,6 +815,9 @@ where
                 }
                 tracing::warn!(?delay, error = err.kind(), "retrying after transient error");
                 tokio::time::sleep(delay).await;
+                if tokio::time::Instant::now() >= deadline || expired() {
+                    return Err(err);
+                }
                 delay = (delay * 2).min(cap);
             }
         }
@@ -848,6 +844,7 @@ mod tests {
         let mut at = Vec::new();
         let result: crate::Result<()> = retry_until(
             deadline,
+            || false,
             Duration::from_millis(500),
             Duration::from_secs(10),
             || {
@@ -867,6 +864,7 @@ mod tests {
         let mut calls = 0;
         let result = retry_until(
             start + Duration::from_mins(1),
+            || false,
             Duration::from_secs(1),
             Duration::from_secs(10),
             || {
@@ -891,6 +889,7 @@ mod tests {
         let mut calls = 0;
         let result: crate::Result<()> = retry_until(
             Instant::now() + Duration::from_mins(1),
+            || false,
             Duration::from_secs(1),
             Duration::from_secs(10),
             || {
@@ -900,6 +899,48 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(Error::Auth(_))));
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_until_sends_nothing_once_the_wall_clock_expiry_passes_during_the_backoff() {
+        let start = Instant::now();
+        let expired = std::cell::Cell::new(false);
+        let mut calls = 0;
+        let result: crate::Result<()> = retry_until(
+            start + Duration::from_mins(1),
+            || expired.get(),
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+            || {
+                calls += 1;
+                expired.set(true);
+                async { Step::Retry(transient()) }
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(Error::Server(_))));
+        assert_eq!(calls, 1);
+        assert_eq!(Instant::now() - start, Duration::from_secs(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_until_sends_nothing_after_a_late_wake_past_the_deadline() {
+        let start = Instant::now();
+        tokio::spawn(tokio::time::advance(Duration::from_mins(10)));
+        let mut calls = 0;
+        let result: crate::Result<()> = retry_until(
+            start + Duration::from_mins(1),
+            || false,
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+            || {
+                calls += 1;
+                async { Step::Retry(transient()) }
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(Error::Server(_))));
         assert_eq!(calls, 1);
     }
 }
