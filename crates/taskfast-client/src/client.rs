@@ -677,8 +677,7 @@ async fn classify_response(resp: reqwest::Response) -> Error {
 /// Read a non-2xx body, capped at 64 KiB. TaskFast error envelopes are
 /// `{error, message}` JSON objects — a megabyte-class body on a 4xx is an
 /// abuse signal, not a legitimate payload. Smaller cap than success bodies:
-/// error paths never carry task-list pages. Also captures the server
-/// `x-request-id` for the CLI trace (gh#85).
+/// error paths never carry task-list pages.
 async fn read_error_body(resp: reqwest::Response) -> String {
     let code = resp.status().as_u16();
     match read_body_capped(resp, 64 * 1024).await {

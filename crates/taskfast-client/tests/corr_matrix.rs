@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Correlation-id capture and clearing across every `TaskFastClient` request path.
-
+//! Correlation-id capture and clearing for the hand-written client methods.
 use std::collections::HashMap;
 
 use taskfast_client::{put_presigned_upload, take_last_corr, TaskFastClient};
@@ -15,11 +14,11 @@ fn with_id(status: u16, id: &str) -> ResponseTemplate {
         .set_body_json(serde_json::json!({}))
 }
 
-async fn closed_port_uri() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let uri = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
-    uri
+fn unreachable_port() -> (String, tokio::net::TcpSocket) {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let uri = format!("http://{}", socket.local_addr().unwrap());
+    (uri, socket)
 }
 
 #[tokio::test]
@@ -52,7 +51,7 @@ async fn correlation_is_captured_cleared_and_never_fed_by_third_parties() {
         .await;
     Mock::given(method("PUT"))
         .and(path("/stored"))
-        .respond_with(with_id(200, "r2-must-not-win"))
+        .respond_with(with_id(403, "r2-must-not-win"))
         .mount(&server)
         .await;
 
@@ -97,14 +96,14 @@ async fn correlation_is_captured_cleared_and_never_fed_by_third_parties() {
 
     let _ = client.inner().get_platform_config().await;
     let file = tempfile_with(b"x");
-    put_presigned_upload(
+    let put = put_presigned_upload(
         &format!("{}/stored", server.uri()),
         &HashMap::new(),
         file,
         1,
     )
-    .await
-    .unwrap();
+    .await;
+    assert!(put.is_err());
     assert_eq!(
         take_last_corr().as_deref(),
         Some("gen-ok"),
@@ -112,7 +111,8 @@ async fn correlation_is_captured_cleared_and_never_fed_by_third_parties() {
     );
 
     let _ = client.inner().get_platform_config().await;
-    let dead = TaskFastClient::from_api_key(&closed_port_uri().await, "k").unwrap();
+    let (dead_uri, _reserved) = unreachable_port();
+    let dead = TaskFastClient::from_api_key(&dead_uri, "k").unwrap();
     assert!(dead.get_user_profile().await.is_err());
     assert_eq!(take_last_corr(), None, "hand-rolled transport error clears");
 
