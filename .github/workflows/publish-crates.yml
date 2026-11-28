@@ -13,16 +13,17 @@
 #   taskfast-codegen -> taskfast-client -> taskfast-agent -> taskfast-cli
 #   taskfast-chains  (independent)
 #
-# Idempotency: each crate is checked against the crates.io sparse index BEFORE
-# publishing — if the exact version is already there, it is skipped. Real
-# publish failures are propagated honestly (never masked); a short index-
-# propagation wait follows each publish so the next crate in the chain can
-# resolve it.
+# Safety: the dry-run step has no publish token. Before any upload every
+# release crate version is checked against the crates.io sparse index; a
+# version already there fails the release, because the upload would skip it
+# and ship the registry copy. Only the `recover` dispatch input, run from the
+# release tag, skips versions already published, to finish a partial release.
+# The upload step alone holds the token and runs only from the release tag.
 #
 # Triggers:
-#   * workflow_dispatch (manual) — a `dry_run` input validates packaging +
-#     metadata without uploading, using one `cargo publish --workspace` so each
-#     crate is built against its sibling crates before a tag is pushed.
+#   * workflow_dispatch (manual) — `dry_run` validates packaging and metadata
+#     without uploading, building every crate against its siblings; `recover`
+#     finishes a partial release from the release tag.
 #   * push of a version tag (taskfast-cli-v* or bare vX.Y.Z) — automates the
 #     registry publish on each release, alongside the binary release.yml run.
 #
@@ -39,6 +40,10 @@ on:
         description: "Validate packaging/metadata without uploading (cargo publish --dry-run)"
         type: boolean
         default: false
+      recover:
+        description: "Recovery mode: finish a partial release by skipping versions already on crates.io (run from the release tag)"
+        type: boolean
+        default: false
   push:
     tags:
       - 'taskfast-cli-v*'
@@ -51,99 +56,24 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       CARGO_TERM_COLOR: always
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - name: Guard — CARGO_REGISTRY_TOKEN present (non-dry-run)
-        if: ${{ !inputs.dry_run && env.CARGO_REGISTRY_TOKEN == '' }}
-        run: |
-          echo "::error::CARGO_REGISTRY_TOKEN secret is not set. Add it in repo Settings -> Secrets (crates.io publish token), then re-run."
-          exit 1
+      - name: Dry-run (no publish token)
+        if: ${{ !inputs.recover || inputs.dry_run }}
+        run: scripts/publish-dry-run.sh
 
-      # Single ordered publish step. `already_published` checks the sparse
-      # index for the exact version BEFORE attempting an upload, so re-runs
-      # skip completed crates without masking real errors. `publish` uploads,
-      # then waits a few seconds for index propagation so the next crate in
-      # the chain can resolve its just-published dependency.
-      - name: Publish crates in topological order
+      - name: Upload to crates.io
+        if: ${{ !inputs.dry_run }}
         env:
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: |
-          set -euo pipefail
-
-          . scripts/registry-lookup.sh
-
-          # already_published <name> <version>: true if that exact version is
-          # on the registry; an unreadable index fails the job.
-          already_published() {
-            case "$(published_state "$1" "$2")" in
-              published) return 0 ;;
-              new) return 1 ;;
-              *) echo "::error::crates.io index lookup for $1 failed; cannot tell whether $2 is published."; exit 1 ;;
-            esac
-          }
-
-          # publish_one <name> <version>: skip if already on the registry,
-          # otherwise upload and propagate any real failure.
-          publish_one() {
-            local name="$1" ver="$2"
-
-            if already_published "$name" "$ver"; then
-              echo "::notice::${name} ${ver} already on crates.io; skipping"
-              return 0
-            fi
-
-            echo "::group::cargo publish -p ${name}"
-            local s=0
-            cargo publish -p "${name}" --locked || s=$?
-            echo "::endgroup::"
-
-            if [ $s -ne 0 ]; then
-              echo "::error::cargo publish -p ${name} failed (exit ${s})"
-              return $s
-            fi
-
-          echo "waiting for index propagation of ${name} ${ver}..."
-          for _ in 1 2 3 4 5 6 7 8 9 10; do
-            if [ "$(published_state "$name" "$ver")" = "published" ]; then return 0; fi
-            sleep 3
-          done
-            echo "::warning::${name} ${ver} uploaded but not yet visible on the sparse index after 30s; the next crate may fail to resolve it. Re-run the workflow if so."
-          }
-
-          # Resolve a crate's version from the workspace manifest. Versions used
-          # to be hardcoded here and silently went stale — the list stayed at
-          # 0.7.0 while the workspace moved on, so 0.7.1 and 0.8.0 releases were
-          # no-op "already published" skips. Reading from `cargo metadata` keeps
-          # this in lockstep with Cargo.toml automatically (gh#674 review).
-          pkg_version() {
-            cargo metadata --no-deps --format-version 1 \
-              | jq -er --arg n "$1" '.packages[] | select(.name == $n) | .version'
-          }
-
-          # Topological order is load-bearing — each crate's workspace deps must
-          # already be on the registry, so publish in this exact sequence. xtask
-          # is intentionally absent (internal, never published).
-          crates="$(release_crates)"
-          if [ "${DRY_RUN}" = "true" ]; then
-            exec scripts/publish-dry-run.sh
-          fi
-          cli_version="$(pkg_version taskfast-cli)"
-          case "${GITHUB_REF}" in
-            "refs/tags/taskfast-cli-v${cli_version}"|"refs/tags/v${cli_version}") ;;
-            *) echo "::error::a real upload runs only from the tag taskfast-cli-v${cli_version} (or v${cli_version}), not ${GITHUB_REF}. Run it from that tag, or set dry_run."; exit 1 ;;
-          esac
-          for crate in ${crates}; do
-            ver="$(pkg_version "$crate")"
-            [ -n "$ver" ] || { echo "::error::could not resolve version for ${crate} from cargo metadata"; exit 1; }
-            publish_one "$crate" "$ver"
-          done
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          RECOVER: ${{ inputs.recover }}
+        run: scripts/publish-release.sh
 
       - name: Dry-run summary
         if: ${{ inputs.dry_run }}
         run: |
           echo "::notice::Dry-run publish validation complete: every crate was packaged and built against its sibling crates, nothing uploaded."
-          echo "For the real publish, run this workflow WITHOUT dry_run (requires CARGO_REGISTRY_TOKEN + a verified email on the owning crates.io account), or push the release tag."
+          echo "For the real publish, push the release tag (requires CARGO_REGISTRY_TOKEN + a verified email on the owning crates.io account)."

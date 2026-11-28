@@ -164,7 +164,11 @@ Prerequisites (one-time repo setup):
 ### Option B — local (minor / major releases, or full manual control)
 
 ```bash
-cargo xtask bump minor              # or: patch | major
+git fetch origin \
+  && test "$(git branch --show-current)" = main \
+  && test -z "$(git status --porcelain)" \
+  && test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" \
+  && cargo xtask bump minor         # or: patch | major
 #   equivalent: make bump-{patch,minor,major}
 #   --dry-run previews; --no-lock skips the `cargo check` Cargo.lock refresh.
 
@@ -181,8 +185,10 @@ git commit -am "chore(release): vX.Y.Z" \
   `version.workspace = true`. `xtask` also inherits, but `publish = false`.
 - `taskfast-client`, `taskfast-codegen` and `taskfast-chains` each keep their
   own version line, and `cargo xtask bump` bumps them with every release. A
-  version already on crates.io is skipped without error at publish time, so an
-  unbumped crate silently keeps its old published code.
+  version already on crates.io fails the publish, so an unbumped crate cannot
+  silently keep its old published code. The `recover` input of
+  `publish-crates.yml`, run from the release tag, skips published versions to
+  finish a partial release.
 - The `taskfast-cli-v` prefix is a cargo-dist *Singular Announcement*: only the
   `taskfast-cli` binary is built and published, even though `taskfast-agent`'s
   Cargo version bumped in lockstep.

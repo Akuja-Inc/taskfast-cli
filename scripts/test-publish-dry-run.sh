@@ -84,3 +84,36 @@ rm "$work/index/ta/sk/taskfast-client"
 check "a failed index fetch fails" 1 "http://127.0.0.1:1"
 grep -q 'index lookup for taskfast-codegen failed' "$work/out.log"
 [ ! -s "$work/cargo.log" ]
+
+release() {
+  local label="$1" want="$2" ref="$3" recover="$4" rc=0
+  : > "$work/cargo.log"
+  PATH="$work/bin:$PATH" FAKE_CARGO_LOG="$work/cargo.log" CRATES_INDEX_URL="http://127.0.0.1:${port}" \
+    CARGO_REGISTRY_TOKEN=token GITHUB_REF="$ref" RECOVER="$recover" PROPAGATION_TRIES=1 PROPAGATION_SLEEP=0 \
+    "$root/scripts/publish-release.sh" > "$work/out.log" 2>&1 || rc=$?
+  if [ "$rc" != "$want" ]; then
+    echo "FAIL ${label}: exit ${rc}, want ${want}"
+    cat "$work/out.log"
+    exit 1
+  fi
+  echo "ok ${label}"
+}
+
+tag=refs/tags/taskfast-cli-v9.0.0
+
+release "a fresh release uploads every crate in dependency order" 0 "$tag" false
+[ "$(grep -c '^cargo publish' "$work/cargo.log")" = 5 ]
+[ "$(grep '^cargo publish' "$work/cargo.log" | tr '\n' ' ')" = "cargo publish -p taskfast-chains --locked cargo publish -p taskfast-codegen --locked cargo publish -p taskfast-client --locked cargo publish -p taskfast-agent --locked cargo publish -p taskfast-cli --locked " ]
+
+release "a tag for another version uploads nothing" 1 refs/tags/taskfast-cli-v9.0.1 false
+[ ! -s "$work/cargo.log" ]
+
+{ record 9.0.0; } > "$work/index/ta/sk/taskfast-client"
+release "a stale sibling version prevents any upload" 1 "$tag" false
+grep -q 'taskfast-client 9.0.0 is already on crates.io' "$work/out.log"
+[ ! -s "$work/cargo.log" ]
+
+release "recovery mode skips the published sibling and uploads the rest" 0 "$tag" true
+[ "$(grep -c '^cargo publish' "$work/cargo.log")" = 4 ]
+! grep -q 'taskfast-client' "$work/cargo.log"
+rm "$work/index/ta/sk/taskfast-client"

@@ -44,10 +44,10 @@ catch this** (they build with path deps). `cargo xtask bump` now bumps
 `taskfast-client`, `taskfast-codegen` and `taskfast-chains` in lockstep (each
 its own version line + the workspace dep requirement) to prevent this; if you
 ever bump versions by hand, do the same. This bit the v0.9.0 release (gh#85)
-and required a recovery republish. `publish-crates.yml` skips a version already
-on crates.io without error, so an unbumped crate silently keeps its old
+and required a recovery republish. `publish-crates.yml` used to skip a version already
+on crates.io without error, so an unbumped crate silently kept its old
 published code (`taskfast-chains` 0.1.0 shipped without the AlphaUSD fee rail
-for this reason). `taskfast-codegen` is pinned exactly (`=`) because its
+for this reason); it now fails unless run in recovery mode. `taskfast-codegen` is pinned exactly (`=`) because its
 normalizer runs in each published `taskfast-client`'s build script; `cargo
 xtask bump` keeps the `=`.
 

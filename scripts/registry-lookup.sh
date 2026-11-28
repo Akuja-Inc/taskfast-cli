@@ -48,3 +48,30 @@ release_crates() {
           {done: ($s.done + $ready), rest: ($s.rest | map(select(.name as $n | $ready | index($n) | not)))} end)
     | .done[]'
 }
+
+pkg_version() {
+  cargo metadata --no-deps --format-version 1 | jq -er --arg n "$1" '.packages[] | select(.name == $n) | .version'
+}
+
+pending_crates() {
+  local recover="${1:-false}" crate ver failed=0
+  for crate in $(release_crates); do
+    ver="$(pkg_version "$crate")"
+    case "$(published_state "$crate" "$ver")" in
+      new) echo "$crate" ;;
+      published)
+        if [ "$recover" = "true" ]; then
+          echo "::notice::${crate} ${ver} already on crates.io; recovery mode skips it" >&2
+        else
+          echo "::error::${crate} ${ver} is already on crates.io; the release would skip it and ship the registry copy. Run the release after the version bump, or use recovery mode to finish a partial release." >&2
+          failed=1
+        fi
+        ;;
+      *)
+        echo "::error::crates.io index lookup for ${crate} failed; cannot tell whether ${ver} is published." >&2
+        failed=1
+        ;;
+    esac
+  done
+  return "$failed"
+}
