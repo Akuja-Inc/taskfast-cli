@@ -225,6 +225,10 @@ impl EventIntake {
         }
     }
 
+    pub fn forget_stream_event(&mut self, event_id: &str) {
+        self.seen.forget(event_id, self.persistence_enabled);
+    }
+
     /// Record an unparseable non-JSON text frame.
     pub fn record_unparseable(&mut self) {
         self.metrics.unparseable_events += 1;
