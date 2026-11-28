@@ -11,6 +11,7 @@ These look like violations of the above but are intentional — don't "fix" them
 - **Client-operational tuning**: HTTP/receipt timeouts, poll cadence, retry backoff — the CLI's own runtime behavior, not protocol policy.
 - **Env→network mapping** (`crates/taskfast-cli/src/lib.rs`): transitional until the server's one-network invariant lets the CLI select the sole advertised `/config/network` entry.
 - **`taskRef` derivation** (`crates/taskfast-cli/src/cmd/bond.rs`): verifier protocol layout computed client-side because it feeds locally-signed calldata; ideally server-issued bond-post params later.
+- **Payout-approval lifetime** (`crates/taskfast-cli/src/cmd/payout_approval.rs`): a fixed 36 h, the midpoint of the server's 24-48 h window for `payout-approval`, so a client clock off by up to about 12 h still passes. Switch to a server-published bound once the API exposes one.
 - **Webhook `--default-events` list** (`crates/taskfast-cli/src/cmd/webhook.rs`): CLI convenience default for a flag, not server policy.
 
 ## Guidance

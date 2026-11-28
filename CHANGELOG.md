@@ -13,27 +13,7 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
-### Changed
-
-- `taskfast escrow sign` accepts a review-clock (v3) escrow with no open-time
-  approval: it sends `review_clock=2`, signs no `DistributionApproval` when the
-  params carry `review_window_seconds`, and finalize omits the signature and
-  deadline. Without a window the v2 behaviour is unchanged, including the
-  `server_missing_approval_deadline` abort. The dry-run and success envelopes
-  report `deadline` and `signature` as `null` on v3.
-- BREAKING (`taskfast-client`): `BidEscrowParamsResponse.poster_approval_deadline`
-  and `poster_approval_min_lifetime`, and
-  `BidEscrowFinalizeRequest.poster_approval_signature` and
-  `poster_approval_deadline`, are now `Option`. `GetBidEscrowParamsReviewClock`
-  gains `X2`, and `record_payout_approval` is new. Spec copied from server
-  d90bb3c9.
-
-### Removed
-
-- Removed beads issue tracking and its git hook integrations. Opt-in hooks
-  still run the repository checks without exporting or staging `issues.jsonl`.
-
-## [0.27.0] - 2026-11-24
+## [0.27.0] - 2026-11-28
 
 ### Added
 
@@ -64,6 +44,23 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   already on chain. It refuses before any transaction when the task is not
   `under_review`, the escrow is not `Open`, or your wallet is not the escrow's
   worker.
+- **`task approve` signs the v3 payout approval (taskfast#2044).** After the
+  server accepts the approve and the task is `complete`, the CLI reads the
+  escrow's review window from the chain. A window above 0 (a review-clock
+  escrow) signs an EIP-712 `DistributionApproval` valid for 36 hours and POSTs
+  it to `/tasks/{id}/payout-approval`; the server accepts 24 to 48 hours from
+  its own clock. Window 0 (a v2 escrow) signs nothing and reports
+  `data.payout_approval.action == "no_review_clock"`. New `--keystore`,
+  `--wallet-password-file`, `--wallet-address` and `--rpc-url` flags with the
+  same env vars as `taskfast settle`. If the approve succeeded but the approval
+  was not recorded, the command exits **9** (`approved_payout_not_signed`) and
+  the message names the retry. A 409 `payout_not_awaiting_approval` is success
+  (`action: "not_needed"`): a payout is already underway or paid.
+- **`taskfast escrow payout-approval <task_id>` (poster).** The retry path for
+  exit 9, and the way to sign when a task was approved without `task approve`
+  (auto-approve, review timeout) or an earlier approval expired unpaid. Needs
+  a `complete` task. Safe to run more than once; `--dry-run` signs and prints
+  the signature without POSTing. Do not use `taskfast settle` on a v3 escrow.
 
 ### Changed
 
@@ -92,6 +89,30 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   `taskfast-cli` and `taskfast-agent`). The CLI is unaffected: it only uses
   `TaskDraftPrepareRequestAssignmentType::default()` and never matches on
   `WebhookEvent`.
+
+- `taskfast escrow sign` accepts a review-clock (v3) escrow with no open-time
+  approval: it sends `review_clock=2`, signs no `DistributionApproval` when the
+  params carry `review_window_seconds`, and finalize omits the signature and
+  deadline. Without a window the v2 behaviour is unchanged, including the
+  `server_missing_approval_deadline` abort. The dry-run and success envelopes
+  report `deadline` and `signature` as `null` on v3.
+- BREAKING (`taskfast-client`): `BidEscrowParamsResponse.poster_approval_deadline`
+  and `poster_approval_min_lifetime`, and
+  `BidEscrowFinalizeRequest.poster_approval_signature` and
+  `poster_approval_deadline`, are now `Option`. `GetBidEscrowParamsReviewClock`
+  gains `X2`, and `record_payout_approval` is new. Spec copied from server
+  d90bb3c9.
+
+- **BREAKING (`taskfast-cli` library, minor bump on 0.x):** `cmd::task::ApproveArgs`
+  gains wallet/RPC fields (and `Default`), `cmd::escrow::Command` gains
+  `PayoutApproval`, `cmd::CmdError` gains `ApprovedPayoutNotSigned`, and
+  `exit::ExitCode` gains `ApprovedPayoutNotSigned = 9`. New public module
+  `cmd::payout_approval`.
+
+### Removed
+
+- Removed beads issue tracking and its git hook integrations. Opt-in hooks
+  still run the repository checks without exporting or staging `issues.jsonl`.
 
 ## [0.26.0] - 2026-11-24
 

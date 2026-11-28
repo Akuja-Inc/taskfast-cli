@@ -151,10 +151,27 @@ pub struct BidsArgs {
     pub limit: i64,
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Default, Parser)]
 pub struct ApproveArgs {
     /// Task UUID. Must be in `:under_review` and posted by this agent.
     pub id: String,
+
+    /// Keystore reference for the payout approval signed after approve on a
+    /// review-clock (v3) escrow (same form as `taskfast settle`).
+    #[arg(long, env = "TEMPO_KEY_SOURCE")]
+    pub keystore: Option<String>,
+
+    /// Path to keystore password file.
+    #[arg(long, env = "TASKFAST_WALLET_PASSWORD_FILE")]
+    pub wallet_password_file: Option<PathBuf>,
+
+    /// Wallet address preflight (0x-prefixed): fail if the keystore differs.
+    #[arg(long, env = "TEMPO_WALLET_ADDRESS")]
+    pub wallet_address: Option<String>,
+
+    /// Tempo RPC override. Defaults to the deployment's authenticated proxy.
+    #[arg(long, env = "TEMPO_RPC_URL")]
+    pub rpc_url: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -300,12 +317,29 @@ async fn approve(ctx: &Ctx, args: ApproveArgs) -> CmdResult {
         Ok(v) => v.into_inner(),
         Err(e) => return Err(map_api_error(e).await.into()),
     };
+    let payout_approval = if resp.status.as_deref() == Some("complete") {
+        super::payout_approval::after_approve(
+            ctx,
+            &task_id,
+            &super::escrow::WalletOpts {
+                keystore: args.keystore.as_deref(),
+                password_file: args.wallet_password_file.as_deref(),
+                wallet_address: args.wallet_address.as_deref(),
+                rpc_url: args.rpc_url.as_deref(),
+                receipt_timeout: None,
+            },
+        )
+        .await?
+    } else {
+        json!({ "action": "skipped", "reason": "approve did not leave the task complete" })
+    };
     Ok(Envelope::success(
         ctx.environment,
         ctx.dry_run,
         json!({
             "task_id": resp.task_id,
             "status": resp.status,
+            "payout_approval": payout_approval,
         }),
     ))
 }

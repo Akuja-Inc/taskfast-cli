@@ -61,6 +61,10 @@ pub enum Command {
     /// starts on chain. `task submit` / `task remedy` already do this; run it
     /// to retry after one reports `handed_in_clock_not_started`. Safe to repeat.
     SubmitWork(SubmitWorkArgs),
+    /// Poster: sign and record a 24-48 h payout approval for an approved v3
+    /// task. `task approve` already does this; run it to retry after exit 9,
+    /// or when a task was approved without `task approve`. Safe to repeat.
+    PayoutApproval(super::payout_approval::Args),
 }
 
 /// Wallet/RPC flags as for `escalate timeout-resolve`; the task must be one you work on.
@@ -138,6 +142,7 @@ pub struct SignArgs {
 pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
     match cmd {
         Command::Sign(a) => sign(ctx, a).await,
+        Command::PayoutApproval(a) => super::payout_approval::run(ctx, a).await,
         Command::SubmitWork(a) => {
             let opts = WalletOpts {
                 keystore: a.keystore.as_deref(),
@@ -777,6 +782,22 @@ fn view_calldata(escrow_id: B256, window: bool) -> Bytes {
     }
 }
 
+pub(super) async fn review_window(
+    rpc: &TempoRpcClient,
+    contract: Address,
+    escrow_id: B256,
+) -> Result<U256, CmdError> {
+    match rpc
+        .eth_call(contract, &view_calldata(escrow_id, true))
+        .await
+    {
+        Ok(b) if b.is_empty() => Ok(U256::ZERO),
+        Ok(b) => decode_u256(&b).map_err(|e| super::escalate::chain_read_err("reviewWindowOf", e)),
+        Err(taskfast_agent::tempo_rpc::RpcError::Rpc { .. }) => Ok(U256::ZERO),
+        Err(e) => Err(super::escalate::chain_read_err("reviewWindowOf", e)),
+    }
+}
+
 /// Send `submitWork` for the task's current hand-in. Returns the envelope data.
 ///
 /// Order: window read (legacy escrow, window 0, returns before any wallet is
@@ -810,20 +831,7 @@ pub(super) async fn submit_work(
         }
     };
 
-    // A contract from before the review clock has no `reviewWindowOf`: the call
-    // reverts (JSON-RPC execution error) or returns nothing. That is a legacy
-    // escrow, not a failure; transport and decode errors still are.
-    let window = match rpc
-        .eth_call(contract, &view_calldata(escrow_id, true))
-        .await
-    {
-        Ok(b) if b.is_empty() => U256::ZERO,
-        Ok(b) => {
-            decode_u256(&b).map_err(|e| super::escalate::chain_read_err("reviewWindowOf", e))?
-        }
-        Err(taskfast_agent::tempo_rpc::RpcError::Rpc { .. }) => U256::ZERO,
-        Err(e) => return Err(super::escalate::chain_read_err("reviewWindowOf", e)),
-    };
+    let window = review_window(&rpc, contract, escrow_id).await?;
     if window.is_zero() {
         return Ok(json!({
             "action": "no_review_clock",
