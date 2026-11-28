@@ -13,7 +13,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use taskfast_chains::tempo::{distribution_digest, DistributionDomain};
-use taskfast_cli::cmd::payout_approval::Args;
+use taskfast_cli::cmd::escrow::PayoutApprovalArgs;
 use taskfast_cli::cmd::task::{ApproveArgs, Command as TaskCommand};
 use taskfast_cli::cmd::{escrow, task, CmdError, Ctx};
 use taskfast_cli::exit::ExitCode;
@@ -73,6 +73,18 @@ fn fresh_keys() -> Keys {
 
 struct Chain {
     window: u64,
+    node_id: i64,
+    window_error: Option<(i64, &'static str)>,
+}
+
+impl Chain {
+    fn new(window: u64) -> Self {
+        Chain {
+            window,
+            node_id: CHAIN_ID,
+            window_error: None,
+        }
+    }
 }
 
 impl wiremock::Respond for Chain {
@@ -82,11 +94,16 @@ impl wiremock::Respond for Chain {
             ResponseTemplate::new(200).set_body_json(json!({"jsonrpc":"2.0","id":1,"result":r}))
         };
         match body["method"].as_str().unwrap() {
-            "eth_chainId" => ok(json!(format!("0x{:x}", CHAIN_ID))),
+            "eth_chainId" => ok(json!(format!("0x{:x}", self.node_id))),
             "eth_call" => {
                 let data = body["params"][0]["data"].as_str().unwrap();
                 assert!(data.starts_with("0xec853c7d"), "unexpected call {data}");
-                ok(json!(format!("0x{:064x}", self.window)))
+                match self.window_error {
+                    Some((code, message)) => ResponseTemplate::new(200).set_body_json(
+                        json!({"jsonrpc":"2.0","id":1,"error":{"code":code,"message":message}}),
+                    ),
+                    None => ok(json!(format!("0x{:064x}", self.window))),
+                }
             }
             m => panic!("unexpected rpc method {m}"),
         }
@@ -94,13 +111,24 @@ impl wiremock::Respond for Chain {
 }
 
 async fn serve_task(server: &MockServer, status: &str, first_only: bool) {
+    serve_task_on(server, status, first_only, CHAIN_ID, None).await;
+}
+
+async fn serve_task_on(
+    server: &MockServer,
+    status: &str,
+    first_only: bool,
+    chain_id: i64,
+    payment_status: Option<&str>,
+) {
     let mock = Mock::given(method("GET"))
         .and(path(format!("/tasks/{TASK_ID}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": TASK_ID,
             "status": status,
             "escrow_id": ESCROW_ID,
-            "settlement_domain": {"chain_id": CHAIN_ID, "verifying_contract": CONTRACT},
+            "settlement_domain": {"chain_id": chain_id, "verifying_contract": CONTRACT},
+            "settlement": payment_status.map(|p| json!({"payment_status": p})),
         })));
     if first_only {
         mock.up_to_n_times(1).mount(server).await;
@@ -111,6 +139,15 @@ async fn serve_task(server: &MockServer, status: &str, first_only: bool) {
 
 async fn serve(server: &MockServer, status: &str, window: u64) {
     serve_task(server, status, false).await;
+    mount_l1(server).await;
+    Mock::given(method("POST"))
+        .and(path("/rpc"))
+        .respond_with(Chain::new(window))
+        .mount(server)
+        .await;
+}
+
+async fn mount_l1(server: &MockServer) {
     Mock::given(method("GET"))
         .and(path("/config/network"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -121,11 +158,6 @@ async fn serve(server: &MockServer, status: &str, window: u64) {
                 "explorer_url": "https://explore.testnet.tempo.xyz",
             }}
         })))
-        .mount(server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/rpc"))
-        .respond_with(Chain { window })
         .mount(server)
         .await;
 }
@@ -185,7 +217,8 @@ fn approve_args(keys: Option<&Keys>) -> ApproveArgs {
         id: TASK_ID.into(),
         keystore: keys.map(|k| k.keystore.display().to_string()),
         wallet_password_file: keys.map(|k| k.password.clone()),
-        ..Default::default()
+        wallet_address: None,
+        rpc_url: None,
     }
 }
 
@@ -193,8 +226,8 @@ async fn approve(server: &MockServer, keys: Option<&Keys>) -> Result<Envelope, C
     task::run(&ctx_for(server), TaskCommand::Approve(approve_args(keys))).await
 }
 
-fn standalone_args(keys: Option<&Keys>) -> Args {
-    Args {
+fn standalone_args(keys: Option<&Keys>) -> PayoutApprovalArgs {
+    PayoutApprovalArgs {
         task_id: TASK_ID.into(),
         keystore: keys.map(|k| k.keystore.display().to_string()),
         wallet_password_file: keys.map(|k| k.password.clone()),
@@ -317,7 +350,7 @@ async fn payout_approval_409_is_not_needed_not_an_error() {
         .await;
     Mock::given(method("POST"))
         .and(path("/rpc"))
-        .respond_with(Chain { window: WINDOW })
+        .respond_with(Chain::new(WINDOW))
         .mount(&server)
         .await;
     mount_payout(
@@ -330,6 +363,7 @@ async fn payout_approval_409_is_not_needed_not_an_error() {
     let settled = val(&standalone(&server, Some(&keys), false).await.expect("409"));
     assert_eq!(settled["data"]["action"], "not_needed");
     assert_eq!(settled["data"]["note"], "already paid");
+    assert_eq!(settled["data"]["task_id"], TASK_ID);
 
     let other = MockServer::start().await;
     serve(&other, "complete", WINDOW).await;
@@ -383,6 +417,8 @@ async fn payout_approval_dry_run_signs_but_posts_nothing() {
         .expect("dry run"));
 
     assert_eq!(v["data"]["action"], "would_record_payout_approval");
+    assert_eq!(v["data"]["domain"]["chain_id"], CHAIN_ID);
+    assert_eq!(v["data"]["domain"]["verifying_contract"], CONTRACT);
     let deadline = v["data"]["deadline"].as_u64().unwrap();
     assert_in_server_window(deadline);
     assert_eq!(
@@ -406,4 +442,145 @@ async fn payout_approval_refuses_a_task_not_yet_approved() {
     );
     assert_eq!(rpc_calls(&server).await, 0);
     assert_eq!(count_posts(&server, "/payout-approval").await, 0);
+}
+
+const ZONE_CHAIN_ID: i64 = 4_217_000;
+
+#[tokio::test]
+async fn tempo_zone_task_resolves_its_own_network_entry() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    serve_task_on(&server, "complete", false, ZONE_CHAIN_ID, None).await;
+    Mock::given(method("GET"))
+        .and(path("/config/network"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "networks": {
+                "testnet": {
+                    "chain_id": CHAIN_ID,
+                    "rpc_url": format!("{}/l1", server.uri()),
+                    "wss_url": null,
+                    "explorer_url": "https://explore.testnet.tempo.xyz",
+                },
+                "tempo-zone-moderato": {
+                    "chain_id": ZONE_CHAIN_ID,
+                    "rpc_url": format!("{}/rpc", server.uri()),
+                    "wss_url": null,
+                    "explorer_url": "https://zone.example",
+                },
+            }
+        })))
+        .mount(&server)
+        .await;
+    let mut chain = Chain::new(WINDOW);
+    chain.node_id = ZONE_CHAIN_ID;
+    Mock::given(method("POST"))
+        .and(path("/rpc"))
+        .respond_with(chain)
+        .mount(&server)
+        .await;
+    mount_payout(
+        &server,
+        200,
+        json!({"task_id": TASK_ID, "poster_approval_deadline": 1}),
+    )
+    .await;
+
+    let v = val(&standalone(&server, Some(&keys), false).await.expect("zone"));
+
+    assert_eq!(v["data"]["action"], "payout_approval_recorded");
+    assert_eq!(payout_posts(&server).await.len(), 1);
+}
+
+async fn serve_with(server: &MockServer, status: &str, chain: Chain) {
+    serve_task(server, status, false).await;
+    mount_l1(server).await;
+    Mock::given(method("POST"))
+        .and(path("/rpc"))
+        .respond_with(chain)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn a_transient_rpc_error_is_not_read_as_a_legacy_escrow() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    let mut chain = Chain::new(WINDOW);
+    chain.window_error = Some((-32603, "internal error"));
+    serve_with(&server, "complete", chain).await;
+    mount_approve(&server, "complete").await;
+
+    let err = approve(&server, Some(&keys)).await.unwrap_err();
+    assert!(
+        matches!(err, CmdError::ApprovedPayoutNotSigned(_)),
+        "{err:?}"
+    );
+    let err = standalone(&server, Some(&keys), false).await.unwrap_err();
+    assert!(matches!(err, CmdError::Server(_)), "{err:?}");
+    assert_eq!(count_posts(&server, "/payout-approval").await, 0);
+}
+
+#[tokio::test]
+async fn an_execution_revert_is_a_legacy_escrow() {
+    let server = MockServer::start().await;
+    let mut chain = Chain::new(WINDOW);
+    chain.window_error = Some((3, "execution reverted"));
+    serve_with(&server, "complete", chain).await;
+
+    let v = val(&standalone(&server, None, false).await.expect("legacy"));
+
+    assert_eq!(v["data"]["action"], "no_review_clock");
+}
+
+#[tokio::test]
+async fn a_task_in_disbursement_pending_can_still_be_approved_for_payout() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    serve(&server, "disbursement_pending", WINDOW).await;
+    mount_payout(
+        &server,
+        200,
+        json!({"task_id": TASK_ID, "poster_approval_deadline": 1}),
+    )
+    .await;
+
+    let v = val(&standalone(&server, Some(&keys), false)
+        .await
+        .expect("pending"));
+
+    assert_eq!(v["data"]["action"], "payout_approval_recorded");
+    assert_eq!(payout_posts(&server).await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_409_on_a_permanently_failed_payout_stays_an_error() {
+    let server = MockServer::start().await;
+    let keys = fresh_keys();
+    serve_task_on(
+        &server,
+        "complete",
+        false,
+        CHAIN_ID,
+        Some("disbursement_failed_permanent"),
+    )
+    .await;
+    mount_l1(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/rpc"))
+        .respond_with(Chain::new(WINDOW))
+        .mount(&server)
+        .await;
+    mount_payout(
+        &server,
+        409,
+        json!({"error": "payout_not_awaiting_approval", "message": "no new approval needed"}),
+    )
+    .await;
+
+    let err = standalone(&server, Some(&keys), false).await.unwrap_err();
+
+    assert!(
+        matches!(&err, CmdError::Validation { code, .. } if code == "payout_not_awaiting_approval"),
+        "{err:?}"
+    );
 }

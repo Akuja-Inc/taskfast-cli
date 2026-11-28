@@ -49,7 +49,7 @@ use taskfast_agent::tempo_rpc::TempoRpcClient;
 use taskfast_chains::tempo::{sign_distribution, DistributionDomain};
 use taskfast_client::api::types::{
     BidEscrowFinalizeRequest, BidEscrowFinalizeRequestPosterApprovalDeadline,
-    BidEscrowParamsResponse, GetBidEscrowParamsReviewClock,
+    BidEscrowParamsResponse, GetBidEscrowParamsReviewClock, RecordPayoutApprovalBody,
 };
 use taskfast_client::{map_api_error, TaskFastClient};
 
@@ -64,7 +64,7 @@ pub enum Command {
     /// Poster: sign and record a 24-48 h payout approval for an approved v3
     /// task. `task approve` already does this; run it to retry after exit 9,
     /// or when a task was approved without `task approve`. Safe to repeat.
-    PayoutApproval(super::payout_approval::Args),
+    PayoutApproval(PayoutApprovalArgs),
 }
 
 /// Wallet/RPC flags as for `escalate timeout-resolve`; the task must be one you work on.
@@ -142,7 +142,7 @@ pub struct SignArgs {
 pub async fn run(ctx: &Ctx, cmd: Command) -> CmdResult {
     match cmd {
         Command::Sign(a) => sign(ctx, a).await,
-        Command::PayoutApproval(a) => super::payout_approval::run(ctx, a).await,
+        Command::PayoutApproval(a) => payout_approval(ctx, a).await,
         Command::SubmitWork(a) => {
             let opts = WalletOpts {
                 keystore: a.keystore.as_deref(),
@@ -782,7 +782,7 @@ fn view_calldata(escrow_id: B256, window: bool) -> Bytes {
     }
 }
 
-pub(super) async fn review_window(
+async fn review_window(
     rpc: &TempoRpcClient,
     contract: Address,
     escrow_id: B256,
@@ -793,7 +793,11 @@ pub(super) async fn review_window(
     {
         Ok(b) if b.is_empty() => Ok(U256::ZERO),
         Ok(b) => decode_u256(&b).map_err(|e| super::escalate::chain_read_err("reviewWindowOf", e)),
-        Err(taskfast_agent::tempo_rpc::RpcError::Rpc { .. }) => Ok(U256::ZERO),
+        Err(taskfast_agent::tempo_rpc::RpcError::Rpc { code, message })
+            if code == 3 || message.to_lowercase().contains("revert") =>
+        {
+            Ok(U256::ZERO)
+        }
         Err(e) => Err(super::escalate::chain_read_err("reviewWindowOf", e)),
     }
 }
@@ -963,6 +967,198 @@ pub(super) async fn submit_work_after_handin(
                  `taskfast escrow submit-work {task_id}` (safe to run more than once)"
         ))
     })
+}
+
+#[derive(Debug, Parser)]
+pub struct PayoutApprovalArgs {
+    /// Task UUID. Must be approved (`complete` or `disbursement_pending`) and posted by this agent.
+    pub task_id: String,
+
+    /// Keystore reference (same form as `taskfast settle`).
+    #[arg(long, env = "TEMPO_KEY_SOURCE")]
+    pub keystore: Option<String>,
+
+    /// Path to keystore password file.
+    #[arg(long, env = "TASKFAST_WALLET_PASSWORD_FILE")]
+    pub wallet_password_file: Option<PathBuf>,
+
+    /// Wallet address preflight (0x-prefixed): fail if the keystore differs.
+    #[arg(long, env = "TEMPO_WALLET_ADDRESS")]
+    pub wallet_address: Option<String>,
+
+    /// Tempo RPC override. Defaults to the deployment's authenticated proxy.
+    #[arg(long, env = "TEMPO_RPC_URL")]
+    pub rpc_url: Option<String>,
+}
+
+const PAYOUT_APPROVAL_LIFETIME_SECS: u64 = 36 * 3600;
+
+const PAYOUT_FAILED_STATES: [&str; 5] = [
+    "disbursement_failed_permanent",
+    "refund_pending",
+    "refunded",
+    "failed",
+    "failed_permanent",
+];
+
+async fn payout_approval(ctx: &Ctx, args: PayoutApprovalArgs) -> CmdResult {
+    let task_id = Uuid::parse_str(&args.task_id)
+        .map_err(|e| CmdError::Usage(format!("task id must be a UUID: {e}")))?;
+    let opts = WalletOpts {
+        keystore: args.keystore.as_deref(),
+        password_file: args.wallet_password_file.as_deref(),
+        wallet_address: args.wallet_address.as_deref(),
+        rpc_url: args.rpc_url.as_deref(),
+        receipt_timeout: None,
+    };
+    let data = record_payout_approval(ctx, &task_id, &opts, false).await?;
+    Ok(Envelope::success(ctx.environment, ctx.dry_run, data))
+}
+
+pub(super) async fn payout_approval_after_approve(
+    ctx: &Ctx,
+    task_id: &Uuid,
+    opts: &WalletOpts<'_>,
+) -> Result<serde_json::Value, CmdError> {
+    record_payout_approval(ctx, task_id, opts, true)
+        .await
+        .map_err(|e| {
+            CmdError::ApprovedPayoutNotSigned(format!(
+                "task {task_id} IS approved (the server accepted it), but the payout approval was \
+                 NOT recorded: {e}. Do not approve again. Retry only this step: \
+                 `taskfast escrow payout-approval {task_id}` (safe to run more than once)"
+            ))
+        })
+}
+
+fn payout_not_needed(task_id: &Uuid, note: &str) -> serde_json::Value {
+    json!({ "action": "not_needed", "task_id": task_id.to_string(), "note": note })
+}
+
+async fn record_payout_approval(
+    ctx: &Ctx,
+    task_id: &Uuid,
+    opts: &WalletOpts<'_>,
+    auto: bool,
+) -> Result<serde_json::Value, CmdError> {
+    let client = ctx.client()?;
+    let task = match client.inner().get_task(task_id).await {
+        Ok(v) => v.into_inner(),
+        Err(e) => return Err(map_api_error(e).await.into()),
+    };
+    if auto && task.escrow_id.is_none() {
+        return Ok(json!({ "action": "skipped", "reason": "task has no escrow" }));
+    }
+    match task.status.as_deref().unwrap_or("") {
+        "complete" | "disbursement_pending" => {}
+        "settled" => return Ok(payout_not_needed(task_id, "already paid")),
+        status => {
+            return Err(CmdError::Validation {
+                code: "task_not_approved".into(),
+                message: format!(
+                    "task status is `{status}`; a payout approval is recorded only for an \
+                     approved task (`complete` or `disbursement_pending`). Nothing signed"
+                ),
+            })
+        }
+    }
+    let target = super::escalate::chain_target(&task, "nothing to approve")?;
+    let (rpc, _) = super::escalate::connect_rpc(ctx, &client, &target, opts.rpc_url).await?;
+    if review_window(&rpc, target.contract, target.escrow_id)
+        .await?
+        .is_zero()
+    {
+        return Ok(json!({
+            "action": "no_review_clock",
+            "task_id": task_id.to_string(),
+            "note": "this escrow has no review clock; no payout approval is needed",
+        }));
+    }
+
+    let keystore_path =
+        super::wallet_args::resolve_keystore_path(opts.keystore, ctx.keystore_path.as_deref());
+    let signer = super::wallet_args::load_signer_and_validate(
+        keystore_path.as_deref(),
+        opts.password_file,
+        opts.wallet_address.or(ctx.wallet_address.as_deref()),
+        "payout approval",
+    )?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| CmdError::Signing(format!("system clock is before the epoch: {e}")))?
+        .as_secs();
+    let deadline = now + PAYOUT_APPROVAL_LIFETIME_SECS;
+    let domain = DistributionDomain::new(target.chain_id_u64, target.contract);
+    let signature = sign_distribution(&signer, &domain, target.escrow_id, U256::from(deadline))?;
+    let mut data = json!({
+        "task_id": task_id.to_string(),
+        "escrow_id": format!("{:#x}", target.escrow_id),
+        "from": format!("{:#x}", signer.address()),
+        "deadline": deadline,
+    });
+
+    if ctx.dry_run {
+        data["action"] = json!("would_record_payout_approval");
+        data["domain"] = json!({
+            "chain_id": target.chain_id,
+            "verifying_contract": format!("{:#x}", target.contract),
+        });
+        data["signature"] = json!(signature);
+        return Ok(data);
+    }
+
+    let body = RecordPayoutApprovalBody {
+        signature,
+        deadline: i64::try_from(deadline)
+            .map_err(|_| CmdError::Signing("approval deadline overflows i64".into()))?,
+    };
+    match client.inner().record_payout_approval(task_id, &body).await {
+        Ok(_) => {
+            data["action"] = json!("payout_approval_recorded");
+            Ok(data)
+        }
+        Err(e) => match map_api_error(e).await {
+            taskfast_client::Error::Validation { code, message }
+                if code == "payout_not_awaiting_approval" =>
+            {
+                let current = client
+                    .inner()
+                    .get_task(task_id)
+                    .await
+                    .ok()
+                    .map(|t| t.into_inner());
+                let payment = current
+                    .as_ref()
+                    .and_then(|t| t.settlement.as_ref())
+                    .and_then(|s| s.payment_status.as_deref());
+                if payment.is_some_and(|p| PAYOUT_FAILED_STATES.contains(&p)) {
+                    return Err(CmdError::Validation { code, message });
+                }
+                let paid = payment == Some("disbursed")
+                    || current.and_then(|t| t.status).as_deref() == Some("settled");
+                Ok(payout_not_needed(
+                    task_id,
+                    if paid {
+                        "already paid"
+                    } else {
+                        "the server needs no new approval now: one is stored or a payout is underway"
+                    },
+                ))
+            }
+            taskfast_client::Error::Validation { code, message }
+                if code == "approval_lifetime_out_of_range" =>
+            {
+                Err(CmdError::Validation {
+                    code,
+                    message: format!(
+                        "{message}; the server measures from its own clock, so check this \
+                         machine's clock"
+                    ),
+                })
+            }
+            other => Err(other.into()),
+        },
+    }
 }
 
 #[cfg(test)]

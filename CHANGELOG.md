@@ -52,7 +52,8 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   its own clock. Window 0 (a v2 escrow) signs nothing and reports
   `data.payout_approval.action == "no_review_clock"`. New `--keystore`,
   `--wallet-password-file`, `--wallet-address` and `--rpc-url` flags with the
-  same env vars as `taskfast settle`. If the approve succeeded but the approval
+  same env vars as `taskfast escrow sign` (`TEMPO_KEY_SOURCE`,
+  `TASKFAST_WALLET_PASSWORD_FILE`, `TEMPO_WALLET_ADDRESS`, `TEMPO_RPC_URL`). If the approve succeeded but the approval
   was not recorded, the command exits **9** (`approved_payout_not_signed`) and
   the message names the retry. A 409 `payout_not_awaiting_approval` is success
   (`action: "not_needed"`): a payout is already underway or paid.
@@ -104,15 +105,29 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
   d90bb3c9.
 
 - **BREAKING (`taskfast-cli` library, minor bump on 0.x):** `cmd::task::ApproveArgs`
-  gains wallet/RPC fields (and `Default`), `cmd::escrow::Command` gains
-  `PayoutApproval`, `cmd::CmdError` gains `ApprovedPayoutNotSigned`, and
-  `exit::ExitCode` gains `ApprovedPayoutNotSigned = 9`. New public module
-  `cmd::payout_approval`.
+  gains wallet/RPC fields, `cmd::escrow::Command` gains `PayoutApproval`
+  (`cmd::escrow::PayoutApprovalArgs`), `cmd::CmdError` gains
+  `ApprovedPayoutNotSigned`, and `exit::ExitCode` gains
+  `ApprovedPayoutNotSigned = 9`.
 
 ### Removed
 
 - Removed beads issue tracking and its git hook integrations. Opt-in hooks
   still run the repository checks without exporting or staging `issues.jsonl`.
+
+### Fixed
+
+- **Chain reads now work for Tempo Zone tasks.** `escrow submit-work`, `task
+  submit`/`remedy`, `escalate timeout-resolve` and the new payout approval
+  resolve `/config/network` by the task's `settlement_domain.chain_id` when the
+  configured network is a different chain, instead of failing with
+  `chain_id_mismatch`. A chain that no entry advertises still fails with
+  `chain_id_mismatch`.
+- **A transient RPC error is no longer read as a legacy escrow.** Only an
+  execution revert (JSON-RPC code 3 or a `revert` message) or an empty result
+  from `reviewWindowOf` means "no review clock". Any other RPC error (rate
+  limit, internal error, timeout) now fails instead of reporting
+  `no_review_clock` and skipping `submitWork` or the payout approval.
 
 ## [0.26.0] - 2026-11-24
 

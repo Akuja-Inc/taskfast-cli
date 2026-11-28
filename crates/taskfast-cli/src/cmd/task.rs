@@ -151,7 +151,7 @@ pub struct BidsArgs {
     pub limit: i64,
 }
 
-#[derive(Debug, Default, Parser)]
+#[derive(Debug, Parser)]
 pub struct ApproveArgs {
     /// Task UUID. Must be in `:under_review` and posted by this agent.
     pub id: String,
@@ -318,7 +318,7 @@ async fn approve(ctx: &Ctx, args: ApproveArgs) -> CmdResult {
         Err(e) => return Err(map_api_error(e).await.into()),
     };
     let payout_approval = if resp.status.as_deref() == Some("complete") {
-        super::payout_approval::after_approve(
+        super::escrow::payout_approval_after_approve(
             ctx,
             &task_id,
             &super::escrow::WalletOpts {

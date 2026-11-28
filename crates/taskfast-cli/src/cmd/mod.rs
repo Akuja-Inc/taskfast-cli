@@ -46,7 +46,6 @@ pub mod init_tui;
 pub mod me;
 pub mod message;
 pub mod payment;
-pub mod payout_approval;
 pub mod ping;
 pub mod platform;
 pub mod post;
@@ -642,6 +641,7 @@ mod tests {
             "decode" => CmdError::Decode("json".into()),
             "keystore" => CmdError::Keystore("bad pw".into()),
             "signing" => CmdError::Signing("hsm".into()),
+            "approved_payout_not_signed" => CmdError::ApprovedPayoutNotSigned("x".into()),
             "unimplemented" => CmdError::Unimplemented("soon"),
             "config" => CmdError::Config(ConfigError::Io {
                 path: PathBuf::from("/x"),
@@ -662,6 +662,7 @@ mod tests {
         "decode",
         "keystore",
         "signing",
+        "approved_payout_not_signed",
         "unimplemented",
         "config",
     ];
@@ -690,6 +691,7 @@ mod tests {
                 .as_u8(),
             8
         );
+        assert_eq!(sample("approved_payout_not_signed").exit_code().as_u8(), 9);
         assert_eq!(sample("server").exit_code(), ExitCode::Server);
         assert_eq!(sample("network").exit_code(), ExitCode::Server);
         assert_eq!(sample("decode").exit_code(), ExitCode::Server);
