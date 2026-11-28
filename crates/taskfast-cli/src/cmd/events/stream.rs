@@ -198,8 +198,7 @@ async fn run_with(
             return ExitCode::from(1);
         }
 
-        if let Err(e) = emit_sentinel(out, "reconnecting") {
-            report_output_error(&e);
+        if emit_sentinel(out, "reconnecting").is_err() {
             return crate::exit::ExitCode::Server.into();
         }
         let wait = backoff.next_wait();
@@ -211,28 +210,6 @@ async fn run_with(
             }
         }
     }
-}
-
-fn output_error_line(e: &std::io::Error) -> Option<String> {
-    if e.kind() == std::io::ErrorKind::BrokenPipe {
-        return None;
-    }
-    Some(format!("taskfast: events stream: stdout write failed: {e}"))
-}
-
-fn write_diagnostic(err: &mut dyn Write, e: &std::io::Error) {
-    if let Some(line) = output_error_line(e) {
-        let _ = writeln!(err, "{line}");
-    }
-}
-
-fn report_output_error(e: &std::io::Error) {
-    write_diagnostic(&mut std::io::stderr(), e);
-}
-
-fn output_failed(e: &std::io::Error) -> ConnectOutcome {
-    report_output_error(e);
-    ConnectOutcome::OutputClosed
 }
 
 enum ConnectOutcome {
@@ -330,8 +307,8 @@ async fn run_once(
                                     "WS text frame was not valid JSON; surfacing as unparseable"
                                 );
                                 intake.record_unparseable();
-                                if let Err(e) = emit_unparseable(out, &text, &e.to_string()) {
-                                    return output_failed(&e);
+                                if emit_unparseable(out, &text, &e.to_string()).is_err() {
+                                    return ConnectOutcome::OutputClosed;
                                 }
                                 continue;
                             }
@@ -343,8 +320,8 @@ async fn run_once(
                                     let sentinel = if *ever_joined { "resumed" } else { "connected" };
                                     *ever_joined = true;
                                     backoff.reset();
-                                    if let Err(e) = emit_sentinel(out, sentinel) {
-                                        return output_failed(&e);
+                                    if emit_sentinel(out, sentinel).is_err() {
+                                        return ConnectOutcome::OutputClosed;
                                     }
                                 }
                             }
@@ -363,8 +340,8 @@ async fn run_once(
                                         }
                                     }
                                     super::intake::StreamItemOutcome::Accepted { event_id } => {
-                                        if let Err(e) = emit_event(out, &payload) {
-                                            return output_failed(&e);
+                                        if emit_event(out, &payload).is_err() {
+                                            return ConnectOutcome::OutputClosed;
                                         }
                                         intake.mark_stream_event_seen(&event_id);
                                         if once {
@@ -373,8 +350,8 @@ async fn run_once(
                                         }
                                     }
                                     super::intake::StreamItemOutcome::Malformed { error } => {
-                                        if let Err(e) = emit_unparseable(out, &payload.to_string(), &error) {
-                                            return output_failed(&e);
+                                        if emit_unparseable(out, &payload.to_string(), &error).is_err() {
+                                            return ConnectOutcome::OutputClosed;
                                         }
                                         if once {
                                             let _ = sink.send(Message::Close(None)).await;
@@ -384,8 +361,8 @@ async fn run_once(
                                 }
                             }
                             FrameKind::Acked(id) => {
-                                if let Err(e) = emit_event(out, &json!({ "sentinel": "acked", "event_id": id })) {
-                                    return output_failed(&e);
+                                if emit_event(out, &json!({ "sentinel": "acked", "event_id": id })).is_err() {
+                                    return ConnectOutcome::OutputClosed;
                                 }
                             }
                             FrameKind::Ignored => {}
@@ -961,33 +938,6 @@ mod tests {
         assert_eq!(b.next_wait(), Duration::from_secs(2));
     }
 
-    #[test]
-    fn broken_pipe_is_silent_and_other_output_errors_are_reported() {
-        let broken = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
-        assert_eq!(output_error_line(&broken), None);
-        let full = std::io::Error::from_raw_os_error(28);
-        assert!(output_error_line(&full)
-            .unwrap()
-            .starts_with("taskfast: events stream: stdout write failed:"));
-    }
-
-    struct AlwaysFails;
-
-    impl Write for AlwaysFails {
-        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::from_raw_os_error(28))
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Err(std::io::Error::from_raw_os_error(28))
-        }
-    }
-
-    #[test]
-    fn a_failing_diagnostic_stream_is_ignored() {
-        write_diagnostic(&mut AlwaysFails, &std::io::Error::from_raw_os_error(28));
-    }
-
     #[allow(clippy::result_large_err)]
     async fn join_once_then_refuse(listener: TcpListener) {
         let (tcp, _) = listener.accept().await.unwrap();
@@ -1012,8 +962,17 @@ mod tests {
         }
         drop(ws);
         loop {
-            let (refused, _) = listener.accept().await.unwrap();
-            drop(refused);
+            let (tcp, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_hdr_async(tcp, |_: &Request, mut resp: Response| {
+                resp.headers_mut().insert(
+                    "sec-websocket-protocol",
+                    HeaderValue::from_static("taskfast.v1"),
+                );
+                Ok(resp)
+            })
+            .await
+            .unwrap();
+            drop(ws);
         }
     }
 

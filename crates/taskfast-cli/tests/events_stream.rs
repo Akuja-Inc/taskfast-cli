@@ -190,7 +190,7 @@ async fn closed_stdout_pipe_exits_6_without_recording_the_event() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn full_stdout_and_stderr_still_exit_6() {
+async fn full_stdout_exits_6() {
     let _serial = BINARY_TESTS.lock().await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -211,7 +211,7 @@ async fn full_stdout_and_stderr_still_exit_6() {
         .env("TASKFAST_CONFIG", cfg.path().join("config.json"))
         .stdin(Stdio::null())
         .stdout(Stdio::from(full()))
-        .stderr(Stdio::from(full()))
+        .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
