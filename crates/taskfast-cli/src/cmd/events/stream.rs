@@ -285,7 +285,6 @@ async fn run_once(
                                 );
                                 intake.record_unparseable();
                                 if emit_unparseable(out, &text, &e.to_string()).is_err() {
-                                    let _ = sink.send(Message::Close(None)).await;
                                     return ConnectOutcome::OutputClosed;
                                 }
                                 continue;
@@ -297,7 +296,6 @@ async fn run_once(
                                     join_acked = true;
                                     let sentinel = if first_connect { "connected" } else { "resumed" };
                                     if emit_sentinel(out, sentinel).is_err() {
-                                        let _ = sink.send(Message::Close(None)).await;
                                         return ConnectOutcome::OutputClosed;
                                     }
                                 }
@@ -318,7 +316,6 @@ async fn run_once(
                                     }
                                     super::intake::StreamItemOutcome::Accepted { event_id } => {
                                         if emit_event(out, &payload).is_err() {
-                                            let _ = sink.send(Message::Close(None)).await;
                                             return ConnectOutcome::OutputClosed;
                                         }
                                         intake.mark_stream_event_seen(&event_id);
@@ -329,7 +326,6 @@ async fn run_once(
                                     }
                                     super::intake::StreamItemOutcome::Malformed { error } => {
                                         if emit_unparseable(out, &payload.to_string(), &error).is_err() {
-                                            let _ = sink.send(Message::Close(None)).await;
                                             return ConnectOutcome::OutputClosed;
                                         }
                                         if once {
@@ -341,7 +337,6 @@ async fn run_once(
                             }
                             FrameKind::Acked(id) => {
                                 if emit_event(out, &json!({ "sentinel": "acked", "event_id": id })).is_err() {
-                                    let _ = sink.send(Message::Close(None)).await;
                                     return ConnectOutcome::OutputClosed;
                                 }
                             }
@@ -499,7 +494,7 @@ fn emit_sentinel(out: &mut dyn Write, kind: &str) -> std::io::Result<()> {
     emit_event(out, &json!({ "sentinel": kind }))
 }
 
-fn emit_event(out: &mut dyn Write, payload: &Value) -> std::io::Result<()> {
+fn emit_event(out: &mut dyn Write, payload: &impl serde::Serialize) -> std::io::Result<()> {
     let mut buf = serde_json::to_vec(payload).map_err(std::io::Error::from)?;
     buf.push(b'\n');
     out.write_all(&buf)?;
@@ -519,12 +514,7 @@ fn emit_error_envelope(out: &mut dyn Write, ctx: &Ctx, err: &CmdError) {
         return;
     }
     let env = crate::envelope::Envelope::error(ctx.environment, ctx.dry_run, err);
-    let Ok(mut buf) = serde_json::to_vec(&env) else {
-        return;
-    };
-    buf.push(b'\n');
-    let _ = out.write_all(&buf);
-    let _ = out.flush();
+    let _ = emit_event(out, &env);
 }
 
 #[derive(Clone)]
@@ -849,6 +839,66 @@ mod tests {
         .await
         .expect("stream timed out waiting to exit under --once");
         assert_eq!(code, ExitCode::from(6));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::result_large_err)]
+    async fn failed_write_closes_without_a_close_frame_or_ack() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws =
+                tokio_tungstenite::accept_hdr_async(tcp, |_: &Request, mut resp: Response| {
+                    resp.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        HeaderValue::from_static("taskfast.v1"),
+                    );
+                    Ok(resp)
+                })
+                .await
+                .unwrap();
+            while let Some(Ok(msg)) = ws.next().await {
+                if let Message::Text(raw) = &msg {
+                    let frame: Value = serde_json::from_str(raw).unwrap();
+                    if frame[3].as_str() == Some("phx_join") {
+                        let reply = json!([&frame[0], &frame[1], "agent:me", "phx_reply",
+                            { "status": "ok", "response": {} }]);
+                        ws.send(text(reply)).await.unwrap();
+                        ws.send(push(EVENT_A)).await.unwrap();
+                    }
+                }
+                let _ = tx.send(msg);
+            }
+        });
+        let cfg = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(port, cfg.path());
+        let mut failing = EventFlushFails {
+            last_was_event: false,
+        };
+
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_with(&ctx, args(false), &mut failing, || {
+                (None, ShutdownToken::new())
+            }),
+        )
+        .await
+        .expect("stream did not finish");
+        assert_eq!(code, ExitCode::from(6));
+
+        sleep(Duration::from_millis(200)).await;
+        let mut received = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            received.push(msg);
+        }
+        assert!(
+            received
+                .iter()
+                .all(|m| matches!(m, Message::Text(t) if t.contains("phx_join"))),
+            "{received:?}"
+        );
     }
 
     struct UnparseableWriteFails;

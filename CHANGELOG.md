@@ -47,11 +47,13 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ### Fixed
 
-- **`events stream` never loses an event to a failed write.** An event now counts
-  as seen only after its line is written and flushed. If stdout is closed or the
-  write fails, the stream stops with exit code 6 instead of exiting 0 or
-  reconnecting, and a restarted stream prints the replayed event instead of
-  acking it unseen. The same applies to `unparseable` records under `--once`.
+- **`events stream` stops on a failed write.** An event now counts as seen only
+  after its line is written and flushed. If a write for an event, an
+  `unparseable` record or a non-terminal sentinel (`connected`, `resumed`,
+  `reconnecting`, `acked`) fails, the stream stops with exit code 6 instead of
+  exiting 0 or reconnecting. If the server replays the event whose write failed,
+  a restarted stream prints it instead of acking it unseen. A failed `closing`
+  or `auth_failed` write is still best effort.
 
 - `escalate sign` resolved the deployment's proxy by the environment's network
   entry instead of the server-issued chain id, so a Tempo Zone task failed

@@ -21,6 +21,8 @@ use tokio_tungstenite::tungstenite::Message;
 const EVENT_A: &str = "00000000-0000-0000-0000-0000000000a1";
 const EVENT_B: &str = "00000000-0000-0000-0000-0000000000b2";
 
+static BINARY_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn text(frame: Value) -> Message {
     Message::Text(frame.to_string().into())
 }
@@ -38,7 +40,8 @@ fn push(event_id: &str) -> Message {
 /// Fake `AgentChannel`: join → push A → only on `ack` for A, reply and push B.
 // The handshake callback's large `Err` type is fixed by tungstenite's `Callback` trait.
 #[allow(clippy::result_large_err)]
-async fn fake_channel(listener: TcpListener) {
+async fn fake_channel(listener: TcpListener, gate: Option<tokio::sync::oneshot::Receiver<()>>) {
+    let mut gate = gate;
     let (tcp, _) = listener.accept().await.unwrap();
     let mut ws = tokio_tungstenite::accept_hdr_async(tcp, |_: &Request, mut resp: Response| {
         // The CLI treats a handshake without this subprotocol as an auth failure.
@@ -60,6 +63,9 @@ async fn fake_channel(listener: TcpListener) {
                 let reply = json!([join_ref, msg_ref, "agent:me", "phx_reply",
                     { "status": "ok", "response": {} }]);
                 ws.send(text(reply)).await.unwrap();
+                if let Some(rx) = gate.take() {
+                    let _ = rx.await;
+                }
                 ws.send(push(EVENT_A)).await.unwrap();
             }
             "ack" if payload["event_id"] == EVENT_A => {
@@ -86,9 +92,10 @@ async fn next_json(lines: &mut Lines<BufReader<ChildStdout>>) -> Value {
 
 #[tokio::test]
 async fn ack_stdin_acks_over_socket_and_unblocks_next_event() {
+    let _serial = BINARY_TESTS.lock().await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    tokio::spawn(fake_channel(listener));
+    tokio::spawn(fake_channel(listener, None));
     let cfg = tempfile::tempdir().unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_taskfast"))
@@ -141,4 +148,42 @@ async fn ack_stdin_acks_over_socket_and_unblocks_next_event() {
         .unwrap();
     assert!(status.success(), "{status:?}");
     drop(stdin);
+}
+
+#[tokio::test]
+async fn closed_stdout_pipe_exits_6_without_recording_the_event() {
+    let _serial = BINARY_TESTS.lock().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (go, gate) = tokio::sync::oneshot::channel();
+    tokio::spawn(fake_channel(listener, Some(gate)));
+    let cfg = tempfile::tempdir().unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_taskfast"))
+        .args(["--env", "local", "--allow-custom-endpoints", "--no-trace"])
+        .args(["--api-base", &format!("http://127.0.0.1:{port}")])
+        .args(["--api-key", "test-key"])
+        .args(["events", "stream"])
+        .env("TASKFAST_CONFIG", cfg.path().join("config.json"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    assert_eq!(
+        next_json(&mut lines).await,
+        json!({ "sentinel": "connected" })
+    );
+    drop(lines);
+    go.send(()).unwrap();
+
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("stream hung after its stdout closed")
+        .unwrap();
+    assert_eq!(status.code(), Some(6));
+    let seen = std::fs::read_to_string(cfg.path().join("events.seen")).unwrap_or_default();
+    assert!(!seen.contains(EVENT_A), "{seen:?}");
 }
