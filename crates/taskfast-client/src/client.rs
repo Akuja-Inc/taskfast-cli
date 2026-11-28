@@ -203,7 +203,7 @@ impl TaskFastClient {
     /// `classify_response` funnel.
     pub async fn get_user_profile(&self) -> Result<Option<UserProfile>> {
         let url = format!("{}/users/me", self.inner.baseurl());
-        let resp = self.inner.client().get(url).send().await?;
+        let resp = self.send(self.inner.client().get(url)).await?;
         let status = resp.status();
         if status.is_success() {
             let bytes = read_body_capped(resp, MAX_RESPONSE_BYTES).await?;
@@ -235,7 +235,9 @@ impl TaskFastClient {
             .mime_str(&content_type)
             .map_err(|e| Error::Server(format!("invalid content-type: {e}")))?;
         let form = reqwest::multipart::Form::new().part("file", part);
-        let resp = self.inner.client().post(url).multipart(form).send().await?;
+        let resp = self
+            .send(self.inner.client().post(url).multipart(form))
+            .await?;
         if resp.status().is_success() {
             let bytes = read_body_capped(resp, MAX_RESPONSE_BYTES).await?;
             Ok(serde_json::from_slice::<api::types::Artifact>(&bytes)?)
@@ -269,7 +271,7 @@ impl TaskFastClient {
             "content_type": content_type,
             "size_bytes": size_bytes,
         });
-        let resp = self.inner.client().post(url).json(&body).send().await?;
+        let resp = self.send(self.inner.client().post(url).json(&body)).await?;
         let status = resp.status();
         if status.is_success() {
             let bytes = read_body_capped(resp, MAX_RESPONSE_BYTES).await?;
@@ -303,11 +305,12 @@ impl TaskFastClient {
         let mut delay = self.policy.base_delay;
         loop {
             let err = match self
-                .inner
-                .client()
-                .post(&url)
-                .timeout(COMPLETE_REQUEST_TIMEOUT)
-                .send()
+                .send(
+                    self.inner
+                        .client()
+                        .post(&url)
+                        .timeout(COMPLETE_REQUEST_TIMEOUT),
+                )
                 .await
             {
                 Ok(resp) if resp.status().is_success() => {
@@ -323,7 +326,7 @@ impl TaskFastClient {
                     classify_response(resp).await
                 }
                 Ok(resp) => return Err(classify_response(resp).await),
-                Err(e) => Error::Network(e),
+                Err(e) => e,
             };
             if jiff::Timestamp::now() + delay >= expires_at {
                 return Err(err);
@@ -352,7 +355,7 @@ impl TaskFastClient {
         self.network_cfg
             .get_or_try_init(|| async {
                 let url = format!("{}/config/network", self.inner.baseurl());
-                let resp = self.inner.client().get(url).send().await?;
+                let resp = self.send(self.inner.client().get(url)).await?;
                 if !resp.status().is_success() {
                     return Err(classify_response(resp).await);
                 }
@@ -369,12 +372,18 @@ impl TaskFastClient {
     /// added after this client's spec was vendored (gh#172).
     pub async fn get_agent_profile_raw(&self) -> Result<serde_json::Value> {
         let url = format!("{}/agents/me", self.inner.baseurl());
-        let resp = self.inner.client().get(url).send().await?;
+        let resp = self.send(self.inner.client().get(url)).await?;
         if !resp.status().is_success() {
             return Err(classify_response(resp).await);
         }
         let bytes = read_body_capped(resp, MAX_RESPONSE_BYTES).await?;
         Ok(serde_json::from_slice::<serde_json::Value>(&bytes)?)
+    }
+
+    async fn send(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        let result = req.send().await;
+        crate::corr::record_corr(&result);
+        Ok(result?)
     }
 
     /// `GET /agents/me/events` — raw JSON escape hatch.
@@ -401,7 +410,7 @@ impl TaskFastClient {
         if !query.is_empty() {
             req = req.query(&query);
         }
-        let resp = req.send().await?;
+        let resp = self.send(req).await?;
         if !resp.status().is_success() {
             return Err(classify_response(resp).await);
         }
@@ -519,11 +528,6 @@ pub enum NewAgentOutcome {
 /// the ceiling — no need for a trusted `Content-Length` header (chunked
 /// bodies from a malicious server carry none).
 async fn read_body_capped(mut resp: reqwest::Response, cap: usize) -> Result<Vec<u8>> {
-    // Capture the server x-request-id for the CLI trace (gh#85). Generated
-    // methods are covered by progenitor's post-hook; the hand-rolled methods
-    // all funnel their bodies (success and error, via classify_response)
-    // through here, so this one line covers every hand-rolled path.
-    crate::corr::record_corr_response(&resp);
     let mut buf = Vec::new();
     while let Some(chunk) = resp.chunk().await? {
         if buf.len().saturating_add(chunk.len()) > cap {
