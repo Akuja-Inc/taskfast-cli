@@ -11,7 +11,7 @@
 //!      [`crate::errors::Error`] by reading the response body of an
 //!      `UnexpectedResponse` and classifying by status code. The normalizer
 //!      strips non-2xx response declarations from the spec (see
-//!      `xtask::normalize_spec`), so every TaskFast failure arrives here as
+//!      `taskfast_codegen::normalize_spec`), so every TaskFast failure arrives as
 //!      `UnexpectedResponse` — we are the single funnel.
 //!   3. **Retry** — [`TaskFastClient::call_with_retry`] runs a closure
 //!      under the configured [`RetryPolicy`], honoring 429 `Retry-After`
@@ -360,31 +360,6 @@ impl TaskFastClient {
                 Ok(serde_json::from_slice::<NetworkConfigResponse>(&bytes)?)
             })
             .await
-    }
-
-    /// `POST /rpc/{network}` — forward a JSON-RPC call through the
-    /// operator's upstream proxy.
-    ///
-    /// `network` is the key into the `fetch_network_config` map
-    /// (`"testnet"` / `"mainnet"`). Response body is returned verbatim as
-    /// [`serde_json::Value`] — the proxy forwards the upstream JSON-RPC
-    /// envelope without touching it, so callers parse `result` / `error`
-    /// per the JSON-RPC 2.0 spec.
-    ///
-    /// 429 surfaces as [`Error::RateLimited`] with the `Retry-After`
-    /// header honored by `classify_response`; 5xx as [`Error::Server`].
-    pub async fn post_json_rpc(
-        &self,
-        network: &str,
-        request: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let url = format!("{}/rpc/{}", self.inner.baseurl(), network);
-        let resp = self.inner.client().post(url).json(request).send().await?;
-        if !resp.status().is_success() {
-            return Err(classify_response(resp).await);
-        }
-        let bytes = read_body_capped(resp, MAX_RESPONSE_BYTES).await?;
-        Ok(serde_json::from_slice::<serde_json::Value>(&bytes)?)
     }
 
     /// `GET /agents/me` — raw JSON escape hatch.

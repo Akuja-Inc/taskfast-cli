@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: MIT
 //! TaskFast typed HTTP client.
 //!
-//! The `api` module is generated from `spec/openapi.yaml` at build time by
-//! `build.rs`. The rewritten spec (error-alias folding) is produced in-memory
-//! via `xtask::normalize_spec` so the on-disk spec stays authoritative.
+//! `build.rs` uses `taskfast_codegen::normalize_spec` and progenitor to generate
+//! [`api`] from `spec/openapi.yaml` without changing the spec on disk.
 //!
-//! Use [`api::Client`] to issue requests; cross-cutting concerns
-//! ([`errors::Error`], [`retry::with_backoff`]) live in sibling modules and
-//! will be composed over the generated client in a follow-up.
+//! [`TaskFastClient`] wraps [`api::Client`] with authentication and retry support.
+//! [`map_api_error`] converts generated client errors into [`Error`].
 
 pub mod client;
 pub mod corr;
@@ -56,9 +54,8 @@ mod tests {
 
 /// Generated typed client + DTOs for the TaskFast OpenAPI spec.
 ///
-/// Produced by `progenitor` from `spec/openapi.yaml` at build time; see
-/// `build.rs` and `xtask::normalize_spec`. Do not edit by hand — regenerate
-/// by changing the spec.
+/// `build.rs` normalizes `spec/openapi.yaml` with `taskfast_codegen::normalize_spec`
+/// and passes it to progenitor at build time.
 #[allow(
     clippy::all,
     clippy::pedantic,

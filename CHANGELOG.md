@@ -13,6 +13,19 @@ record of what changed. Released tags are named `taskfast-cli-v<version>`.
 
 ## Unreleased
 
+### Fixed
+
+- `task retry-fee` now points to `taskfast fee retry <id>` without requiring a
+  pre-signed voucher. The replacement command can sign the fee transfer locally.
+
+### Removed
+
+- **BREAKING (Rust):** Removed the unused `taskfast-agent::poster` and
+  `taskfast-agent::retry` modules, the event stream and its options and defaults,
+  `TaskFastClient::post_json_rpc`, and the unused `platform::Args` and
+  `wallet::Args` types in `taskfast-cli`. The CLI commands and single-page event
+  reads remain available.
+
 ## [0.27.0] - 2026-11-28
 
 ### Added
